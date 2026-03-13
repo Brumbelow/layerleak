@@ -22,7 +22,35 @@ type Request struct {
 	Detectors    detectors.Set
 	Logger       *slog.Logger
 	MaxFileBytes int64
+	Progress     ProgressFunc
 }
+
+type ProgressPhase string
+
+const (
+	ProgressPhaseResolvingReference ProgressPhase = "resolving_reference"
+	ProgressPhaseSelectingManifests ProgressPhase = "selecting_manifests"
+	ProgressPhaseManifestStarted    ProgressPhase = "manifest_started"
+	ProgressPhaseManifestCompleted  ProgressPhase = "manifest_completed"
+	ProgressPhaseManifestFailed     ProgressPhase = "manifest_failed"
+	ProgressPhaseCompleted          ProgressPhase = "completed"
+)
+
+type ProgressUpdate struct {
+	Phase                 ProgressPhase
+	Repository            string
+	RepositoriesCompleted int
+	RepositoriesTotal     int
+	ManifestCompleted     int
+	ManifestFailed        int
+	ManifestTotal         int
+	FindingsFound         int
+	CurrentPlatform       manifest.Platform
+	CurrentManifestDigest string
+	Message               string
+}
+
+type ProgressFunc func(ProgressUpdate)
 
 type Result struct {
 	RequestedReference     string                     `json:"requested_reference"`
@@ -52,6 +80,13 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	if request.MaxFileBytes <= 0 {
 		request.MaxFileBytes = 1 << 20
 	}
+
+	emitProgress(request, ProgressUpdate{
+		Phase:             ProgressPhaseResolvingReference,
+		Repository:        request.Reference.Repository,
+		RepositoriesTotal: 1,
+		Message:           "Resolving image reference",
+	})
 
 	rootResponse, err := request.Registry.FetchManifest(ctx, request.Reference.Repository, request.Reference.Identifier())
 	if err != nil {
@@ -102,9 +137,30 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	}
 
 	result.ManifestCount = len(targets)
+	emitProgress(request, ProgressUpdate{
+		Phase:             ProgressPhaseSelectingManifests,
+		Repository:        request.Reference.Repository,
+		RepositoriesTotal: 1,
+		ManifestTotal:     result.ManifestCount,
+		Message:           "Selected manifests",
+	})
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
+	findingsFound := 0
 	for _, target := range targets {
+		emitProgress(request, ProgressUpdate{
+			Phase:                 ProgressPhaseManifestStarted,
+			Repository:            request.Reference.Repository,
+			RepositoriesTotal:     1,
+			ManifestCompleted:     result.CompletedManifestCount,
+			ManifestFailed:        result.FailedManifestCount,
+			ManifestTotal:         result.ManifestCount,
+			FindingsFound:         findingsFound,
+			CurrentPlatform:       target.descriptor.Platform,
+			CurrentManifestDigest: target.descriptor.Digest,
+			Message:               manifestStatusMessage("Scanning", target.descriptor),
+		})
+
 		platformResult, platformFindings, err := scanManifest(ctx, request, target.descriptor, target.manifest)
 		if err != nil {
 			result.PlatformResults = append(result.PlatformResults, PlatformResult{
@@ -113,12 +169,37 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 				Error:          err.Error(),
 			})
 			result.FailedManifestCount++
+			emitProgress(request, ProgressUpdate{
+				Phase:                 ProgressPhaseManifestFailed,
+				Repository:            request.Reference.Repository,
+				RepositoriesTotal:     1,
+				ManifestCompleted:     result.CompletedManifestCount,
+				ManifestFailed:        result.FailedManifestCount,
+				ManifestTotal:         result.ManifestCount,
+				FindingsFound:         findingsFound,
+				CurrentPlatform:       target.descriptor.Platform,
+				CurrentManifestDigest: target.descriptor.Digest,
+				Message:               err.Error(),
+			})
 			continue
 		}
 
 		result.PlatformResults = append(result.PlatformResults, platformResult)
 		result.CompletedManifestCount++
+		findingsFound += platformResult.FindingsCount
 		allDetailedFindings = append(allDetailedFindings, platformFindings...)
+		emitProgress(request, ProgressUpdate{
+			Phase:                 ProgressPhaseManifestCompleted,
+			Repository:            request.Reference.Repository,
+			RepositoriesTotal:     1,
+			ManifestCompleted:     result.CompletedManifestCount,
+			ManifestFailed:        result.FailedManifestCount,
+			ManifestTotal:         result.ManifestCount,
+			FindingsFound:         findingsFound,
+			CurrentPlatform:       platformResult.Platform,
+			CurrentManifestDigest: platformResult.ManifestDigest,
+			Message:               manifestStatusMessage("Completed", manifest.Descriptor{Digest: platformResult.ManifestDigest, Platform: platformResult.Platform}),
+		})
 	}
 
 	if result.CompletedManifestCount == 0 {
@@ -133,6 +214,17 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	result.TotalFindings = len(result.Findings)
 	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
 	sortPlatformResults(result.PlatformResults)
+	emitProgress(request, ProgressUpdate{
+		Phase:                 ProgressPhaseCompleted,
+		Repository:            request.Reference.Repository,
+		RepositoriesCompleted: 1,
+		RepositoriesTotal:     1,
+		ManifestCompleted:     result.CompletedManifestCount,
+		ManifestFailed:        result.FailedManifestCount,
+		ManifestTotal:         result.ManifestCount,
+		FindingsFound:         result.TotalFindings,
+		Message:               "Scan complete",
+	})
 
 	return result, nil
 }
@@ -357,4 +449,28 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func emitProgress(request Request, update ProgressUpdate) {
+	if request.Progress == nil {
+		return
+	}
+	if update.RepositoriesTotal <= 0 {
+		update.RepositoriesTotal = 1
+	}
+	if update.Repository == "" {
+		update.Repository = request.Reference.Repository
+	}
+	request.Progress(update)
+}
+
+func manifestStatusMessage(prefix string, descriptor manifest.Descriptor) string {
+	target := descriptor.Platform.String()
+	if target == "" {
+		target = descriptor.Digest
+	}
+	if target == "" {
+		return prefix
+	}
+	return prefix + " " + target
 }

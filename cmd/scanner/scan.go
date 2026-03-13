@@ -13,7 +13,6 @@ import (
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/registry"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -49,21 +48,22 @@ func newScanCmd() *cobra.Command {
 				},
 			})
 			detectorSet := detectors.Default()
-			store := storage.NewNoopStore()
 
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
 			}
 
-			logger.InfoContext(ctx, "starting image scan",
-				"image_ref", ref.String(),
-				"platform", platform,
-				"format", format,
-				"detectors", detectorSet.Len(),
-				"storage", store.Name(),
-				"database_configured", cfg.DatabaseURL != "",
-			)
+			progress := newProgressRenderer(cmd.ErrOrStderr())
+			if err := progress.Start(progressSnapshot{
+				repository:        ref.Repository,
+				repositoriesTotal: 1,
+				phase:             "Starting",
+				message:           "Preparing scan",
+			}); err != nil {
+				return err
+			}
+			defer progress.Finish()
 
 			result, err := scanner.Scan(ctx, scanner.Request{
 				Reference:    ref,
@@ -72,20 +72,64 @@ func newScanCmd() *cobra.Command {
 				Detectors:    detectorSet,
 				Logger:       logger,
 				MaxFileBytes: cfg.MaxFileBytes,
+				Progress: func(update scanner.ProgressUpdate) {
+					_ = progress.UpdateFromScan(update)
+				},
 			})
 			if err != nil {
+				_ = progress.Update(progressSnapshot{
+					repository:            ref.Repository,
+					repositoriesTotal:     1,
+					repositoriesCompleted: 1,
+					phase:                 "Error",
+					message:               err.Error(),
+				})
+				return err
+			}
+
+			if err := progress.Update(progressSnapshot{
+				repository:            ref.Repository,
+				repositoriesTotal:     1,
+				repositoriesCompleted: 1,
+				manifestCompleted:     result.CompletedManifestCount,
+				manifestFailed:        result.FailedManifestCount,
+				manifestTotal:         result.ManifestCount,
+				findingsFound:         result.TotalFindings,
+				phase:                 "Saving Results",
+				message:               "Writing findings file",
+			}); err != nil {
 				return err
 			}
 
 			resultPath, err := writeResultFile(cfg.FindingsDir, result)
 			if err != nil {
+				_ = progress.Update(progressSnapshot{
+					repository:            ref.Repository,
+					repositoriesTotal:     1,
+					repositoriesCompleted: 1,
+					manifestCompleted:     result.CompletedManifestCount,
+					manifestFailed:        result.FailedManifestCount,
+					manifestTotal:         result.ManifestCount,
+					findingsFound:         result.TotalFindings,
+					phase:                 "Error",
+					message:               err.Error(),
+				})
 				return err
 			}
 
-			logger.InfoContext(ctx, "saved scan result",
-				"result_path", resultPath,
-				"total_findings", result.TotalFindings,
-			)
+			if err := progress.Update(progressSnapshot{
+				repository:            ref.Repository,
+				repositoriesTotal:     1,
+				repositoriesCompleted: 1,
+				manifestCompleted:     result.CompletedManifestCount,
+				manifestFailed:        result.FailedManifestCount,
+				manifestTotal:         result.ManifestCount,
+				findingsFound:         result.TotalFindings,
+				phase:                 "Saved",
+				message:               savedResultMessage(resultPath),
+			}); err != nil {
+				return err
+			}
 
 			switch format {
 			case "json":

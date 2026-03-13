@@ -114,6 +114,7 @@ func TestScanMultiArchImage(t *testing.T) {
 		t.Fatalf("ParseReference() error = %v", err)
 	}
 
+	progressUpdates := make([]ProgressUpdate, 0)
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		Registry: registry.NewClient(registry.Options{
@@ -124,6 +125,9 @@ func TestScanMultiArchImage(t *testing.T) {
 		}),
 		Detectors:    detectors.Default(),
 		MaxFileBytes: 1 << 20,
+		Progress: func(update ProgressUpdate) {
+			progressUpdates = append(progressUpdates, update)
+		},
 	})
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
@@ -177,6 +181,19 @@ func TestScanMultiArchImage(t *testing.T) {
 	}
 	if !foundRaw {
 		t.Fatal("expected raw finding details for env token")
+	}
+	if len(progressUpdates) == 0 {
+		t.Fatal("len(progressUpdates) = 0")
+	}
+	lastProgress := progressUpdates[len(progressUpdates)-1]
+	if lastProgress.Phase != ProgressPhaseCompleted {
+		t.Fatalf("lastProgress.Phase = %q", lastProgress.Phase)
+	}
+	if lastProgress.FindingsFound != result.TotalFindings {
+		t.Fatalf("lastProgress.FindingsFound = %d", lastProgress.FindingsFound)
+	}
+	if lastProgress.ManifestCompleted != result.CompletedManifestCount {
+		t.Fatalf("lastProgress.ManifestCompleted = %d", lastProgress.ManifestCompleted)
 	}
 }
 

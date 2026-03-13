@@ -68,6 +68,9 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	if !strings.Contains(stdout.String(), `"requested_digest"`) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "://LAYERLEAK") {
+		t.Fatalf("stdout missing progress logo: %q", stdout.String())
+	}
 	if strings.Contains(stdout.String(), "ghp_123456789012345678901234567890123456") {
 		t.Fatalf("stdout leaked raw secret: %q", stdout.String())
 	}

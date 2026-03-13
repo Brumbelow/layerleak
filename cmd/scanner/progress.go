@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
 )
 
 const layerLeakLogo = `
@@ -19,20 +19,23 @@ const layerLeakLogo = `
 ://LAYERLEAK
 `
 
-const progressBlockLines = 6
+const progressBlockLines = 8
 
 type progressSnapshot struct {
-	repository            string
-	repositoriesCompleted int
-	repositoriesTotal     int
-	manifestCompleted     int
-	manifestFailed        int
-	manifestTotal         int
-	findingsFound         int
-	currentManifest       string
-	currentPlatform       string
-	phase                 string
-	message               string
+	repository       string
+	tagsCompleted    int
+	tagsFailed       int
+	tagsTotal        int
+	targetsCompleted int
+	targetsFailed    int
+	targetsTotal     int
+	findingsFound    int
+	currentTag       string
+	currentReference string
+	currentManifest  string
+	currentPlatform  string
+	phase            string
+	message          string
 }
 
 type progressRenderer struct {
@@ -65,15 +68,18 @@ func (r *progressRenderer) Start(state progressSnapshot) error {
 	return r.render()
 }
 
-func (r *progressRenderer) UpdateFromScan(update scanner.ProgressUpdate) error {
+func (r *progressRenderer) UpdateFromJob(update jobs.ProgressUpdate) error {
 	state := r.state
 	state.repository = update.Repository
-	state.repositoriesCompleted = update.RepositoriesCompleted
-	state.repositoriesTotal = update.RepositoriesTotal
-	state.manifestCompleted = update.ManifestCompleted
-	state.manifestFailed = update.ManifestFailed
-	state.manifestTotal = update.ManifestTotal
+	state.tagsCompleted = update.TagsCompleted
+	state.tagsFailed = update.TagsFailed
+	state.tagsTotal = update.TagsTotal
+	state.targetsCompleted = update.TargetsCompleted
+	state.targetsFailed = update.TargetsFailed
+	state.targetsTotal = update.TargetsTotal
 	state.findingsFound = update.FindingsFound
+	state.currentTag = update.CurrentTag
+	state.currentReference = update.CurrentReference
 	state.currentManifest = update.CurrentManifestDigest
 	state.currentPlatform = update.CurrentPlatform.String()
 	state.phase = progressPhaseLabel(update.Phase)
@@ -119,38 +125,35 @@ func (r *progressRenderer) render() error {
 }
 
 func (r *progressRenderer) buildLines() []string {
-	repoTotal := r.state.repositoriesTotal
-	if repoTotal <= 0 {
-		repoTotal = 1
-	}
-	manifestLabel := fmt.Sprintf("%d/%d complete, %d failed", r.state.manifestCompleted, maxInt(r.state.manifestTotal, 0), r.state.manifestFailed)
-	if r.state.manifestTotal <= 0 {
-		manifestLabel = "waiting for manifest selection"
-	}
+	tagLabel := progressLabel(r.state.tagsCompleted, r.state.tagsTotal, r.state.tagsFailed, "waiting for tag enumeration")
+	targetLabel := progressLabel(r.state.targetsCompleted, r.state.targetsTotal, r.state.targetsFailed, "waiting for target selection")
+	progressCompleted, progressTotal := progressCounts(r.state)
 
 	return []string{
-		fmt.Sprintf("Repository   [%d/%d] %s", r.state.repositoriesCompleted, repoTotal, defaultValue(r.state.repository, "unknown")),
+		fmt.Sprintf("Repository   %s", defaultValue(r.state.repository, "unknown")),
+		fmt.Sprintf("Tags         %s", tagLabel),
+		fmt.Sprintf("Targets      %s", targetLabel),
 		fmt.Sprintf("Phase        %s", defaultValue(r.state.phase, "Starting")),
 		fmt.Sprintf("Status       %s", defaultValue(r.state.message, "Preparing scan")),
-		fmt.Sprintf("Progress     %s %s", renderBar(r.state.manifestCompleted+r.state.manifestFailed, r.state.manifestTotal, 32), manifestLabel),
+		fmt.Sprintf("Progress     %s", renderBar(progressCompleted, progressTotal, 32)),
 		fmt.Sprintf("Findings     %d detected", r.state.findingsFound),
 		fmt.Sprintf("Current      %s", currentTargetLabel(r.state)),
 	}
 }
 
-func progressPhaseLabel(phase scanner.ProgressPhase) string {
+func progressPhaseLabel(phase jobs.ProgressPhase) string {
 	switch phase {
-	case scanner.ProgressPhaseResolvingReference:
-		return "Resolving Reference"
-	case scanner.ProgressPhaseSelectingManifests:
-		return "Selecting Manifests"
-	case scanner.ProgressPhaseManifestStarted:
-		return "Scanning Manifest"
-	case scanner.ProgressPhaseManifestCompleted:
-		return "Manifest Complete"
-	case scanner.ProgressPhaseManifestFailed:
-		return "Manifest Failed"
-	case scanner.ProgressPhaseCompleted:
+	case jobs.ProgressPhaseListingTags:
+		return "Listing Tags"
+	case jobs.ProgressPhaseResolvingTags:
+		return "Resolving Tags"
+	case jobs.ProgressPhaseScanning:
+		return "Scanning"
+	case jobs.ProgressPhaseTargetDone:
+		return "Target Complete"
+	case jobs.ProgressPhaseTargetFailed:
+		return "Target Failed"
+	case jobs.ProgressPhaseCompleted:
 		return "Complete"
 	default:
 		return "Scanning"
@@ -158,8 +161,23 @@ func progressPhaseLabel(phase scanner.ProgressPhase) string {
 }
 
 func currentTargetLabel(state progressSnapshot) string {
+	if state.currentTag != "" && state.currentPlatform != "" && state.currentManifest != "" {
+		return state.currentTag + " " + state.currentPlatform + " [" + shortDigest(state.currentManifest) + "]"
+	}
+	if state.currentTag != "" && state.currentReference != "" {
+		return state.currentTag + " " + shortReference(state.currentReference)
+	}
+	if state.currentReference != "" && state.currentPlatform != "" && state.currentManifest != "" {
+		return shortReference(state.currentReference) + " " + state.currentPlatform + " [" + shortDigest(state.currentManifest) + "]"
+	}
 	if state.currentPlatform != "" && state.currentManifest != "" {
 		return state.currentPlatform + " [" + shortDigest(state.currentManifest) + "]"
+	}
+	if state.currentTag != "" {
+		return state.currentTag
+	}
+	if state.currentReference != "" {
+		return shortReference(state.currentReference)
 	}
 	if state.currentPlatform != "" {
 		return state.currentPlatform
@@ -176,6 +194,14 @@ func shortDigest(value string) string {
 		return trimmed
 	}
 	return trimmed[:20] + "..."
+}
+
+func shortReference(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) <= 36 {
+		return trimmed
+	}
+	return trimmed[:36] + "..."
 }
 
 func renderBar(completed, total, width int) string {
@@ -222,6 +248,23 @@ func maxInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func progressLabel(completed, total, failed int, waiting string) string {
+	if total <= 0 {
+		return waiting
+	}
+	return fmt.Sprintf("%d/%d complete, %d failed", completed, total, failed)
+}
+
+func progressCounts(state progressSnapshot) (int, int) {
+	if state.targetsTotal > 0 {
+		return state.targetsCompleted + state.targetsFailed, state.targetsTotal
+	}
+	if state.tagsTotal > 0 {
+		return state.tagsCompleted + state.tagsFailed, state.tagsTotal
+	}
+	return 0, 0
 }
 
 func savedResultMessage(path string) string {

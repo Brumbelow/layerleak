@@ -8,14 +8,14 @@ import (
 	"testing"
 
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
 )
 
 func TestWriteResultFileUsesConfiguredDirectory(t *testing.T) {
 	tempDir := t.TempDir()
 
-	filePath, err := writeResultFile(tempDir, scanner.Result{
+	filePath, err := writeResultFile(tempDir, jobs.Result{
 		RequestedDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		TotalFindings:   3,
 		DetailedFindings: []findings.DetailedFinding{
@@ -82,7 +82,7 @@ func TestResolveFindingsDirDefaultsToRepoRootFindings(t *testing.T) {
 }
 
 func TestBuildPersistedResultCapsRepeatedLowConfidenceFileFindings(t *testing.T) {
-	result := buildPersistedResult(scanner.Result{
+	result := buildPersistedResult(jobs.Result{
 		TotalFindings: 5,
 		DetailedFindings: []findings.DetailedFinding{
 			testDetailedFinding("line one", "file:1"),

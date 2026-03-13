@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
 )
 
 func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
@@ -14,26 +14,27 @@ func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 	renderer := newProgressRenderer(&buffer)
 
 	if err := renderer.Start(progressSnapshot{
-		repository:        "library/app",
-		repositoriesTotal: 1,
-		phase:             "Starting",
-		message:           "Preparing scan",
+		repository: "library/app",
+		phase:      "Starting",
+		message:    "Preparing scan",
 	}); err != nil {
 		t.Fatalf("renderer.Start() error = %v", err)
 	}
-	if err := renderer.UpdateFromScan(scanner.ProgressUpdate{
-		Phase:                 scanner.ProgressPhaseManifestCompleted,
+	if err := renderer.UpdateFromJob(jobs.ProgressUpdate{
+		Phase:                 jobs.ProgressPhaseScanning,
 		Repository:            "library/app",
-		RepositoriesCompleted: 1,
-		RepositoriesTotal:     1,
-		ManifestCompleted:     1,
-		ManifestTotal:         2,
+		TagsCompleted:         3,
+		TagsTotal:             5,
+		TargetsCompleted:      1,
+		TargetsTotal:          2,
 		FindingsFound:         7,
+		CurrentTag:            "latest",
+		CurrentReference:      "docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		CurrentPlatform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
 		CurrentManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Message:               "Completed linux/amd64",
+		Message:               "Scanning linux/amd64",
 	}); err != nil {
-		t.Fatalf("renderer.UpdateFromScan() error = %v", err)
+		t.Fatalf("renderer.UpdateFromJob() error = %v", err)
 	}
 	if err := renderer.Finish(); err != nil {
 		t.Fatalf("renderer.Finish() error = %v", err)
@@ -43,7 +44,10 @@ func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 	for _, pattern := range []string{
 		"://LAYERLEAK",
 		"Repository",
+		"Tags",
+		"Targets",
 		"Findings     7 detected",
+		"latest",
 		"linux/amd64",
 		"[################",
 	} {

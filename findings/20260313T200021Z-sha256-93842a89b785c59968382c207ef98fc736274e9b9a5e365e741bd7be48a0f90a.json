@@ -1,0 +1,21 @@
+{
+  "requested_reference": "mongo:8.2.6-rc0",
+  "resolved_reference": "docker.io/library/mongo@sha256:93842a89b785c59968382c207ef98fc736274e9b9a5e365e741bd7be48a0f90a",
+  "requested_digest": "sha256:93842a89b785c59968382c207ef98fc736274e9b9a5e365e741bd7be48a0f90a",
+  "manifest_count": 1,
+  "completed_manifest_count": 1,
+  "failed_manifest_count": 0,
+  "platform_results": [
+    {
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "manifest_digest": "sha256:0d0834714758cbbd1d2952ac3a6d5bfc5a370efe159a94f047b6cdae6a1f4627",
+      "findings_count": 0
+    }
+  ],
+  "findings": [],
+  "total_findings": 0,
+  "unique_fingerprints": 0
+}

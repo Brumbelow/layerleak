@@ -11,6 +11,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_REGISTRY_AUTH_URL", "")
 	t.Setenv("LAYERLEAK_HTTP_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_MAX_FILE_BYTES", "")
+	t.Setenv("LAYERLEAK_TAG_PAGE_SIZE", "")
 	t.Setenv("LAYERLEAK_FINDINGS_DIR", "")
 	t.Setenv("LAYERLEAK_DATABASE_URL", "")
 
@@ -38,6 +39,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.MaxFileBytes != 1<<20 {
 		t.Fatalf("cfg.MaxFileBytes = %d", cfg.MaxFileBytes)
 	}
+	if cfg.TagPageSize != 100 {
+		t.Fatalf("cfg.TagPageSize = %d", cfg.TagPageSize)
+	}
 
 	if cfg.FindingsDir != "" {
 		t.Fatalf("cfg.FindingsDir = %q", cfg.FindingsDir)
@@ -54,6 +58,14 @@ func TestLoadInvalidTimeout(t *testing.T) {
 
 func TestLoadInvalidMaxFileBytes(t *testing.T) {
 	t.Setenv("LAYERLEAK_MAX_FILE_BYTES", "0")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil")
+	}
+}
+
+func TestLoadInvalidTagPageSize(t *testing.T) {
+	t.Setenv("LAYERLEAK_TAG_PAGE_SIZE", "0")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil")

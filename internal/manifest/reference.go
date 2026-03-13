@@ -8,11 +8,12 @@ import (
 const DockerHubRegistry = "docker.io"
 
 type Reference struct {
-	Original   string
-	Registry   string
-	Repository string
-	Tag        string
-	Digest     string
+	Original    string
+	Registry    string
+	Repository  string
+	Tag         string
+	Digest      string
+	TagExplicit bool
 }
 
 func ParseReference(raw string) (Reference, error) {
@@ -39,10 +40,12 @@ func ParseReference(raw string) (Reference, error) {
 	}
 
 	tag := ""
+	tagExplicit := false
 	pathPart := namePart
 	if colon := strings.LastIndex(namePart, ":"); colon > strings.LastIndex(namePart, "/") {
 		tag = namePart[colon+1:]
 		pathPart = namePart[:colon]
+		tagExplicit = true
 		if tag == "" {
 			return Reference{}, fmt.Errorf("tag is required when : is present")
 		}
@@ -73,22 +76,22 @@ func ParseReference(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("repository is invalid")
 	}
 
-	if digest == "" && tag == "" {
-		tag = "latest"
-	}
-
 	return Reference{
-		Original:   value,
-		Registry:   registry,
-		Repository: repository,
-		Tag:        tag,
-		Digest:     digest,
+		Original:    value,
+		Registry:    registry,
+		Repository:  repository,
+		Tag:         tag,
+		Digest:      digest,
+		TagExplicit: tagExplicit,
 	}, nil
 }
 
 func (r Reference) Identifier() string {
 	if r.Digest != "" {
 		return r.Digest
+	}
+	if r.Tag == "" {
+		return "latest"
 	}
 
 	return r.Tag
@@ -106,6 +109,33 @@ func (r Reference) CanonicalString(digest string) string {
 		return value + ":" + r.Tag
 	}
 	return value
+}
+
+func (r Reference) RepositoryString() string {
+	return r.Registry + "/" + r.Repository
+}
+
+func (r Reference) IsRepositoryOnly() bool {
+	return r.Digest == "" && !r.TagExplicit && r.Tag == ""
+}
+
+func (r Reference) WithTag(tag string) Reference {
+	return Reference{
+		Original:    r.Registry + "/" + r.Repository + ":" + strings.TrimSpace(tag),
+		Registry:    r.Registry,
+		Repository:  r.Repository,
+		Tag:         strings.TrimSpace(tag),
+		TagExplicit: true,
+	}
+}
+
+func (r Reference) WithDigest(digest string) Reference {
+	return Reference{
+		Original:   r.Registry + "/" + r.Repository + "@" + strings.TrimSpace(digest),
+		Registry:   r.Registry,
+		Repository: r.Repository,
+		Digest:     strings.TrimSpace(digest),
+	}
 }
 
 func (r Reference) RepositoryScope() string {

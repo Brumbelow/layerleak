@@ -10,9 +10,9 @@ import (
 
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/config"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/registry"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
 	"github.com/spf13/cobra"
 )
 
@@ -56,47 +56,46 @@ func newScanCmd() *cobra.Command {
 
 			progress := newProgressRenderer(cmd.ErrOrStderr())
 			if err := progress.Start(progressSnapshot{
-				repository:        ref.Repository,
-				repositoriesTotal: 1,
-				phase:             "Starting",
-				message:           "Preparing scan",
+				repository: ref.Repository,
+				phase:      "Starting",
+				message:    "Preparing scan",
 			}); err != nil {
 				return err
 			}
 			defer progress.Finish()
 
-			result, err := scanner.Scan(ctx, scanner.Request{
+			result, err := jobs.Scan(ctx, jobs.Request{
 				Reference:    ref,
 				Platform:     platform,
 				Registry:     registryClient,
 				Detectors:    detectorSet,
 				Logger:       logger,
 				MaxFileBytes: cfg.MaxFileBytes,
-				Progress: func(update scanner.ProgressUpdate) {
-					_ = progress.UpdateFromScan(update)
+				TagPageSize:  cfg.TagPageSize,
+				Progress: func(update jobs.ProgressUpdate) {
+					_ = progress.UpdateFromJob(update)
 				},
 			})
 			if err != nil {
 				_ = progress.Update(progressSnapshot{
-					repository:            ref.Repository,
-					repositoriesTotal:     1,
-					repositoriesCompleted: 1,
-					phase:                 "Error",
-					message:               err.Error(),
+					repository: ref.Repository,
+					phase:      "Error",
+					message:    err.Error(),
 				})
 				return err
 			}
 
 			if err := progress.Update(progressSnapshot{
-				repository:            ref.Repository,
-				repositoriesTotal:     1,
-				repositoriesCompleted: 1,
-				manifestCompleted:     result.CompletedManifestCount,
-				manifestFailed:        result.FailedManifestCount,
-				manifestTotal:         result.ManifestCount,
-				findingsFound:         result.TotalFindings,
-				phase:                 "Saving Results",
-				message:               "Writing findings file",
+				repository:       ref.Repository,
+				tagsCompleted:    result.TagsResolved,
+				tagsFailed:       result.TagsFailed,
+				tagsTotal:        result.TagsEnumerated,
+				targetsCompleted: result.CompletedTargetCount,
+				targetsFailed:    result.FailedTargetCount,
+				targetsTotal:     result.TargetCount,
+				findingsFound:    result.TotalFindings,
+				phase:            "Saving Results",
+				message:          "Writing findings file",
 			}); err != nil {
 				return err
 			}
@@ -104,29 +103,31 @@ func newScanCmd() *cobra.Command {
 			resultPath, err := writeResultFile(cfg.FindingsDir, result)
 			if err != nil {
 				_ = progress.Update(progressSnapshot{
-					repository:            ref.Repository,
-					repositoriesTotal:     1,
-					repositoriesCompleted: 1,
-					manifestCompleted:     result.CompletedManifestCount,
-					manifestFailed:        result.FailedManifestCount,
-					manifestTotal:         result.ManifestCount,
-					findingsFound:         result.TotalFindings,
-					phase:                 "Error",
-					message:               err.Error(),
+					repository:       ref.Repository,
+					tagsCompleted:    result.TagsResolved,
+					tagsFailed:       result.TagsFailed,
+					tagsTotal:        result.TagsEnumerated,
+					targetsCompleted: result.CompletedTargetCount,
+					targetsFailed:    result.FailedTargetCount,
+					targetsTotal:     result.TargetCount,
+					findingsFound:    result.TotalFindings,
+					phase:            "Error",
+					message:          err.Error(),
 				})
 				return err
 			}
 
 			if err := progress.Update(progressSnapshot{
-				repository:            ref.Repository,
-				repositoriesTotal:     1,
-				repositoriesCompleted: 1,
-				manifestCompleted:     result.CompletedManifestCount,
-				manifestFailed:        result.FailedManifestCount,
-				manifestTotal:         result.ManifestCount,
-				findingsFound:         result.TotalFindings,
-				phase:                 "Saved",
-				message:               savedResultMessage(resultPath),
+				repository:       ref.Repository,
+				tagsCompleted:    result.TagsResolved,
+				tagsFailed:       result.TagsFailed,
+				tagsTotal:        result.TagsEnumerated,
+				targetsCompleted: result.CompletedTargetCount,
+				targetsFailed:    result.FailedTargetCount,
+				targetsTotal:     result.TargetCount,
+				findingsFound:    result.TotalFindings,
+				phase:            "Saved",
+				message:          savedResultMessage(resultPath),
 			}); err != nil {
 				return err
 			}
@@ -160,15 +161,42 @@ func newScanCmd() *cobra.Command {
 	return cmd
 }
 
-func renderSummary(output io.Writer, result scanner.Result) error {
+func renderSummary(output io.Writer, result jobs.Result) error {
 	writer := tabwriter.NewWriter(output, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintf(writer, "Requested Reference:\t%s\n", result.RequestedReference); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "Resolved Reference:\t%s\n", result.ResolvedReference); err != nil {
+	if _, err := fmt.Fprintf(writer, "Repository:\t%s\n", result.Repository); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(writer, "Requested Digest:\t%s\n", result.RequestedDigest); err != nil {
+	if result.ResolvedReference != "" {
+		if _, err := fmt.Fprintf(writer, "Resolved Reference:\t%s\n", result.ResolvedReference); err != nil {
+			return err
+		}
+	}
+	if result.RequestedDigest != "" {
+		if _, err := fmt.Fprintf(writer, "Requested Digest:\t%s\n", result.RequestedDigest); err != nil {
+			return err
+		}
+	}
+	if result.TagsEnumerated > 0 || result.Mode == "repository" {
+		if _, err := fmt.Fprintf(writer, "Tags Enumerated:\t%d\n", result.TagsEnumerated); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(writer, "Tags Resolved:\t%d\n", result.TagsResolved); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(writer, "Tags Failed:\t%d\n", result.TagsFailed); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(writer, "Targets Selected:\t%d\n", result.TargetCount); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Targets Completed:\t%d\n", result.CompletedTargetCount); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Targets Failed:\t%d\n", result.FailedTargetCount); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(writer, "Manifests Selected:\t%d\n", result.ManifestCount); err != nil {
@@ -189,18 +217,41 @@ func renderSummary(output io.Writer, result scanner.Result) error {
 	if _, err := fmt.Fprintln(writer, ""); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(writer, "Platform\tManifest Digest\tFindings\tStatus"); err != nil {
+	if result.Mode == "reference" && len(result.Targets) == 1 {
+		if _, err := fmt.Fprintln(writer, "Platform\tManifest Digest\tFindings\tStatus"); err != nil {
+			return err
+		}
+		for _, item := range result.Targets[0].PlatformResults {
+			status := "ok"
+			if item.Error != "" {
+				status = item.Error
+			}
+			if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\n", item.Platform.String(), item.ManifestDigest, item.FindingsCount, status); err != nil {
+				return err
+			}
+		}
+		return writer.Flush()
+	}
+
+	if _, err := fmt.Fprintln(writer, "Reference\tTags\tFindings\tStatus"); err != nil {
 		return err
 	}
-	for _, item := range result.PlatformResults {
+	for _, item := range result.Targets {
 		status := "ok"
 		if item.Error != "" {
 			status = item.Error
 		}
-		if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\n", item.Platform.String(), item.ManifestDigest, item.FindingsCount, status); err != nil {
+		if _, err := fmt.Fprintf(writer, "%s\t%d\t%d\t%s\n", targetReferenceLabel(item), len(item.Tags), item.FindingsCount, status); err != nil {
 			return err
 		}
 	}
 
 	return writer.Flush()
+}
+
+func targetReferenceLabel(item jobs.TargetResult) string {
+	if item.ResolvedReference != "" {
+		return item.ResolvedReference
+	}
+	return item.Reference
 }

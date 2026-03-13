@@ -30,12 +30,13 @@ type Platform struct {
 }
 
 type Descriptor struct {
-	MediaType   string            `json:"mediaType"`
-	Digest      string            `json:"digest"`
-	Size        int64             `json:"size"`
-	URLs        []string          `json:"urls,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
-	Platform    Platform          `json:"platform,omitempty"`
+	MediaType    string            `json:"mediaType"`
+	ArtifactType string            `json:"artifactType,omitempty"`
+	Digest       string            `json:"digest"`
+	Size         int64             `json:"size"`
+	URLs         []string          `json:"urls,omitempty"`
+	Annotations  map[string]string `json:"annotations,omitempty"`
+	Platform     Platform          `json:"platform,omitempty"`
 }
 
 type ImageManifest struct {
@@ -184,7 +185,7 @@ func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) 
 	if strings.TrimSpace(selector) == "" {
 		selected := slices.Clone(index.Manifests)
 		selected = slices.DeleteFunc(selected, func(item Descriptor) bool {
-			return !IsManifestMediaType(item.MediaType)
+			return !IsScannableManifestDescriptor(item)
 		})
 		if len(selected) == 0 {
 			return nil, fmt.Errorf("image index does not contain supported image manifests")
@@ -199,7 +200,7 @@ func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) 
 
 	matches := make([]Descriptor, 0)
 	for _, candidate := range index.Manifests {
-		if !IsManifestMediaType(candidate.MediaType) {
+		if !IsScannableManifestDescriptor(candidate) {
 			continue
 		}
 		if candidate.Platform.Matches(platform) {
@@ -226,6 +227,33 @@ func (p Platform) Matches(other Platform) bool {
 	}
 
 	return strings.EqualFold(strings.TrimSpace(p.Variant), strings.TrimSpace(other.Variant))
+}
+
+func IsScannableManifestDescriptor(descriptor Descriptor) bool {
+	if !IsManifestMediaType(descriptor.MediaType) {
+		return false
+	}
+	if IsAttestationDescriptor(descriptor) {
+		return false
+	}
+	return true
+}
+
+func IsAttestationDescriptor(descriptor Descriptor) bool {
+	if !IsManifestMediaType(descriptor.MediaType) {
+		return false
+	}
+
+	referenceType := strings.ToLower(strings.TrimSpace(descriptor.Annotations["vnd.docker.reference.type"]))
+	if referenceType == "attestation-manifest" {
+		return true
+	}
+	if strings.TrimSpace(descriptor.ArtifactType) != "" {
+		return true
+	}
+
+	return strings.EqualFold(strings.TrimSpace(descriptor.Platform.OS), "unknown") &&
+		strings.EqualFold(strings.TrimSpace(descriptor.Platform.Architecture), "unknown")
 }
 
 func (p Platform) String() string {

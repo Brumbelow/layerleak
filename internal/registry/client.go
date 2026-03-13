@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 
@@ -32,6 +33,11 @@ type ManifestResponse struct {
 	Digest    string
 	MediaType string
 	Body      []byte
+}
+
+type ManifestMetadata struct {
+	Digest    string
+	MediaType string
 }
 
 type BlobResponse struct {
@@ -87,6 +93,10 @@ func (c *Client) BlobURL(repository, digest string) string {
 	return c.join("v2", repository, "blobs", digest)
 }
 
+func (c *Client) TagsURL(repository string) string {
+	return c.join("v2", repository, "tags", "list")
+}
+
 func (c *Client) FetchManifest(ctx context.Context, repository, identifier string) (ManifestResponse, error) {
 	response, err := c.doRequest(ctx, http.MethodGet, c.ManifestURL(repository, identifier), strings.Join([]string{
 		manifest.MediaTypeOCIImageIndex,
@@ -111,6 +121,35 @@ func (c *Client) FetchManifest(ctx context.Context, repository, identifier strin
 	}, nil
 }
 
+func (c *Client) ResolveManifest(ctx context.Context, repository, identifier string) (ManifestMetadata, error) {
+	response, err := c.doRequest(ctx, http.MethodHead, c.ManifestURL(repository, identifier), strings.Join([]string{
+		manifest.MediaTypeOCIImageIndex,
+		manifest.MediaTypeOCIImageManifest,
+		manifest.MediaTypeDockerSchema2ManifestList,
+		manifest.MediaTypeDockerSchema2Manifest,
+	}, ", "), repository)
+	if err == nil {
+		response.Body.Close()
+		resolved := ManifestMetadata{
+			Digest:    strings.TrimSpace(response.Header.Get("Docker-Content-Digest")),
+			MediaType: strings.TrimSpace(response.Header.Get("Content-Type")),
+		}
+		if resolved.Digest != "" {
+			return resolved, nil
+		}
+	}
+
+	manifestResponse, err := c.FetchManifest(ctx, repository, identifier)
+	if err != nil {
+		return ManifestMetadata{}, err
+	}
+
+	return ManifestMetadata{
+		Digest:    manifestResponse.Digest,
+		MediaType: manifestResponse.MediaType,
+	}, nil
+}
+
 func (c *Client) OpenBlob(ctx context.Context, repository, digest string) (BlobResponse, error) {
 	response, err := c.doRequest(ctx, http.MethodGet, c.BlobURL(repository, digest), "", repository)
 	if err != nil {
@@ -123,6 +162,63 @@ func (c *Client) OpenBlob(ctx context.Context, repository, digest string) (BlobR
 		Size:      response.ContentLength,
 		Body:      response.Body,
 	}, nil
+}
+
+func (c *Client) ListTags(ctx context.Context, repository string, pageSize int) ([]string, error) {
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+
+	targetURL, err := appendURLQuery(c.TagsURL(repository), map[string]string{
+		"n": fmt.Sprintf("%d", pageSize),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{})
+	tags := make([]string, 0)
+	for {
+		response, err := c.doRequest(ctx, http.MethodGet, targetURL, "application/json", repository)
+		if err != nil {
+			return nil, err
+		}
+
+		var payload struct {
+			Name string   `json:"name"`
+			Tags []string `json:"tags"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&payload)
+		linkHeader := response.Header.Get("Link")
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode tags response: %w", decodeErr)
+		}
+
+		for _, tag := range payload.Tags {
+			tag = strings.TrimSpace(tag)
+			if tag == "" {
+				continue
+			}
+			if _, ok := seen[tag]; ok {
+				continue
+			}
+			seen[tag] = struct{}{}
+			tags = append(tags, tag)
+		}
+
+		nextURL, ok, err := nextLinkURL(targetURL, linkHeader)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		targetURL = nextURL
+	}
+
+	sort.Strings(tags)
+	return tags, nil
 }
 
 func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repository string) (*http.Response, error) {
@@ -328,4 +424,53 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func appendURLQuery(targetURL string, values map[string]string) (string, error) {
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return "", fmt.Errorf("parse url %q: %w", targetURL, err)
+	}
+
+	query := parsed.Query()
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		query.Set(key, strings.TrimSpace(value))
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func nextLinkURL(currentURL, header string) (string, bool, error) {
+	value := strings.TrimSpace(header)
+	if value == "" {
+		return "", false, nil
+	}
+
+	parts := strings.Split(value, ";")
+	if len(parts) == 0 {
+		return "", false, fmt.Errorf("parse link header: missing link target")
+	}
+	if len(parts) > 1 && !strings.EqualFold(strings.TrimSpace(parts[1]), `rel="next"`) {
+		return "", false, nil
+	}
+
+	target := strings.TrimSpace(parts[0])
+	target = strings.TrimPrefix(target, "<")
+	target = strings.TrimSuffix(target, ">")
+	if target == "" {
+		return "", false, fmt.Errorf("parse link header: missing url")
+	}
+
+	parsedCurrent, err := url.Parse(currentURL)
+	if err != nil {
+		return "", false, fmt.Errorf("parse current url: %w", err)
+	}
+	parsedTarget, err := url.Parse(target)
+	if err != nil {
+		return "", false, fmt.Errorf("parse next link url: %w", err)
+	}
+	return parsedCurrent.ResolveReference(parsedTarget).String(), true, nil
 }

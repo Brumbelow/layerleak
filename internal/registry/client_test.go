@@ -40,6 +40,11 @@ func TestFetchManifestAndBlobWithBearerAuth(t *testing.T) {
 
 		switch request.URL.Path {
 		case "/v2/library/app/manifests/latest":
+			if request.Method == http.MethodHead {
+				return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+					"Docker-Content-Digest": "sha256:manifest",
+				}), nil
+			}
 			return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"sha256:config","size":1},"layers":[]}`), map[string]string{
 				"Docker-Content-Digest": "sha256:manifest",
 			}), nil
@@ -85,6 +90,87 @@ func TestFetchManifestAndBlobWithBearerAuth(t *testing.T) {
 
 	if tokenRequests == 0 {
 		t.Fatal("expected token endpoint to be called")
+	}
+}
+
+func TestResolveManifestUsesHeadDigest(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		if request.Method != http.MethodHead || request.URL.Path != "/v2/library/app/manifests/latest" {
+			return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+		return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageIndex, nil, map[string]string{
+			"Docker-Content-Digest": "sha256:resolved",
+		}), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL: "https://registry.test",
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	resolved, err := client.ResolveManifest(context.Background(), "library/app", "latest")
+	if err != nil {
+		t.Fatalf("ResolveManifest() error = %v", err)
+	}
+	if resolved.Digest != "sha256:resolved" {
+		t.Fatalf("resolved.Digest = %q", resolved.Digest)
+	}
+	if resolved.MediaType != manifest.MediaTypeOCIImageIndex {
+		t.Fatalf("resolved.MediaType = %q", resolved.MediaType)
+	}
+}
+
+func TestListTagsFollowsPagination(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch {
+		case request.URL.Path == "/v2/library/app/tags/list" && request.URL.Query().Get("n") == "2" && request.URL.Query().Get("last") == "":
+			return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["2.0","1.0"]}`), map[string]string{
+				"Link": `</v2/library/app/tags/list?n=2&last=2.0>; rel="next"`,
+			}), nil
+		case request.URL.Path == "/v2/library/app/tags/list" && request.URL.Query().Get("n") == "2" && request.URL.Query().Get("last") == "2.0":
+			return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["3.0","2.0"]}`), nil), nil
+		default:
+			return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	client := NewClient(Options{
+		BaseURL: "https://registry.test",
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	tags, err := client.ListTags(context.Background(), "library/app", 2)
+	if err != nil {
+		t.Fatalf("ListTags() error = %v", err)
+	}
+	if len(tags) != 3 {
+		t.Fatalf("len(tags) = %d", len(tags))
+	}
+	if strings.Join(tags, ",") != "1.0,2.0,3.0" {
+		t.Fatalf("tags = %q", strings.Join(tags, ","))
 	}
 }
 

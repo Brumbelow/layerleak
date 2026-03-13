@@ -69,6 +69,45 @@ func TestSelectDescriptors(t *testing.T) {
 	}
 }
 
+func TestSelectDescriptorsSkipsAttestationManifests(t *testing.T) {
+	index := ImageIndex{
+		Manifests: []Descriptor{
+			{
+				MediaType: MediaTypeOCIImageManifest,
+				Digest:    "sha256:amd64",
+				Platform: Platform{
+					OS:           "linux",
+					Architecture: "amd64",
+				},
+			},
+			{
+				MediaType:    MediaTypeOCIImageManifest,
+				ArtifactType: "application/vnd.in-toto+json",
+				Digest:       "sha256:attestation",
+				Annotations: map[string]string{
+					"vnd.docker.reference.type": "attestation-manifest",
+				},
+				Platform: Platform{
+					OS:           "unknown",
+					Architecture: "unknown",
+				},
+			},
+		},
+	}
+
+	selected, err := SelectDescriptors(index, "")
+	if err != nil {
+		t.Fatalf("SelectDescriptors() error = %v", err)
+	}
+
+	if len(selected) != 1 {
+		t.Fatalf("len(selected) = %d", len(selected))
+	}
+	if selected[0].Digest != "sha256:amd64" {
+		t.Fatalf("selected[0].Digest = %q", selected[0].Digest)
+	}
+}
+
 func TestConfigFields(t *testing.T) {
 	fields := ConfigFields(ImageConfig{
 		Author: "builder",

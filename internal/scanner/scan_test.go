@@ -36,6 +36,7 @@ func TestScanMultiArchImage(t *testing.T) {
 	indexDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	amd64Digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	arm64Digest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	attestationDigest := "sha256:9999999999999999999999999999999999999999999999999999999999999999"
 	amd64ConfigDigest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	arm64ConfigDigest := "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	amd64LayerOneDigest := "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -81,7 +82,8 @@ func TestScanMultiArchImage(t *testing.T) {
   "mediaType":"`+manifest.MediaTypeOCIImageIndex+`",
   "manifests":[
     {"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","digest":"`+amd64Digest+`","size":1,"platform":{"os":"linux","architecture":"amd64"}},
-    {"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","digest":"`+arm64Digest+`","size":1,"platform":{"os":"linux","architecture":"arm64"}}
+    {"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","digest":"`+arm64Digest+`","size":1,"platform":{"os":"linux","architecture":"arm64"}},
+    {"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","artifactType":"application/vnd.in-toto+json","digest":"`+attestationDigest+`","size":1,"annotations":{"vnd.docker.reference.type":"attestation-manifest"},"platform":{"os":"unknown","architecture":"unknown"}}
   ]
 }`), map[string]string{
 				"Docker-Content-Digest": indexDigest,

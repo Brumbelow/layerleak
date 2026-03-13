@@ -25,16 +25,17 @@ type Request struct {
 }
 
 type Result struct {
-	RequestedReference     string             `json:"requested_reference"`
-	ResolvedReference      string             `json:"resolved_reference"`
-	RequestedDigest        string             `json:"requested_digest"`
-	ManifestCount          int                `json:"manifest_count"`
-	CompletedManifestCount int                `json:"completed_manifest_count"`
-	FailedManifestCount    int                `json:"failed_manifest_count"`
-	PlatformResults        []PlatformResult   `json:"platform_results"`
-	Findings               []findings.Finding `json:"findings"`
-	TotalFindings          int                `json:"total_findings"`
-	UniqueFingerprints     int                `json:"unique_fingerprints"`
+	RequestedReference     string                     `json:"requested_reference"`
+	ResolvedReference      string                     `json:"resolved_reference"`
+	RequestedDigest        string                     `json:"requested_digest"`
+	ManifestCount          int                        `json:"manifest_count"`
+	CompletedManifestCount int                        `json:"completed_manifest_count"`
+	FailedManifestCount    int                        `json:"failed_manifest_count"`
+	PlatformResults        []PlatformResult           `json:"platform_results"`
+	Findings               []findings.Finding         `json:"findings"`
+	DetailedFindings       []findings.DetailedFinding `json:"-"`
+	TotalFindings          int                        `json:"total_findings"`
+	UniqueFingerprints     int                        `json:"unique_fingerprints"`
 }
 
 type PlatformResult struct {
@@ -102,7 +103,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 	result.ManifestCount = len(targets)
 
-	allFindings := make([]findings.Finding, 0)
+	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	for _, target := range targets {
 		platformResult, platformFindings, err := scanManifest(ctx, request, target.descriptor, target.manifest)
 		if err != nil {
@@ -117,14 +118,18 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 		result.PlatformResults = append(result.PlatformResults, platformResult)
 		result.CompletedManifestCount++
-		allFindings = append(allFindings, platformFindings...)
+		allDetailedFindings = append(allDetailedFindings, platformFindings...)
 	}
 
 	if result.CompletedManifestCount == 0 {
 		return result, fmt.Errorf("all selected manifests failed")
 	}
 
-	result.Findings = findings.Deduplicate(allFindings)
+	result.DetailedFindings = findings.DeduplicateDetailed(allDetailedFindings)
+	result.Findings = make([]findings.Finding, 0, len(result.DetailedFindings))
+	for _, item := range result.DetailedFindings {
+		result.Findings = append(result.Findings, item.PublicFinding())
+	}
 	result.TotalFindings = len(result.Findings)
 	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
 	sortPlatformResults(result.PlatformResults)
@@ -132,7 +137,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	return result, nil
 }
 
-func scanManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (PlatformResult, []findings.Finding, error) {
+func scanManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (PlatformResult, []findings.DetailedFinding, error) {
 	if descriptor.Digest == "" {
 		return PlatformResult{}, nil, fmt.Errorf("manifest digest is required")
 	}
@@ -219,8 +224,8 @@ func resolveImageManifest(ctx context.Context, request Request, descriptor manif
 	return document.Manifest, nil
 }
 
-func scanMetadata(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, imageConfig manifest.ImageConfig) []findings.Finding {
-	result := make([]findings.Finding, 0)
+func scanMetadata(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, imageConfig manifest.ImageConfig) []findings.DetailedFinding {
+	result := make([]findings.DetailedFinding, 0)
 	envEntries := slices.Clone(imageConfig.Config.Env)
 	slices.Sort(envEntries)
 	for _, entry := range envEntries {
@@ -301,8 +306,8 @@ func scanMetadata(detectorSet detectors.Set, manifestDigest string, platform man
 	return result
 }
 
-func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.Finding {
-	result := make([]findings.Finding, 0)
+func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
+	result := make([]findings.DetailedFinding, 0)
 	for _, artifact := range artifacts {
 		if !artifact.Scannable || len(artifact.Content) == 0 {
 			continue
@@ -323,11 +328,11 @@ func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform ma
 	return result
 }
 
-func scanString(detectorSet detectors.Set, input findings.Input, scanInput detectors.ScanInput) []findings.Finding {
+func scanString(detectorSet detectors.Set, input findings.Input, scanInput detectors.ScanInput) []findings.DetailedFinding {
 	matches := detectorSet.Scan(scanInput)
-	result := make([]findings.Finding, 0, len(matches))
+	result := make([]findings.DetailedFinding, 0, len(matches))
 	for _, match := range matches {
-		finding, err := findings.Normalize(input, match)
+		finding, err := findings.NormalizeDetailed(input, match)
 		if err != nil {
 			continue
 		}

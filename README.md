@@ -59,6 +59,7 @@ export LAYERLEAK_FINDINGS_DIR=findings
 ```
 
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes full JSON scan results to `findings/` under the repo root.
+Saved findings files contain unredacted finding values and unredacted context snippets.
 
 ## How to start
 
@@ -78,6 +79,7 @@ Run a scan against a public Docker Hub image:
 ```
 
 Every scan also writes the full JSON result to the findings output directory.
+Those saved findings files include the exact match value, exact source location, and unredacted snippet for each finding.
 
 Command syntax:
 

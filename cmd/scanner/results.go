@@ -8,8 +8,45 @@ import (
 	"strings"
 	"time"
 
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
 )
+
+type persistedResult struct {
+	RequestedReference     string                   `json:"requested_reference"`
+	ResolvedReference      string                   `json:"resolved_reference"`
+	RequestedDigest        string                   `json:"requested_digest"`
+	ManifestCount          int                      `json:"manifest_count"`
+	CompletedManifestCount int                      `json:"completed_manifest_count"`
+	FailedManifestCount    int                      `json:"failed_manifest_count"`
+	PlatformResults        []scanner.PlatformResult `json:"platform_results"`
+	Findings               []persistedFinding       `json:"findings"`
+	TotalFindings          int                      `json:"total_findings"`
+	UniqueFingerprints     int                      `json:"unique_fingerprints"`
+}
+
+type persistedFinding struct {
+	DetectorName        string              `json:"detector_name"`
+	Confidence          string              `json:"confidence"`
+	SourceType          findings.SourceType `json:"source_type"`
+	ManifestDigest      string              `json:"manifest_digest"`
+	Platform            manifest.Platform   `json:"platform,omitempty"`
+	FilePath            string              `json:"file_path,omitempty"`
+	LayerDigest         string              `json:"layer_digest,omitempty"`
+	Key                 string              `json:"key,omitempty"`
+	Value               string              `json:"value"`
+	Fingerprint         string              `json:"fingerprint"`
+	ContextSnippet      string              `json:"context_snippet"`
+	SourceLocation      string              `json:"source_location"`
+	MatchStart          int                 `json:"match_start"`
+	MatchEnd            int                 `json:"match_end"`
+	PresentInFinalImage bool                `json:"present_in_final_image"`
+	OccurrenceCount     int                 `json:"occurrence_count,omitempty"`
+	SuppressedCount     int                 `json:"suppressed_occurrence_count,omitempty"`
+}
+
+const persistedLowConfidenceGroupCap = 3
 
 func writeResultFile(configuredDir string, result scanner.Result) (string, error) {
 	findingsDir, err := resolveFindingsDir(configuredDir)
@@ -29,11 +66,105 @@ func writeResultFile(configuredDir string, result scanner.Result) (string, error
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(result); err != nil {
+	if err := encoder.Encode(buildPersistedResult(result)); err != nil {
 		return "", fmt.Errorf("write findings result file: %w", err)
 	}
 
 	return filePath, nil
+}
+
+func buildPersistedResult(result scanner.Result) persistedResult {
+	items := make([]persistedFinding, 0, len(result.DetailedFindings))
+	for _, item := range result.DetailedFindings {
+		items = append(items, persistedFinding{
+			DetectorName:        item.DetectorName,
+			Confidence:          item.Confidence,
+			SourceType:          item.SourceType,
+			ManifestDigest:      item.ManifestDigest,
+			Platform:            item.Platform,
+			FilePath:            item.FilePath,
+			LayerDigest:         item.LayerDigest,
+			Key:                 item.Key,
+			Value:               item.Value,
+			Fingerprint:         item.Fingerprint,
+			ContextSnippet:      item.RawSnippet,
+			SourceLocation:      item.SourceLocation,
+			MatchStart:          item.MatchStart,
+			MatchEnd:            item.MatchEnd,
+			PresentInFinalImage: item.PresentInFinalImage,
+		})
+	}
+	items = capPersistedLowConfidenceFindings(items)
+
+	return persistedResult{
+		RequestedReference:     result.RequestedReference,
+		ResolvedReference:      result.ResolvedReference,
+		RequestedDigest:        result.RequestedDigest,
+		ManifestCount:          result.ManifestCount,
+		CompletedManifestCount: result.CompletedManifestCount,
+		FailedManifestCount:    result.FailedManifestCount,
+		PlatformResults:        result.PlatformResults,
+		Findings:               items,
+		TotalFindings:          result.TotalFindings,
+		UniqueFingerprints:     result.UniqueFingerprints,
+	}
+}
+
+func capPersistedLowConfidenceFindings(items []persistedFinding) []persistedFinding {
+	groupCounts := make(map[string]int)
+	output := make([]persistedFinding, 0, len(items))
+	firstIndexByGroup := make(map[string]int)
+
+	for _, item := range items {
+		groupKey, limited := persistedFindingGroupKey(item)
+		if !limited {
+			output = append(output, item)
+			continue
+		}
+
+		groupCounts[groupKey]++
+		if firstIndex, ok := firstIndexByGroup[groupKey]; ok {
+			output[firstIndex].OccurrenceCount++
+			if groupCounts[groupKey] > persistedLowConfidenceGroupCap {
+				output[firstIndex].SuppressedCount++
+				continue
+			}
+		} else {
+			item.OccurrenceCount = 1
+			firstIndexByGroup[groupKey] = len(output)
+		}
+
+		output = append(output, item)
+	}
+
+	return output
+}
+
+func persistedFindingGroupKey(item persistedFinding) (string, bool) {
+	if item.Confidence != "low" || item.FilePath == "" {
+		return "", false
+	}
+
+	return strings.Join([]string{
+		item.DetectorName,
+		item.Confidence,
+		string(item.SourceType),
+		item.ManifestDigest,
+		item.Platform.String(),
+		item.FilePath,
+		item.LayerDigest,
+		item.Key,
+		item.Value,
+		item.Fingerprint,
+		boolString(item.PresentInFinalImage),
+	}, "|"), true
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func resolveFindingsDir(configuredDir string) (string, error) {

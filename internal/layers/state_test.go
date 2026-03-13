@@ -110,6 +110,62 @@ func TestReplaySupportsZstd(t *testing.T) {
 	}
 }
 
+func TestReplayClassifiesRegularFilesBeforeScanning(t *testing.T) {
+	layer := gzipLayer(t, []tarEntry{
+		{name: "app/config.env", body: "TOKEN=ghp_123456789012345678901234567890123456"},
+		{name: "usr/bin/tool", body: "ELF\x00payload"},
+		{name: "usr/lib/libpam.so.0", body: "\x7fELF\x02\x01\x01\x00shared"},
+		{name: "var/lib/app/blob.bin", body: "line\x00with\x01control"},
+		{name: "var/lib/app/encoded.dat", body: "\x01\x02\x03\x04\x05TEXT"},
+	})
+
+	result, err := Replay(context.Background(), []manifest.Descriptor{
+		{Digest: "sha256:classified", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+	}, 1<<20, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(layer)), nil
+	}))
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+
+	classes := make(map[string]Artifact)
+	for _, artifact := range result.FinalFiles {
+		classes[artifact.Path] = artifact
+	}
+
+	tests := []struct {
+		path      string
+		wantClass ContentClass
+		scannable bool
+		keepBody  bool
+	}{
+		{path: "app/config.env", wantClass: ContentClassText, scannable: true, keepBody: true},
+		{path: "usr/bin/tool", wantClass: ContentClassBinaryNUL, scannable: false, keepBody: false},
+		{path: "usr/lib/libpam.so.0", wantClass: ContentClassBinarySharedObject, scannable: false, keepBody: false},
+		{path: "var/lib/app/blob.bin", wantClass: ContentClassBinaryNUL, scannable: false, keepBody: false},
+		{path: "var/lib/app/encoded.dat", wantClass: ContentClassBinaryLowPrintable, scannable: false, keepBody: false},
+	}
+
+	for _, tt := range tests {
+		artifact, ok := classes[tt.path]
+		if !ok {
+			t.Fatalf("missing artifact %q", tt.path)
+		}
+		if artifact.ContentClass != tt.wantClass {
+			t.Fatalf("%s ContentClass = %q", tt.path, artifact.ContentClass)
+		}
+		if artifact.Scannable != tt.scannable {
+			t.Fatalf("%s Scannable = %t", tt.path, artifact.Scannable)
+		}
+		if tt.keepBody && len(artifact.Content) == 0 {
+			t.Fatalf("%s content unexpectedly empty", tt.path)
+		}
+		if !tt.keepBody && len(artifact.Content) != 0 {
+			t.Fatalf("%s content length = %d", tt.path, len(artifact.Content))
+		}
+	}
+}
+
 type tarEntry struct {
 	name     string
 	body     string

@@ -68,6 +68,9 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	if !strings.Contains(stdout.String(), `"requested_digest"`) {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
+	if strings.Contains(stdout.String(), "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("stdout leaked raw secret: %q", stdout.String())
+	}
 
 	entries, readErr := os.ReadDir(findingsDir)
 	if readErr != nil {
@@ -75,6 +78,14 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("len(entries) = %d", len(entries))
+	}
+
+	body, readErr := os.ReadFile(findingsDir + string(os.PathSeparator) + entries[0].Name())
+	if readErr != nil {
+		t.Fatalf("ReadFile() error = %v", readErr)
+	}
+	if !strings.Contains(string(body), "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("findings file did not include raw secret: %q", string(body))
 	}
 }
 

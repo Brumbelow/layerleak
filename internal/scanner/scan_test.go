@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
+	"git.tools.cloudfor.ge/andrew/layerleak/internal/layers"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/registry"
 )
@@ -142,6 +144,9 @@ func TestScanMultiArchImage(t *testing.T) {
 	if result.UniqueFingerprints == 0 {
 		t.Fatal("result.UniqueFingerprints = 0")
 	}
+	if len(result.DetailedFindings) == 0 {
+		t.Fatal("len(result.DetailedFindings) = 0")
+	}
 
 	sourceTypes := make([]findings.SourceType, 0, len(result.Findings))
 	for _, item := range result.Findings {
@@ -158,6 +163,53 @@ func TestScanMultiArchImage(t *testing.T) {
 		if !slices.Contains(sourceTypes, expected) {
 			t.Fatalf("missing source type %q", expected)
 		}
+	}
+
+	foundRaw := false
+	for _, item := range result.DetailedFindings {
+		if item.Value == "ghp_123456789012345678901234567890123456" && item.SourceLocation == "env:GH_TOKEN" {
+			foundRaw = true
+			if !strings.Contains(item.RawSnippet, item.Value) {
+				t.Fatalf("item.RawSnippet = %q", item.RawSnippet)
+			}
+			break
+		}
+	}
+	if !foundRaw {
+		t.Fatal("expected raw finding details for env token")
+	}
+}
+
+func TestScanArtifactsSkipsNonTextArtifacts(t *testing.T) {
+	items := scanArtifacts(
+		detectors.Default(),
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		manifest.Platform{OS: "linux", Architecture: "amd64"},
+		findings.SourceTypeFileFinal,
+		true,
+		[]layers.Artifact{
+			{
+				Path:         "usr/bin/tool",
+				LayerDigest:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ContentClass: layers.ContentClassBinaryELF,
+				Scannable:    false,
+				Content:      []byte("TOKEN=ghp_123456789012345678901234567890123456"),
+			},
+			{
+				Path:         "app/.env",
+				LayerDigest:  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				ContentClass: layers.ContentClassText,
+				Scannable:    true,
+				Content:      []byte("TOKEN=ghp_123456789012345678901234567890123456"),
+			},
+		},
+	)
+
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d", len(items))
+	}
+	if items[0].FilePath != "app/.env" {
+		t.Fatalf("items[0].FilePath = %q", items[0].FilePath)
 	}
 }
 

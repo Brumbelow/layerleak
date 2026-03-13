@@ -65,6 +65,44 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+func TestNormalizeDetailed(t *testing.T) {
+	content := "token=ghp_123456789012345678901234567890123456"
+	match := detectors.Match{
+		Detector:   "github_token",
+		Value:      "ghp_123456789012345678901234567890123456",
+		Start:      6,
+		End:        len(content),
+		Confidence: detectors.ConfidenceHigh,
+	}
+
+	finding, err := NormalizeDetailed(Input{
+		ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Platform: manifest.Platform{
+			OS:           "linux",
+			Architecture: "amd64",
+		},
+		SourceType:          SourceTypeEnv,
+		Key:                 "TOKEN",
+		Content:             content,
+		PresentInFinalImage: true,
+	}, match)
+	if err != nil {
+		t.Fatalf("NormalizeDetailed() error = %v", err)
+	}
+
+	if finding.Value != match.Value {
+		t.Fatalf("finding.Value = %q", finding.Value)
+	}
+
+	if !strings.Contains(finding.RawSnippet, match.Value) {
+		t.Fatalf("finding.RawSnippet = %q", finding.RawSnippet)
+	}
+
+	if finding.SourceLocation != "env:TOKEN" {
+		t.Fatalf("finding.SourceLocation = %q", finding.SourceLocation)
+	}
+}
+
 func TestDeduplicatePreservesUniqueProvenance(t *testing.T) {
 	items := []Finding{
 		{

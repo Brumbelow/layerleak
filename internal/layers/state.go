@@ -9,6 +9,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
 	"github.com/klauspost/compress/zstd"
@@ -22,6 +24,17 @@ const (
 	ArtifactTypeSymlink     ArtifactType = "symlink"
 )
 
+type ContentClass string
+
+const (
+	ContentClassText               ContentClass = "text"
+	ContentClassOversize           ContentClass = "oversize"
+	ContentClassBinaryELF          ContentClass = "binary_elf"
+	ContentClassBinarySharedObject ContentClass = "binary_shared_object"
+	ContentClassBinaryNUL          ContentClass = "binary_nul"
+	ContentClassBinaryLowPrintable ContentClass = "binary_low_printable"
+)
+
 type Artifact struct {
 	Path                 string
 	LayerDigest          string
@@ -30,6 +43,7 @@ type Artifact struct {
 	Linkname             string
 	Content              []byte
 	Size                 int64
+	ContentClass         ContentClass
 	Scannable            bool
 }
 
@@ -155,11 +169,12 @@ func (s *State) applyLayer(descriptor manifest.Descriptor, blob io.Reader, maxFi
 				return err
 			}
 			s.put(Artifact{
-				Path:        entryPath,
-				LayerDigest: descriptor.Digest,
-				Type:        ArtifactTypeSymlink,
-				Linkname:    strings.TrimSpace(header.Linkname),
-				Scannable:   false,
+				Path:         entryPath,
+				LayerDigest:  descriptor.Digest,
+				Type:         ArtifactTypeSymlink,
+				Linkname:     strings.TrimSpace(header.Linkname),
+				ContentClass: "",
+				Scannable:    false,
 			})
 		case tar.TypeLink:
 			if err := drainEntry(tarReader); err != nil {
@@ -175,13 +190,14 @@ func (s *State) applyLayer(descriptor manifest.Descriptor, blob io.Reader, maxFi
 			}
 			copyContent := append([]byte(nil), target.Content...)
 			s.put(Artifact{
-				Path:        entryPath,
-				LayerDigest: descriptor.Digest,
-				Type:        ArtifactTypeHardlink,
-				Linkname:    linkTarget,
-				Content:     copyContent,
-				Size:        target.Size,
-				Scannable:   target.Scannable,
+				Path:         entryPath,
+				LayerDigest:  descriptor.Digest,
+				Type:         ArtifactTypeHardlink,
+				Linkname:     linkTarget,
+				Content:      copyContent,
+				Size:         target.Size,
+				ContentClass: target.ContentClass,
+				Scannable:    target.Scannable,
 			})
 		case tar.TypeReg, tar.TypeRegA:
 			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, tarReader, header.Size, maxFileBytes)
@@ -246,9 +262,17 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 		return Artifact{}, fmt.Errorf("read layer file %s: %w", entryPath, err)
 	}
 
+	contentClass := ContentClassText
 	scannable := int64(len(content)) <= maxFileBytes
 	if !scannable {
+		contentClass = ContentClassOversize
 		content = nil
+	} else {
+		contentClass = classifyContent(entryPath, content)
+		scannable = contentClass == ContentClassText
+		if !scannable {
+			content = nil
+		}
 	}
 
 	if _, err := io.Copy(io.Discard, reader); err != nil {
@@ -256,13 +280,105 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 	}
 
 	return Artifact{
-		Path:        entryPath,
-		LayerDigest: layerDigest,
-		Type:        ArtifactTypeRegularFile,
-		Content:     content,
-		Size:        size,
-		Scannable:   scannable,
+		Path:         entryPath,
+		LayerDigest:  layerDigest,
+		Type:         ArtifactTypeRegularFile,
+		Content:      content,
+		Size:         size,
+		ContentClass: contentClass,
+		Scannable:    scannable,
 	}, nil
+}
+
+func classifyContent(entryPath string, content []byte) ContentClass {
+	if len(content) == 0 {
+		return ContentClassText
+	}
+
+	sharedObject := hasSharedObjectSignature(entryPath)
+	if hasELFMagic(content) {
+		if sharedObject {
+			return ContentClassBinarySharedObject
+		}
+		return ContentClassBinaryELF
+	}
+	if sharedObject && (hasNULByte(content) || printableRatio(content) < 0.85) {
+		return ContentClassBinarySharedObject
+	}
+	if hasNULByte(content) {
+		return ContentClassBinaryNUL
+	}
+	if printableRatio(content) < 0.85 {
+		return ContentClassBinaryLowPrintable
+	}
+	return ContentClassText
+}
+
+func hasELFMagic(content []byte) bool {
+	return len(content) >= 4 &&
+		content[0] == 0x7f &&
+		content[1] == 'E' &&
+		content[2] == 'L' &&
+		content[3] == 'F'
+}
+
+func hasSharedObjectSignature(entryPath string) bool {
+	base := path.Base(strings.TrimSpace(entryPath))
+	return strings.HasSuffix(base, ".so") || strings.Contains(base, ".so.")
+}
+
+func hasNULByte(content []byte) bool {
+	for _, b := range content {
+		if b == 0x00 {
+			return true
+		}
+	}
+	return false
+}
+
+func printableRatio(content []byte) float64 {
+	if len(content) == 0 {
+		return 1
+	}
+
+	total := 0
+	printable := 0
+	if utf8.Valid(content) {
+		for _, r := range string(content) {
+			total++
+			if isPrintableRune(r) {
+				printable++
+			}
+		}
+	} else {
+		for _, b := range content {
+			total++
+			if isPrintableByte(b) {
+				printable++
+			}
+		}
+	}
+
+	if total == 0 {
+		return 1
+	}
+	return float64(printable) / float64(total)
+}
+
+func isPrintableRune(r rune) bool {
+	switch r {
+	case '\n', '\r', '\t':
+		return true
+	}
+	return unicode.IsPrint(r)
+}
+
+func isPrintableByte(value byte) bool {
+	switch value {
+	case '\n', '\r', '\t':
+		return true
+	}
+	return value >= 0x20 && value <= 0x7e
 }
 
 func decompressLayer(mediaType string, reader io.Reader) (io.Reader, func(), error) {

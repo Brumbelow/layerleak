@@ -69,6 +69,8 @@ Show the CLI help:
 ./scanner --help
 ./scanner scan --help
 ```
+![help_output](https://github.com/user-attachments/assets/8af9af41-30b1-4ee4-a0e5-2c20ed826e5f)
+
 
 Run a scan against a public Docker Hub image:
 
@@ -77,6 +79,8 @@ Run a scan against a public Docker Hub image:
 ./scanner scan library/nginx:latest --format json
 ./scanner scan alpine:latest --platform linux/amd64
 ```
+![cli pic](https://github.com/user-attachments/assets/ec9586a0-42a2-49d7-b121-fdd52cc1025d)
+
 
 Every scan also writes the full JSON result to the findings output directory.
 Those saved findings files include the exact match value, exact source location, and unredacted snippet for each finding.

@@ -232,6 +232,61 @@ func TestScanArtifactsSkipsNonTextArtifacts(t *testing.T) {
 	}
 }
 
+func TestScanReturnsUnderlyingManifestFailureWhenAllSelectedManifestsFail(t *testing.T) {
+	manifestDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	configDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return testResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return testResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch request.URL.Path {
+		case "/v2/library/app/manifests/latest":
+			return testResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configDigest+`","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": manifestDigest,
+			}), nil
+		case "/v2/library/app/blobs/" + configDigest:
+			return testResponse(http.StatusNotFound, "text/plain", []byte("missing config"), nil), nil
+		default:
+			return testResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	ref, err := manifest.ParseReference("library/app:latest")
+	if err != nil {
+		t.Fatalf("ParseReference() error = %v", err)
+	}
+
+	_, err = Scan(context.Background(), Request{
+		Reference: ref,
+		Registry: registry.NewClient(registry.Options{
+			BaseURL: "https://registry.test",
+			HTTPClient: &http.Client{
+				Transport: transport,
+			},
+		}),
+		Detectors:    detectors.Default(),
+		MaxFileBytes: 1 << 20,
+	})
+	if err == nil {
+		t.Fatal("Scan() error = nil")
+	}
+	if !strings.Contains(err.Error(), "fetch config blob") {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "status=404") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 type tarEntry struct {
 	name string
 	body string

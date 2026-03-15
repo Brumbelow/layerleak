@@ -318,7 +318,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 	}
 
 	if result.CompletedTargetCount == 0 {
-		return result, fmt.Errorf("all repository targets failed")
+		return result, allRepositoryTargetsFailedError(result.Targets)
 	}
 
 	result.DetailedFindings = findings.DeduplicateDetailed(allDetailedFindings)
@@ -445,4 +445,33 @@ func emitProgress(request Request, update ProgressUpdate) {
 	if request.Progress != nil {
 		request.Progress(update)
 	}
+}
+
+func allRepositoryTargetsFailedError(items []TargetResult) error {
+	errors := collectTargetErrorMessages(items)
+	if len(errors) == 0 {
+		return fmt.Errorf("all repository targets failed")
+	}
+	return fmt.Errorf("all repository targets failed: %s", strings.Join(errors, "; "))
+}
+
+func collectTargetErrorMessages(items []TargetResult) []string {
+	collected := make([]string, 0, len(items))
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		value := strings.TrimSpace(item.Error)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		collected = append(collected, value)
+		if len(collected) == 3 {
+			break
+		}
+	}
+
+	return collected
 }

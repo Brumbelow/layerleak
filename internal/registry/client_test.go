@@ -174,6 +174,105 @@ func TestListTagsFollowsPagination(t *testing.T) {
 	}
 }
 
+func TestFetchManifestRefreshesExpiredCachedToken(t *testing.T) {
+	tokenRequests := 0
+	authorizedRequests := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			tokenRequests++
+			token := "stale-token"
+			if tokenRequests > 1 {
+				token = "fresh-token"
+			}
+			body, _ := json.Marshal(map[string]string{"token": token})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.URL.Path != "/v2/library/app/manifests/latest" {
+			return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+		if request.Header.Get("Authorization") == "" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		authorizedRequests++
+		if request.Header.Get("Authorization") == "Bearer stale-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"sha256:config","size":1},"layers":[]}`), map[string]string{
+			"Docker-Content-Digest": "sha256:manifest",
+		}), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL: "https://registry.test",
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	manifestResponse, err := client.FetchManifest(context.Background(), "library/app", "latest")
+	if err != nil {
+		t.Fatalf("FetchManifest() error = %v", err)
+	}
+	if manifestResponse.Digest != "sha256:manifest" {
+		t.Fatalf("manifestResponse.Digest = %q", manifestResponse.Digest)
+	}
+	if tokenRequests != 2 {
+		t.Fatalf("tokenRequests = %d", tokenRequests)
+	}
+	if authorizedRequests != 2 {
+		t.Fatalf("authorizedRequests = %d", authorizedRequests)
+	}
+}
+
+func TestResolveManifestRetriesRequestTimeout(t *testing.T) {
+	requests := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		requests++
+		if requests == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		if request.Method != http.MethodHead || request.URL.Path != "/v2/library/app/manifests/latest" {
+			return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+
+		return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+			"Docker-Content-Digest": "sha256:resolved",
+		}), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL: "https://registry.test",
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	resolved, err := client.ResolveManifest(context.Background(), "library/app", "latest")
+	if err != nil {
+		t.Fatalf("ResolveManifest() error = %v", err)
+	}
+	if resolved.Digest != "sha256:resolved" {
+		t.Fatalf("resolved.Digest = %q", resolved.Digest)
+	}
+}
+
 type roundTripFunc func(request *http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

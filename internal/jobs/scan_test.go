@@ -138,6 +138,67 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	}
 }
 
+func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing.T) {
+	manifestDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	configDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return repoResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return repoResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch {
+		case request.URL.Path == "/v2/library/app/tags/list":
+			return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest"]}`), nil), nil
+		case request.URL.Path == "/v2/library/app/manifests/latest" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": manifestDigest,
+			}), nil
+		case request.URL.Path == "/v2/library/app/manifests/"+manifestDigest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configDigest+`","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": manifestDigest,
+			}), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+configDigest:
+			return repoResponse(http.StatusNotFound, "text/plain", []byte("missing config"), nil), nil
+		default:
+			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	ref, err := manifest.ParseReference("library/app")
+	if err != nil {
+		t.Fatalf("ParseReference() error = %v", err)
+	}
+
+	_, err = Scan(context.Background(), Request{
+		Reference: ref,
+		Registry: registry.NewClient(registry.Options{
+			BaseURL: "https://registry.test",
+			HTTPClient: &http.Client{
+				Transport: transport,
+			},
+		}),
+		Detectors:    detectors.Default(),
+		MaxFileBytes: 1 << 20,
+		TagPageSize:  100,
+	})
+	if err == nil {
+		t.Fatal("Scan() error = nil")
+	}
+	if !strings.Contains(err.Error(), "fetch config blob") {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "status=404") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 type repoRoundTripFunc func(request *http.Request) (*http.Response, error)
 
 func (f repoRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

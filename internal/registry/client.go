@@ -3,8 +3,10 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -52,6 +54,8 @@ type bearerChallenge struct {
 	Service string
 	Scope   string
 }
+
+const requestAttempts = 2
 
 func NewClient(options Options) *Client {
 	baseURL, _ := url.Parse(defaultString(options.BaseURL, "https://registry-1.docker.io"))
@@ -226,15 +230,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		ctx = context.Background()
 	}
 
-	request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create registry request: %w", err)
-	}
-	if accept != "" {
-		request.Header.Set("Accept", accept)
-	}
-
-	response, err := c.httpClient.Do(request)
+	response, err := c.executeRequest(ctx, method, targetURL, accept, "")
 	if err != nil {
 		return nil, fmt.Errorf("perform registry request: %w", err)
 	}
@@ -254,23 +250,28 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		challenge.Realm = c.authURL.String()
 	}
 
-	token, err := c.fetchToken(ctx, challenge)
+	token, err := c.fetchToken(ctx, challenge, true)
 	if err != nil {
 		return nil, err
 	}
 
-	retryRequest, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create registry retry request: %w", err)
-	}
-	if accept != "" {
-		retryRequest.Header.Set("Accept", accept)
-	}
-	retryRequest.Header.Set("Authorization", "Bearer "+token)
-
-	retryResponse, err := c.httpClient.Do(retryRequest)
+	retryResponse, err := c.executeRequest(ctx, method, targetURL, accept, token)
 	if err != nil {
 		return nil, fmt.Errorf("perform authorized registry request: %w", err)
+	}
+	if retryResponse.StatusCode == http.StatusUnauthorized {
+		retryResponse.Body.Close()
+		c.invalidateToken(challenge)
+
+		token, err = c.fetchToken(ctx, challenge, false)
+		if err != nil {
+			return nil, err
+		}
+
+		retryResponse, err = c.executeRequest(ctx, method, targetURL, accept, token)
+		if err != nil {
+			return nil, fmt.Errorf("perform refreshed authorized registry request: %w", err)
+		}
 	}
 
 	return c.checkResponse(retryResponse)
@@ -286,14 +287,49 @@ func (c *Client) checkResponse(response *http.Response) (*http.Response, error) 
 	return nil, fmt.Errorf("registry request failed: status=%d body=%s", response.StatusCode, strings.TrimSpace(string(body)))
 }
 
-func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge) (string, error) {
-	cacheKey := challenge.cacheKey()
-	c.tokenCacheMu.Lock()
-	if token, ok := c.tokenCache[cacheKey]; ok && token != "" {
-		c.tokenCacheMu.Unlock()
-		return token, nil
+func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, token string) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < requestAttempts; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create registry request: %w", err)
+		}
+		if accept != "" {
+			request.Header.Set("Accept", accept)
+		}
+		if strings.TrimSpace(token) != "" {
+			request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+		}
+
+		response, err := c.httpClient.Do(request)
+		if err != nil {
+			lastErr = err
+			if attempt+1 < requestAttempts && isRetryableRequestError(ctx, err) {
+				continue
+			}
+			return nil, err
+		}
+		if attempt+1 < requestAttempts && isRetryableStatus(response.StatusCode) {
+			response.Body.Close()
+			lastErr = fmt.Errorf("transient registry status %d", response.StatusCode)
+			continue
+		}
+		return response, nil
 	}
-	c.tokenCacheMu.Unlock()
+
+	return nil, lastErr
+}
+
+func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allowCache bool) (string, error) {
+	cacheKey := challenge.cacheKey()
+	if allowCache {
+		c.tokenCacheMu.Lock()
+		if token, ok := c.tokenCache[cacheKey]; ok && token != "" {
+			c.tokenCacheMu.Unlock()
+			return token, nil
+		}
+		c.tokenCacheMu.Unlock()
+	}
 
 	realmURL := strings.TrimSpace(challenge.Realm)
 	if realmURL == "" {
@@ -313,12 +349,7 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge) (str
 	}
 	parsedRealm.RawQuery = query.Encode()
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedRealm.String(), nil)
-	if err != nil {
-		return "", fmt.Errorf("create auth request: %w", err)
-	}
-
-	response, err := c.httpClient.Do(request)
+	response, err := c.executeRequest(ctx, http.MethodGet, parsedRealm.String(), "", "")
 	if err != nil {
 		return "", fmt.Errorf("perform auth request: %w", err)
 	}
@@ -347,6 +378,13 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge) (str
 	c.tokenCacheMu.Unlock()
 
 	return token, nil
+}
+
+func (c *Client) invalidateToken(challenge bearerChallenge) {
+	cacheKey := challenge.cacheKey()
+	c.tokenCacheMu.Lock()
+	delete(c.tokenCache, cacheKey)
+	c.tokenCacheMu.Unlock()
 }
 
 func parseBearerChallenge(header string) (bearerChallenge, error) {
@@ -424,6 +462,34 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func isRetryableRequestError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netError net.Error
+	if errors.As(err, &netError) && netError.Timeout() {
+		return true
+	}
+
+	return false
+}
+
+func isRetryableStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return statusCode >= 500 && statusCode <= 599
+	}
 }
 
 func appendURLQuery(targetURL string, values map[string]string) (string, error) {

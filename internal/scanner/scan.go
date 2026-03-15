@@ -203,7 +203,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	}
 
 	if result.CompletedManifestCount == 0 {
-		return result, fmt.Errorf("all selected manifests failed")
+		return result, allSelectedManifestsFailedError(result.PlatformResults)
 	}
 
 	result.DetailedFindings = findings.DeduplicateDetailed(allDetailedFindings)
@@ -440,6 +440,41 @@ func sortPlatformResults(items []PlatformResult) {
 		}
 		return strings.Compare(left.ManifestDigest, right.ManifestDigest)
 	})
+}
+
+func allSelectedManifestsFailedError(items []PlatformResult) error {
+	errors := collectErrorMessages(len(items), func(index int) string {
+		return items[index].Error
+	})
+	if len(errors) == 0 {
+		return fmt.Errorf("all selected manifests failed")
+	}
+	return fmt.Errorf("all selected manifests failed: %s", strings.Join(errors, "; "))
+}
+
+func collectErrorMessages(limit int, message func(index int) string) []string {
+	if limit <= 0 {
+		return nil
+	}
+
+	collected := make([]string, 0, limit)
+	seen := make(map[string]struct{})
+	for index := 0; index < limit; index++ {
+		value := strings.TrimSpace(message(index))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		collected = append(collected, value)
+		if len(collected) == 3 {
+			break
+		}
+	}
+
+	return collected
 }
 
 func firstNonEmpty(values ...string) string {

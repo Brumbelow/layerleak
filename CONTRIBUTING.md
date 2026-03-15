@@ -15,7 +15,8 @@ Contributions should keep the scanner:
 
 - Use Go 1.24 or newer.
 - Read [README.md](./README.md).
-- Read [AGENTS.md](./AGENTS.md) if you are working through an agent or automation flow.
+- Remove any [AGENTS.md](./AGENTS.md) before committing, if you are working through an agent or automation flow.
+- Ensure you tag any AI assisted commit or PR as such
 
 ## Local Setup
 

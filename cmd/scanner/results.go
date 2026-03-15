@@ -11,43 +11,7 @@ import (
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
 )
-
-type persistedResult struct {
-	RequestedReference     string                  `json:"requested_reference"`
-	Repository             string                  `json:"repository"`
-	Mode                   string                  `json:"mode"`
-	ResolvedReference      string                  `json:"resolved_reference,omitempty"`
-	RequestedDigest        string                  `json:"requested_digest,omitempty"`
-	TagsEnumerated         int                     `json:"tags_enumerated,omitempty"`
-	TagsResolved           int                     `json:"tags_resolved,omitempty"`
-	TagsFailed             int                     `json:"tags_failed,omitempty"`
-	TargetCount            int                     `json:"target_count"`
-	CompletedTargetCount   int                     `json:"completed_target_count"`
-	FailedTargetCount      int                     `json:"failed_target_count"`
-	ManifestCount          int                     `json:"manifest_count"`
-	CompletedManifestCount int                     `json:"completed_manifest_count"`
-	FailedManifestCount    int                     `json:"failed_manifest_count"`
-	TagResults             []jobs.TagResult        `json:"tag_results,omitempty"`
-	Targets                []persistedTargetResult `json:"targets"`
-	Findings               []persistedFinding      `json:"findings"`
-	TotalFindings          int                     `json:"total_findings"`
-	UniqueFingerprints     int                     `json:"unique_fingerprints"`
-}
-
-type persistedTargetResult struct {
-	Reference              string                   `json:"reference"`
-	Tags                   []string                 `json:"tags,omitempty"`
-	ResolvedReference      string                   `json:"resolved_reference,omitempty"`
-	RequestedDigest        string                   `json:"requested_digest,omitempty"`
-	ManifestCount          int                      `json:"manifest_count"`
-	CompletedManifestCount int                      `json:"completed_manifest_count"`
-	FailedManifestCount    int                      `json:"failed_manifest_count"`
-	PlatformResults        []scanner.PlatformResult `json:"platform_results,omitempty"`
-	FindingsCount          int                      `json:"findings_count"`
-	Error                  string                   `json:"error,omitempty"`
-}
 
 type persistedFinding struct {
 	DetectorName        string              `json:"detector_name"`
@@ -89,14 +53,14 @@ func writeResultFile(configuredDir string, result jobs.Result) (string, error) {
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(buildPersistedResult(result)); err != nil {
+	if err := encoder.Encode(buildPersistedFindings(result)); err != nil {
 		return "", fmt.Errorf("write findings result file: %w", err)
 	}
 
 	return filePath, nil
 }
 
-func buildPersistedResult(result jobs.Result) persistedResult {
+func buildPersistedFindings(result jobs.Result) []persistedFinding {
 	items := make([]persistedFinding, 0, len(result.DetailedFindings))
 	for _, item := range result.DetailedFindings {
 		items = append(items, persistedFinding{
@@ -117,45 +81,8 @@ func buildPersistedResult(result jobs.Result) persistedResult {
 			PresentInFinalImage: item.PresentInFinalImage,
 		})
 	}
-	items = capPersistedLowConfidenceFindings(items)
 
-	targets := make([]persistedTargetResult, 0, len(result.Targets))
-	for _, item := range result.Targets {
-		targets = append(targets, persistedTargetResult{
-			Reference:              item.Reference,
-			Tags:                   append([]string(nil), item.Tags...),
-			ResolvedReference:      item.ResolvedReference,
-			RequestedDigest:        item.RequestedDigest,
-			ManifestCount:          item.ManifestCount,
-			CompletedManifestCount: item.CompletedManifestCount,
-			FailedManifestCount:    item.FailedManifestCount,
-			PlatformResults:        append([]scanner.PlatformResult(nil), item.PlatformResults...),
-			FindingsCount:          item.FindingsCount,
-			Error:                  item.Error,
-		})
-	}
-
-	return persistedResult{
-		RequestedReference:     result.RequestedReference,
-		Repository:             result.Repository,
-		Mode:                   result.Mode,
-		ResolvedReference:      result.ResolvedReference,
-		RequestedDigest:        result.RequestedDigest,
-		TagsEnumerated:         result.TagsEnumerated,
-		TagsResolved:           result.TagsResolved,
-		TagsFailed:             result.TagsFailed,
-		TargetCount:            result.TargetCount,
-		CompletedTargetCount:   result.CompletedTargetCount,
-		FailedTargetCount:      result.FailedTargetCount,
-		ManifestCount:          result.ManifestCount,
-		CompletedManifestCount: result.CompletedManifestCount,
-		FailedManifestCount:    result.FailedManifestCount,
-		TagResults:             append([]jobs.TagResult(nil), result.TagResults...),
-		Targets:                targets,
-		Findings:               items,
-		TotalFindings:          result.TotalFindings,
-		UniqueFingerprints:     result.UniqueFingerprints,
-	}
+	return capPersistedLowConfidenceFindings(items)
 }
 
 func capPersistedLowConfidenceFindings(items []persistedFinding) []persistedFinding {

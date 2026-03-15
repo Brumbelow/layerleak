@@ -33,6 +33,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidel
   - final filesystem contents
   - deleted-layer artifacts recoverable from prior layers
 - Detect likely secrets using structured, contextual, and file-aware detectors
+- Include the upstream TruffleHog default git-source detector catalog alongside local file-aware and entropy detectors
 - Redact secrets in output and persist only stable fingerprints for deduplication
 - Provide a CLI-first workflow, then an API and UI
 
@@ -63,8 +64,8 @@ export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_TAG_PAGE_SIZE=100
 ```
 
-If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes full JSON scan results to `findings/` under the repo root.
-Saved findings files contain unredacted finding values and unredacted context snippets.
+If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
+Saved findings files contain only detections, including unredacted finding values and unredacted context snippets.
 `LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
 
 ## How to start
@@ -89,8 +90,8 @@ Run a scan against a public Docker Hub image:
 ![cli pic](https://github.com/user-attachments/assets/ec9586a0-42a2-49d7-b121-fdd52cc1025d)
 
 
-Every scan also writes the full JSON result to the findings output directory.
-Those saved findings files include the exact match value, exact source location, and unredacted snippet for each finding.
+Every scan also writes a JSON findings file to the findings output directory.
+Those saved findings files contain only finding records, including the exact match value, exact source location, and unredacted snippet for each finding.
 For multi-arch images, layerleak skips attestation and provenance manifests such as `application/vnd.in-toto+json` instead of counting them as failed platform scans.
 If you pass a bare repository name such as `mongo`, layerleak enumerates all public tags in that repository, resolves each tag to a digest, groups duplicate digests, and scans the distinct targets. If you want a single image only, pass an explicit tag or digest such as `mongo:latest` or `mongo@sha256:...`.
 

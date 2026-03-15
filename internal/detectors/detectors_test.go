@@ -1,6 +1,9 @@
 package detectors
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDefaultSetScan(t *testing.T) {
 	tests := []struct {
@@ -246,4 +249,70 @@ func TestFileSpecificDetectorsRequireExpectedPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultSetIncludesTrufflehogAnthropicDetector(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Content: `
+System Log - Authentication Token Issued
+Date: 2025-02-04 14:32:10 UTC
+Service: Anthropic API Gateway
+API Key: sk-ant-api03-abc123xyz-456def789ghij-klmnopqrstuvwx-3456yza789bcde-1234fghijklmnopby56aaaogaopaaaabc123xyzAA
+`,
+	})
+
+	match, ok := findDetectorMatch(matches, "anthropic")
+	if !ok {
+		t.Fatalf("expected anthropic detector in %#v", matches)
+	}
+	if !strings.Contains(match.Value, "sk-ant-api03-") {
+		t.Fatalf("match.Value = %q", match.Value)
+	}
+}
+
+func TestDefaultSetIncludesTrufflehogMultipartDetector(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Content: `
+secret: "dapib8a799e452bf722cb28874cee50a7abf"
+domain: "nonprod-test.cloud.databricks.com"
+`,
+	})
+
+	match, ok := findDetectorMatch(matches, "databricks_token")
+	if !ok {
+		t.Fatalf("expected databricks_token detector in %#v", matches)
+	}
+	if !strings.Contains(match.Value, "dapib8a799e452bf722cb28874cee50a7abfnonprod-test.cloud.databricks.com") {
+		t.Fatalf("match.Value = %q", match.Value)
+	}
+}
+
+func TestDefaultSetDeduplicatesOverlappingGithubDetectors(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Content: "token=ghp_123456789012345678901234567890123456",
+	})
+
+	count := 0
+	for _, match := range matches {
+		if match.Detector == "github_token" {
+			count++
+		}
+	}
+
+	if count != 1 {
+		t.Fatalf("github_token count = %d, matches = %#v", count, matches)
+	}
+}
+
+func findDetectorMatch(matches []Match, detectorName string) (Match, bool) {
+	for _, match := range matches {
+		if match.Detector == detectorName {
+			return match, true
+		}
+	}
+
+	return Match{}, false
 }

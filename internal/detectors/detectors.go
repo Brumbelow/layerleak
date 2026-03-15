@@ -47,6 +47,7 @@ type Set struct {
 func Default() Set {
 	return Set{
 		detectors: []Detector{
+			newTrufflehogDetector(),
 			newRegexDetector("pem_private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), 0, ConfidenceHigh, nil),
 			newRegexDetector("github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("gitlab_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9\-_]{20,}\b`), 0, ConfidenceHigh, nil),

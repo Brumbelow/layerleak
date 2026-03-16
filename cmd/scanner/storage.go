@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/config"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/internal/config"
+	"github.com/brumbelow/layerleak/internal/findings"
+	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/storage"
 )
 
 func newStore(cfg config.Config) (storage.Store, error) {

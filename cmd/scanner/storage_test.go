@@ -4,11 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/config"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/scanner"
+	"github.com/brumbelow/layerleak/internal/config"
+	"github.com/brumbelow/layerleak/internal/findings"
+	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/scanner"
 )
 
 func TestNewStoreUsesNoopWithoutDatabaseURL(t *testing.T) {

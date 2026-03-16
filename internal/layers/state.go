@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/klauspost/compress/zstd"
 )
 

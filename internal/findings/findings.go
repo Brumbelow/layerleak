@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/internal/manifest"
 )
 
 type SourceType string

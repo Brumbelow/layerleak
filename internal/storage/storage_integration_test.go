@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/findings"
+	"github.com/brumbelow/layerleak/internal/manifest"
 	_ "github.com/lib/pq"
 )
 

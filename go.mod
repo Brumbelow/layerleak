@@ -1,4 +1,4 @@
-module git.tools.cloudfor.ge/andrew/layerleak
+module github.com/brumbelow/layerleak
 
 go 1.24.0
 

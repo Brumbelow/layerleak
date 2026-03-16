@@ -191,6 +191,64 @@ func TestBuildScanRecordCreatesFailedManifestForFailedTarget(t *testing.T) {
 	}
 }
 
+func TestBuildScanRecordDeduplicatesIdenticalRawSnippets(t *testing.T) {
+	record := buildScanRecord(manifest.Reference{
+		Registry:   "docker.io",
+		Repository: "library/app",
+		Original:   "library/app:latest",
+		Tag:        "latest",
+	}, jobs.Result{
+		RequestedReference: "library/app:latest",
+		Repository:         "library/app",
+		Mode:               "reference",
+		DetailedFindings: []findings.DetailedFinding{
+			{
+				Finding: findings.Finding{
+					DetectorName:   "github_token",
+					Confidence:     "high",
+					SourceType:     findings.SourceTypeFileFinal,
+					ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					Platform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
+					FilePath:       "z.env",
+					RedactedValue:  "ghp********************************56",
+					Fingerprint:    "fingerprint",
+					ContextSnippet: "TOKEN=ghp********************************56",
+				},
+				Value:          "ghp_123456789012345678901234567890123456",
+				RawSnippet:     "TOKEN=ghp_123456789012345678901234567890123456",
+				SourceLocation: "file:z.env",
+				MatchStart:     6,
+				MatchEnd:       46,
+			},
+			{
+				Finding: findings.Finding{
+					DetectorName:   "github_token",
+					Confidence:     "high",
+					SourceType:     findings.SourceTypeFileFinal,
+					ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					Platform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
+					FilePath:       "a.env",
+					RedactedValue:  "ghp********************************56",
+					Fingerprint:    "fingerprint",
+					ContextSnippet: "TOKEN=ghp********************************56",
+				},
+				Value:          "ghp_123456789012345678901234567890123456",
+				RawSnippet:     "TOKEN=ghp_123456789012345678901234567890123456",
+				SourceLocation: "file:a.env",
+				MatchStart:     6,
+				MatchEnd:       46,
+			},
+		},
+	}, time.Now().UTC())
+
+	if len(record.DetailedFindings) != 1 {
+		t.Fatalf("len(record.DetailedFindings) = %d", len(record.DetailedFindings))
+	}
+	if record.DetailedFindings[0].FilePath != "a.env" {
+		t.Fatalf("record.DetailedFindings[0].FilePath = %q", record.DetailedFindings[0].FilePath)
+	}
+}
+
 func testDetailedFindingForManifest(manifestDigest string, platform manifest.Platform) findings.DetailedFinding {
 	return findings.DetailedFinding{
 		Finding: findings.Finding{

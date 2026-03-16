@@ -401,7 +401,7 @@ func scanMetadata(detectorSet detectors.Set, manifestDigest string, platform man
 func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
 	result := make([]findings.DetailedFinding, 0)
 	for _, artifact := range artifacts {
-		if !artifact.Scannable || len(artifact.Content) == 0 {
+		if !artifact.Scannable || len(artifact.Content) == 0 || findings.ShouldSuppressFilePath(artifact.Path) {
 			continue
 		}
 		result = append(result, scanString(detectorSet, findings.Input{

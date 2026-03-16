@@ -232,6 +232,55 @@ func TestScanArtifactsSkipsNonTextArtifacts(t *testing.T) {
 	}
 }
 
+func TestScanArtifactsSkipsSuppressedTestDirectories(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		wantPath string
+	}{
+		{name: "test directory", path: "app/test/.env"},
+		{name: "tests directory", path: "app/tests/.env"},
+		{name: "case insensitive directory", path: "app/Test/.env"},
+		{name: "filename remains scannable", path: "app/app_test.go", wantPath: "app/app_test.go"},
+		{name: "non test substring remains scannable", path: "app/latest/.env", wantPath: "app/latest/.env"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items := scanArtifacts(
+				detectors.Default(),
+				"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				manifest.Platform{OS: "linux", Architecture: "amd64"},
+				findings.SourceTypeFileFinal,
+				true,
+				[]layers.Artifact{
+					{
+						Path:         tt.path,
+						LayerDigest:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						ContentClass: layers.ContentClassText,
+						Scannable:    true,
+						Content:      []byte("TOKEN=ghp_123456789012345678901234567890123456"),
+					},
+				},
+			)
+
+			if tt.wantPath == "" {
+				if len(items) != 0 {
+					t.Fatalf("len(items) = %d", len(items))
+				}
+				return
+			}
+
+			if len(items) != 1 {
+				t.Fatalf("len(items) = %d", len(items))
+			}
+			if items[0].FilePath != tt.wantPath {
+				t.Fatalf("items[0].FilePath = %q", items[0].FilePath)
+			}
+		})
+	}
+}
+
 func TestScanReturnsUnderlyingManifestFailureWhenAllSelectedManifestsFail(t *testing.T) {
 	manifestDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	configDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"

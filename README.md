@@ -15,7 +15,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidel
 - Manifest-aware and layer-aware scanning
 - Scans final filesystem and deleted-layer artifacts
 - Scans image config metadata, env vars, labels, and history
-- Deduplicates findings by secret fingerprint
+- Deduplicates findings by secret fingerprint and collapses repeated identical context snippets per manifest
 
 
 ## This project will:
@@ -35,6 +35,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidel
 - Detect likely secrets using structured, contextual, and file-aware detectors
 - Include the upstream TruffleHog default git-source detector catalog alongside local file-aware and entropy detectors
 - Redact secrets in output and persist only stable fingerprints for deduplication
+- Skip file-backed findings under `test/` and `tests/` directories
 - Provide a CLI-first workflow, then an API and UI
 
 ## How to install
@@ -92,7 +93,7 @@ Operational defaults:
 - Migrations are expected to remain additive.
 - The schema keeps current deduplicated state with `first_seen_at` and `last_seen_at`; it does not keep a `scan_runs` history table yet.
 - Tag mappings are refreshed for tags touched by the current scan.
-- Findings are deduplicated canonically by `(manifest_digest, fingerprint)` and per-location provenance is stored separately.
+- Findings are deduplicated canonically by `(manifest_digest, fingerprint)`, and repeated identical context snippets are collapsed before persistence.
 
 Secret-safety note:
 

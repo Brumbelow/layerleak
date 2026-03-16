@@ -103,33 +103,143 @@ func TestNormalizeDetailed(t *testing.T) {
 	}
 }
 
-func TestDeduplicatePreservesUniqueProvenance(t *testing.T) {
+func TestShouldSuppressFilePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		want     bool
+	}{
+		{name: "test directory", filePath: "app/test/.env", want: true},
+		{name: "tests directory", filePath: "app/tests/.env", want: true},
+		{name: "case insensitive directory", filePath: "app/Test/.env", want: true},
+		{name: "windows separator", filePath: `app\tests\.env`, want: true},
+		{name: "filename only", filePath: "app_test.go", want: false},
+		{name: "substring only", filePath: "app/latest/.env", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldSuppressFilePath(tt.filePath); got != tt.want {
+				t.Fatalf("ShouldSuppressFilePath(%q) = %t, want %t", tt.filePath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeduplicateDetailedUsesRawSnippetAcrossFilePaths(t *testing.T) {
+	items := []DetailedFinding{
+		testDetailedFinding("z.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+		testDetailedFinding("a.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+	}
+
+	deduped := DeduplicateDetailed(items)
+	if len(deduped) != 1 {
+		t.Fatalf("len(deduped) = %d", len(deduped))
+	}
+	if deduped[0].FilePath != "a.env" {
+		t.Fatalf("deduped[0].FilePath = %q", deduped[0].FilePath)
+	}
+}
+
+func TestDeduplicateDetailedUsesRawSnippetAcrossDetectors(t *testing.T) {
+	items := []DetailedFinding{
+		testDetailedFinding("app.env", "z_detector", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+		testDetailedFinding("app.env", "a_detector", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+	}
+
+	deduped := DeduplicateDetailed(items)
+	if len(deduped) != 1 {
+		t.Fatalf("len(deduped) = %d", len(deduped))
+	}
+	if deduped[0].DetectorName != "a_detector" {
+		t.Fatalf("deduped[0].DetectorName = %q", deduped[0].DetectorName)
+	}
+}
+
+func TestDeduplicateDetailedPreservesDistinctRawSnippetsForSameFingerprint(t *testing.T) {
+	items := []DetailedFinding{
+		testDetailedFinding("app.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+		testDetailedFinding("app.env", "github_token", "GH_TOKEN=ghp_123456789012345678901234567890123456", "GH_TOKEN=ghp********************************56"),
+	}
+
+	deduped := DeduplicateDetailed(items)
+	if len(deduped) != 2 {
+		t.Fatalf("len(deduped) = %d", len(deduped))
+	}
+}
+
+func TestDeduplicateUsesContextSnippetAcrossPublicFindings(t *testing.T) {
+	items := []Finding{
+		{
+			DetectorName:   "github_token",
+			SourceType:     SourceTypeFileFinal,
+			ManifestDigest: "sha256:a",
+			FilePath:       "z.env",
+			Fingerprint:    "one",
+			ContextSnippet: "TOKEN=ghp********************************56",
+		},
+		{
+			DetectorName:   "github_token",
+			SourceType:     SourceTypeFileFinal,
+			ManifestDigest: "sha256:a",
+			FilePath:       "a.env",
+			Fingerprint:    "one",
+			ContextSnippet: "TOKEN=ghp********************************56",
+		},
+	}
+
+	deduped := Deduplicate(items)
+	if len(deduped) != 1 {
+		t.Fatalf("len(deduped) = %d", len(deduped))
+	}
+	if deduped[0].FilePath != "a.env" {
+		t.Fatalf("deduped[0].FilePath = %q", deduped[0].FilePath)
+	}
+}
+
+func TestDeduplicatePreservesDistinctContextSnippets(t *testing.T) {
 	items := []Finding{
 		{
 			DetectorName:   "github_token",
 			SourceType:     SourceTypeEnv,
 			ManifestDigest: "sha256:a",
 			Fingerprint:    "one",
-			Key:            "TOKEN",
-		},
-		{
-			DetectorName:   "github_token",
-			SourceType:     SourceTypeEnv,
-			ManifestDigest: "sha256:a",
-			Fingerprint:    "one",
-			Key:            "TOKEN",
+			ContextSnippet: "TOKEN=ghp********************************56",
 		},
 		{
 			DetectorName:   "github_token",
 			SourceType:     SourceTypeLabel,
 			ManifestDigest: "sha256:a",
 			Fingerprint:    "one",
-			Key:            "token",
+			ContextSnippet: "token=ghp********************************56",
 		},
 	}
 
 	deduped := Deduplicate(items)
 	if len(deduped) != 2 {
 		t.Fatalf("len(deduped) = %d", len(deduped))
+	}
+}
+
+func testDetailedFinding(filePath, detectorName, rawSnippet, contextSnippet string) DetailedFinding {
+	return DetailedFinding{
+		Finding: Finding{
+			DetectorName:   detectorName,
+			Confidence:     "high",
+			SourceType:     SourceTypeFileFinal,
+			ManifestDigest: "sha256:a",
+			Platform: manifest.Platform{
+				OS:           "linux",
+				Architecture: "amd64",
+			},
+			FilePath:       filePath,
+			Fingerprint:    Fingerprint("ghp_123456789012345678901234567890123456"),
+			ContextSnippet: contextSnippet,
+		},
+		Value:          "ghp_123456789012345678901234567890123456",
+		RawSnippet:     rawSnippet,
+		SourceLocation: "file:" + filePath,
+		MatchStart:     6,
+		MatchEnd:       46,
 	}
 }

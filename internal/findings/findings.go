@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 
@@ -58,54 +59,19 @@ type DetailedFinding struct {
 }
 
 func Deduplicate(items []Finding) []Finding {
-	deduped := make([]Finding, 0, len(items))
+	sorted := slices.Clone(items)
+	slices.SortFunc(sorted, compareFindings)
+
+	deduped := make([]Finding, 0, len(sorted))
 	seen := make(map[string]struct{})
-	for _, item := range items {
-		key := strings.Join([]string{
-			item.DetectorName,
-			item.Confidence,
-			string(item.SourceType),
-			item.ManifestDigest,
-			item.Platform.String(),
-			item.FilePath,
-			item.LayerDigest,
-			item.Key,
-			item.RedactedValue,
-			item.Fingerprint,
-			item.ContextSnippet,
-			boolString(item.PresentInFinalImage),
-		}, "|")
+	for _, item := range sorted {
+		key := findingSnippetDedupKey(item)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		deduped = append(deduped, item)
 	}
-
-	slices.SortFunc(deduped, func(left, right Finding) int {
-		if value := strings.Compare(left.ManifestDigest, right.ManifestDigest); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.Platform.String(), right.Platform.String()); value != 0 {
-			return value
-		}
-		if value := strings.Compare(string(left.SourceType), string(right.SourceType)); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.FilePath, right.FilePath); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.LayerDigest, right.LayerDigest); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.DetectorName, right.DetectorName); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
-			return value
-		}
-		return strings.Compare(left.Key, right.Key)
-	})
 
 	return deduped
 }
@@ -171,62 +137,19 @@ func (d DetailedFinding) PublicFinding() Finding {
 }
 
 func DeduplicateDetailed(items []DetailedFinding) []DetailedFinding {
-	deduped := make([]DetailedFinding, 0, len(items))
+	sorted := slices.Clone(items)
+	slices.SortFunc(sorted, compareDetailedFindings)
+
+	deduped := make([]DetailedFinding, 0, len(sorted))
 	seen := make(map[string]struct{})
-	for _, item := range items {
-		key := strings.Join([]string{
-			item.DetectorName,
-			item.Confidence,
-			string(item.SourceType),
-			item.ManifestDigest,
-			item.Platform.String(),
-			item.FilePath,
-			item.LayerDigest,
-			item.Key,
-			item.RedactedValue,
-			item.Fingerprint,
-			item.ContextSnippet,
-			boolString(item.PresentInFinalImage),
-			item.Value,
-			item.RawSnippet,
-			item.SourceLocation,
-			intString(item.MatchStart),
-			intString(item.MatchEnd),
-		}, "|")
+	for _, item := range sorted {
+		key := detailedFindingSnippetDedupKey(item)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		deduped = append(deduped, item)
 	}
-
-	slices.SortFunc(deduped, func(left, right DetailedFinding) int {
-		if value := strings.Compare(left.ManifestDigest, right.ManifestDigest); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.Platform.String(), right.Platform.String()); value != 0 {
-			return value
-		}
-		if value := strings.Compare(string(left.SourceType), string(right.SourceType)); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.FilePath, right.FilePath); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.LayerDigest, right.LayerDigest); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.DetectorName, right.DetectorName); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
-			return value
-		}
-		if value := strings.Compare(left.Key, right.Key); value != 0 {
-			return value
-		}
-		return strings.Compare(left.SourceLocation, right.SourceLocation)
-	})
 
 	return deduped
 }
@@ -254,11 +177,39 @@ func Fingerprint(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func boolString(value bool) string {
-	if value {
-		return "true"
+func ShouldSuppressFilePath(filePath string) bool {
+	value := strings.TrimSpace(filePath)
+	if value == "" {
+		return false
 	}
-	return "false"
+
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = path.Clean(value)
+	if value == "." || value == "/" {
+		return false
+	}
+
+	parts := strings.Split(value, "/")
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." {
+			continue
+		}
+		normalized = append(normalized, part)
+	}
+	if len(normalized) <= 1 {
+		return false
+	}
+
+	for _, part := range normalized[:len(normalized)-1] {
+		switch strings.ToLower(part) {
+		case "test", "tests":
+			return true
+		}
+	}
+
+	return false
 }
 
 func buildContextSnippet(content string, match detectors.Match) string {
@@ -320,11 +271,59 @@ func buildSourceLocation(input Input) string {
 	return string(input.SourceType) + ":" + location
 }
 
-func intString(value int) string {
-	if value == 0 {
-		return "0"
+func findingSnippetDedupKey(item Finding) string {
+	return strings.Join([]string{
+		item.ManifestDigest,
+		firstNonEmpty(item.ContextSnippet, item.Fingerprint),
+	}, "|")
+}
+
+func detailedFindingSnippetDedupKey(item DetailedFinding) string {
+	return strings.Join([]string{
+		item.ManifestDigest,
+		firstNonEmpty(item.RawSnippet, item.ContextSnippet, item.Fingerprint),
+	}, "|")
+}
+
+func compareFindings(left, right Finding) int {
+	if value := strings.Compare(left.ManifestDigest, right.ManifestDigest); value != 0 {
+		return value
 	}
-	return fmt.Sprintf("%d", value)
+	if value := strings.Compare(left.Platform.String(), right.Platform.String()); value != 0 {
+		return value
+	}
+	if value := strings.Compare(string(left.SourceType), string(right.SourceType)); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.FilePath, right.FilePath); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.LayerDigest, right.LayerDigest); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.DetectorName, right.DetectorName); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
+		return value
+	}
+	return strings.Compare(left.Key, right.Key)
+}
+
+func compareDetailedFindings(left, right DetailedFinding) int {
+	if value := compareFindings(left.Finding, right.Finding); value != 0 {
+		return value
+	}
+	return strings.Compare(left.SourceLocation, right.SourceLocation)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func isValidSourceType(value SourceType) bool {

@@ -92,6 +92,21 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	}
 }
 
+func TestScanCommandFailsWhenDatabaseIsConfiguredButUnavailable(t *testing.T) {
+	t.Setenv("LAYERLEAK_DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:1/layerleak?sslmode=disable&connect_timeout=1")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	command.SetOut(io.Discard)
+	command.SetErr(io.Discard)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app:latest", "--format", "json"})
+
+	if err := command.Execute(); err == nil {
+		t.Fatal("Execute() error = nil")
+	}
+}
+
 type roundTripFunc func(request *http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

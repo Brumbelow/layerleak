@@ -57,16 +57,48 @@ Optional environment configuration:
 cp .env.example .env
 ```
 
-Result file configuration:
+Result and database configuration:
 
 ```bash
 export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_TAG_PAGE_SIZE=100
+export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable
 ```
 
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
 Saved findings files contain only detections, including unredacted finding values and unredacted context snippets.
 `LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
+If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
+
+## Postgres persistence
+
+Layerleak ships versioned SQL migrations under `migrations/`.
+Migrations are manual on purpose. The scanner does not auto-create or auto-upgrade the schema.
+
+Apply the initial schema with `psql`:
+
+```bash
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.up.sql
+```
+
+Rollback the initial schema:
+
+```bash
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.down.sql
+```
+
+Operational defaults:
+
+- Migrations are expected to remain additive.
+- The schema keeps current deduplicated state with `first_seen_at` and `last_seen_at`; it does not keep a `scan_runs` history table yet.
+- Tag mappings are refreshed for tags touched by the current scan.
+- Findings are deduplicated canonically by `(manifest_digest, fingerprint)` and per-location provenance is stored separately.
+
+Secret-safety note:
+
+- Postgres persistence stores raw finding values and raw snippets, not only redacted previews.
+- Use a dedicated database or schema for layerleak.
+- For the safest purge path, drop the dedicated database or schema instead of trying to surgically delete individual rows.
 
 ## How to start
 
@@ -92,6 +124,7 @@ Run a scan against a public Docker Hub image:
 
 Every scan also writes a JSON findings file to the findings output directory.
 Those saved findings files contain only finding records, including the exact match value, exact source location, and unredacted snippet for each finding.
+If Postgres persistence is enabled, the same raw finding material is stored in the `findings` and `finding_occurrences` tables.
 For multi-arch images, layerleak skips attestation and provenance manifests such as `application/vnd.in-toto+json` instead of counting them as failed platform scans.
 If you pass a bare repository name such as `mongo`, layerleak enumerates all public tags in that repository, resolves each tag to a digest, groups duplicate digests, and scans the distinct targets. If you want a single image only, pass an explicit tag or digest such as `mongo:latest` or `mongo@sha256:...`.
 

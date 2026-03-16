@@ -56,3 +56,62 @@ func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestProgressRendererClampsDynamicLinesToTerminalWidth(t *testing.T) {
+	var buffer bytes.Buffer
+	renderer := newProgressRenderer(&buffer)
+	renderer.dynamic = true
+	renderer.widthFn = func() int { return 40 }
+	renderer.state = progressSnapshot{
+		repository:       "library/app",
+		tagsCompleted:    951,
+		tagsTotal:        951,
+		targetsFailed:    71,
+		targetsTotal:     948,
+		findingsFound:    0,
+		phase:            "Target Failed",
+		message:          "apply layer sha256:18ec5c45ed12cb22d06f27e5a82e3cbadd5bfe9ef526f430b71d9646d70ec9a6: malformed gzip stream while scanning layer data",
+		currentReference: "docker.io/dynatrace/dynatrace-operator@sha256:18ec5c45ed12cb22d06f27e5a82e3cbadd5bfe9ef526f430b71d9646d70ec9a6",
+	}
+
+	lines := renderer.buildLines(renderer.renderLineWidth())
+	if len(lines) != progressBlockLines {
+		t.Fatalf("len(lines) = %d", len(lines))
+	}
+
+	for _, line := range lines {
+		if strings.ContainsAny(line, "\r\n") {
+			t.Fatalf("line contains newline characters: %q", line)
+		}
+		if len([]rune(line)) > 39 {
+			t.Fatalf("line length = %d, want <= 39: %q", len([]rune(line)), line)
+		}
+	}
+
+	if !strings.HasSuffix(lines[4], "...") {
+		t.Fatalf("status line was not truncated: %q", lines[4])
+	}
+}
+
+func TestProgressRendererSanitizesControlCharacters(t *testing.T) {
+	var buffer bytes.Buffer
+	renderer := newProgressRenderer(&buffer)
+	renderer.state = progressSnapshot{
+		repository: "library/app",
+		phase:      "Target Failed",
+		message:    "apply layer sha256:deadbeef\nbad entry\r\nwith\tcontrols",
+	}
+
+	lines := renderer.buildLines(0)
+	if len(lines) != progressBlockLines {
+		t.Fatalf("len(lines) = %d", len(lines))
+	}
+
+	statusLine := lines[4]
+	if strings.ContainsAny(statusLine, "\r\n\t") {
+		t.Fatalf("status line contains control characters: %q", statusLine)
+	}
+	if !strings.Contains(statusLine, "apply layer sha256:deadbeef bad entry with controls") {
+		t.Fatalf("status line not sanitized as expected: %q", statusLine)
+	}
+}

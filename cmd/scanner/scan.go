@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"text/tabwriter"
+	"time"
 
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/config"
 	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
@@ -64,6 +65,19 @@ func newScanCmd() *cobra.Command {
 			}
 			defer progress.Finish()
 
+			store, err := newStore(cfg)
+			if err != nil {
+				_ = progress.Update(progressSnapshot{
+					repository: ref.Repository,
+					phase:      "Error",
+					message:    err.Error(),
+				})
+				return err
+			}
+			if closer, ok := store.(interface{ Close() error }); ok {
+				defer closer.Close()
+			}
+
 			result, err := jobs.Scan(ctx, jobs.Request{
 				Reference:    ref,
 				Platform:     platform,
@@ -83,6 +97,40 @@ func newScanCmd() *cobra.Command {
 					message:    err.Error(),
 				})
 				return err
+			}
+
+			scannedAt := time.Now().UTC()
+			if store.Name() != "noop" {
+				if err := progress.Update(progressSnapshot{
+					repository:       ref.Repository,
+					tagsCompleted:    result.TagsResolved,
+					tagsFailed:       result.TagsFailed,
+					tagsTotal:        result.TagsEnumerated,
+					targetsCompleted: result.CompletedTargetCount,
+					targetsFailed:    result.FailedTargetCount,
+					targetsTotal:     result.TargetCount,
+					findingsFound:    result.TotalFindings,
+					phase:            "Saving Results",
+					message:          "Persisting findings to Postgres",
+				}); err != nil {
+					return err
+				}
+
+				if err := store.SaveScan(ctx, buildScanRecord(ref, result, scannedAt)); err != nil {
+					_ = progress.Update(progressSnapshot{
+						repository:       ref.Repository,
+						tagsCompleted:    result.TagsResolved,
+						tagsFailed:       result.TagsFailed,
+						tagsTotal:        result.TagsEnumerated,
+						targetsCompleted: result.CompletedTargetCount,
+						targetsFailed:    result.FailedTargetCount,
+						targetsTotal:     result.TargetCount,
+						findingsFound:    result.TotalFindings,
+						phase:            "Error",
+						message:          err.Error(),
+					})
+					return err
+				}
 			}
 
 			if err := progress.Update(progressSnapshot{

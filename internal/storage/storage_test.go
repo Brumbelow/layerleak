@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/findings"
+	"github.com/brumbelow/layerleak/internal/findings"
 )
 
 func TestPostgresConfigValidate(t *testing.T) {

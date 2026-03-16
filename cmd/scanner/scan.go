@@ -9,11 +9,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/config"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/registry"
+	"github.com/brumbelow/layerleak/internal/config"
+	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/registry"
 	"github.com/spf13/cobra"
 )
 

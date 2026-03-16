@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/registry"
+	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/registry"
 )
 
 func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/detectors"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/internal/manifest"
 )
 
 func TestRedact(t *testing.T) {

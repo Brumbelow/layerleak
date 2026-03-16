@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/manifest"
 )
 
 func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {

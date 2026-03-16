@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"git.tools.cloudfor.ge/andrew/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/jobs"
 )
 
 const layerLeakLogo = `

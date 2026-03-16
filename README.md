@@ -46,7 +46,7 @@ Prerequisites:
 Build from source:
 
 ```bash
-git clone https://git.tools.cloudfor.ge/andrew/layerleak.git
+git clone https://github.com/brumbelow/layerleak.git
 cd layerleak
 go build -o scanner ./cmd/scanner
 ```

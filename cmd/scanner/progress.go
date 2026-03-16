@@ -5,9 +5,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/brumbelow/layerleak/internal/jobs"
+	"golang.org/x/term"
 )
 
 const layerLeakLogo = `
@@ -20,6 +23,7 @@ const layerLeakLogo = `
 `
 
 const progressBlockLines = 8
+const defaultProgressWidth = 80
 
 type progressSnapshot struct {
 	repository       string
@@ -39,18 +43,28 @@ type progressSnapshot struct {
 }
 
 type progressRenderer struct {
-	out      io.Writer
-	dynamic  bool
-	started  bool
-	rendered bool
-	state    progressSnapshot
+	out        io.Writer
+	dynamic    bool
+	started    bool
+	rendered   bool
+	terminalFD int
+	widthFn    func() int
+	state      progressSnapshot
 }
 
 func newProgressRenderer(out io.Writer) *progressRenderer {
-	return &progressRenderer{
-		out:     out,
-		dynamic: isTerminalWriter(out),
+	terminalFD, ok := terminalFileDescriptor(out)
+	if !ok {
+		terminalFD = -1
 	}
+
+	renderer := &progressRenderer{
+		out:        out,
+		dynamic:    terminalFD >= 0 && term.IsTerminal(terminalFD),
+		terminalFD: terminalFD,
+	}
+	renderer.widthFn = renderer.currentWidth
+	return renderer
 }
 
 func (r *progressRenderer) Start(state progressSnapshot) error {
@@ -104,7 +118,7 @@ func (r *progressRenderer) Finish() error {
 }
 
 func (r *progressRenderer) render() error {
-	lines := r.buildLines()
+	lines := r.buildLines(r.renderLineWidth())
 	if r.dynamic && r.rendered {
 		if _, err := fmt.Fprintf(r.out, "\x1b[%dA", progressBlockLines); err != nil {
 			return err
@@ -124,21 +138,50 @@ func (r *progressRenderer) render() error {
 	return nil
 }
 
-func (r *progressRenderer) buildLines() []string {
+func (r *progressRenderer) buildLines(maxWidth int) []string {
 	tagLabel := progressLabel(r.state.tagsCompleted, r.state.tagsTotal, r.state.tagsFailed, "waiting for tag enumeration")
 	targetLabel := progressLabel(r.state.targetsCompleted, r.state.targetsTotal, r.state.targetsFailed, "waiting for target selection")
 	progressCompleted, progressTotal := progressCounts(r.state)
 
 	return []string{
-		fmt.Sprintf("Repository   %s", defaultValue(r.state.repository, "unknown")),
-		fmt.Sprintf("Tags         %s", tagLabel),
-		fmt.Sprintf("Targets      %s", targetLabel),
-		fmt.Sprintf("Phase        %s", defaultValue(r.state.phase, "Starting")),
-		fmt.Sprintf("Status       %s", defaultValue(r.state.message, "Preparing scan")),
-		fmt.Sprintf("Progress     %s", renderBar(progressCompleted, progressTotal, 32)),
-		fmt.Sprintf("Findings     %d detected", r.state.findingsFound),
-		fmt.Sprintf("Current      %s", currentTargetLabel(r.state)),
+		renderProgressLine("Repository", progressValue(r.state.repository, "unknown"), maxWidth),
+		renderProgressLine("Tags", progressValue(tagLabel, "waiting for tag enumeration"), maxWidth),
+		renderProgressLine("Targets", progressValue(targetLabel, "waiting for target selection"), maxWidth),
+		renderProgressLine("Phase", progressValue(r.state.phase, "Starting"), maxWidth),
+		renderProgressLine("Status", progressValue(r.state.message, "Preparing scan"), maxWidth),
+		renderProgressLine("Progress", renderBar(progressCompleted, progressTotal, 32), maxWidth),
+		renderProgressLine("Findings", fmt.Sprintf("%d detected", r.state.findingsFound), maxWidth),
+		renderProgressLine("Current", progressValue(currentTargetLabel(r.state), "waiting"), maxWidth),
 	}
+}
+
+func (r *progressRenderer) currentWidth() int {
+	if r.terminalFD >= 0 {
+		if width, _, err := term.GetSize(r.terminalFD); err == nil && width > 0 {
+			return width
+		}
+	}
+	if width := widthFromEnv("COLUMNS"); width > 0 {
+		return width
+	}
+	return defaultProgressWidth
+}
+
+func (r *progressRenderer) renderLineWidth() int {
+	if !r.dynamic {
+		return 0
+	}
+	width := defaultProgressWidth
+	if r.widthFn != nil {
+		width = r.widthFn()
+	}
+	if width <= 0 {
+		width = defaultProgressWidth
+	}
+	if width > 1 {
+		return width - 1
+	}
+	return width
 }
 
 func progressPhaseLabel(phase jobs.ProgressPhase) string {
@@ -224,30 +267,12 @@ func renderBar(completed, total, width int) string {
 	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
 }
 
-func defaultValue(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
-}
-
-func isTerminalWriter(out io.Writer) bool {
+func terminalFileDescriptor(out io.Writer) (int, bool) {
 	file, ok := out.(*os.File)
 	if !ok {
-		return false
+		return 0, false
 	}
-	info, err := file.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
-}
-
-func maxInt(left, right int) int {
-	if left > right {
-		return left
-	}
-	return right
+	return int(file.Fd()), true
 }
 
 func progressLabel(completed, total, failed int, waiting string) string {
@@ -272,4 +297,55 @@ func savedResultMessage(path string) string {
 		return "Saved findings result"
 	}
 	return "Saved " + filepath.Base(path)
+}
+
+func renderProgressLine(label, value string, maxWidth int) string {
+	line := fmt.Sprintf("%-12s %s", label, sanitizeProgressValue(value))
+	return clampProgressLine(line, maxWidth)
+}
+
+func progressValue(value, fallback string) string {
+	sanitized := sanitizeProgressValue(value)
+	if sanitized == "" {
+		return fallback
+	}
+	return sanitized
+}
+
+func sanitizeProgressValue(value string) string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	})
+	return strings.Join(fields, " ")
+}
+
+func clampProgressLine(line string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return line
+	}
+
+	runes := []rune(line)
+	if len(runes) <= maxWidth {
+		return line
+	}
+
+	if maxWidth <= 3 {
+		return strings.Repeat(".", maxWidth)
+	}
+
+	return string(runes[:maxWidth-3]) + "..."
+}
+
+func widthFromEnv(key string) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return 0
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+
+	return parsed
 }

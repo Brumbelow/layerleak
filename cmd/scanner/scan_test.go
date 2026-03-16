@@ -107,6 +107,56 @@ func TestScanCommandFailsWhenDatabaseIsConfiguredButUnavailable(t *testing.T) {
 	}
 }
 
+func TestScanCommandSanitizesProgressErrors(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return commandResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch request.URL.Path {
+		case "/v2/library/app/manifests/latest":
+			return commandResponse(http.StatusNotFound, "text/plain", []byte("missing line one\nmissing\tline two"), nil), nil
+		default:
+			return commandResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	defer func() {
+		http.DefaultTransport = oldTransport
+	}()
+
+	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	var stderr bytes.Buffer
+	command.SetOut(io.Discard)
+	command.SetErr(&stderr)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app:latest", "--format", "json"})
+
+	if err := command.Execute(); err == nil {
+		t.Fatal("Execute() error = nil")
+	}
+
+	output := stderr.String()
+	if strings.Contains(output, "missing line one\nmissing\tline two") {
+		t.Fatalf("stderr contained unsanitized multiline error: %q", output)
+	}
+	if !strings.Contains(output, "body=missing line one missing line two") {
+		t.Fatalf("stderr missing sanitized error body: %q", output)
+	}
+}
+
 type roundTripFunc func(request *http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

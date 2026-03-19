@@ -23,7 +23,7 @@ Contributions should keep the scanner:
 Build the CLI:
 
 ```bash
-go build -o scanner ./cmd/scanner
+go build -o layerleak ./cmd/scanner
 ```
 
 Run the test suite:

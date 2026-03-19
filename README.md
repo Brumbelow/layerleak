@@ -49,7 +49,7 @@ Build from source:
 ```bash
 git clone https://github.com/brumbelow/layerleak.git
 cd layerleak
-go build -o scanner ./cmd/scanner
+go build -o layerleak ./cmd/scanner
 ```
 
 Optional environment configuration:
@@ -106,8 +106,8 @@ Secret-safety note:
 Show the CLI help:
 
 ```bash
-./scanner --help
-./scanner scan --help
+./layerleak --help
+./layerleak scan --help
 ```
 ![help_output](https://github.com/user-attachments/assets/8af9af41-30b1-4ee4-a0e5-2c20ed826e5f)
 
@@ -115,10 +115,10 @@ Show the CLI help:
 Run a scan against a public Docker Hub image:
 
 ```bash
-./scanner scan ubuntu
-./scanner scan library/nginx:latest --format json
-./scanner scan alpine:latest --platform linux/amd64
-./scanner scan mongo
+./layerleak scan ubuntu
+./layerleak scan library/nginx:latest --format json
+./layerleak scan alpine:latest --platform linux/amd64
+./layerleak scan mongo
 ```
 ![cli pic](https://github.com/user-attachments/assets/ec9586a0-42a2-49d7-b121-fdd52cc1025d)
 
@@ -132,6 +132,6 @@ If you pass a bare repository name such as `mongo`, layerleak enumerates all pub
 Command syntax:
 
 ```text
-scanner [command]
-scanner scan <image-ref> [flags]
+layerleak [command]
+layerleak scan <image-ref> [flags]
 ```

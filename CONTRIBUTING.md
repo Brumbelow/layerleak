@@ -38,6 +38,8 @@ Run the scanner against a single tag:
 go run ./cmd/scanner scan redis:latest
 ```
 
+The legacy entrypoint `go run ./cmd/layerleak ...` is also supported for backward compatibility.
+
 Run the scanner against an entire public repository:
 
 ```bash

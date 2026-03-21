@@ -109,7 +109,7 @@ Show the CLI help:
 ./layerleak --help
 ./layerleak scan --help
 ```
-![help_output](https://github.com/user-attachments/assets/8af9af41-30b1-4ee4-a0e5-2c20ed826e5f)
+![help_output](https://github.com/user-attachments/assets/843804bf-4378-4e13-aa2b-e18910535d75)
 
 
 Run a scan against a public Docker Hub image:
@@ -120,7 +120,7 @@ Run a scan against a public Docker Hub image:
 ./layerleak scan alpine:latest --platform linux/amd64
 ./layerleak scan mongo
 ```
-![cli pic](https://github.com/user-attachments/assets/ec9586a0-42a2-49d7-b121-fdd52cc1025d)
+![cli pic](https://github.com/user-attachments/assets/f1940103-8940-4ffa-a5e0-759f079fd1b7)
 
 
 Every scan also writes a JSON findings file to the findings output directory.

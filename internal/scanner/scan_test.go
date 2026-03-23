@@ -50,7 +50,7 @@ func TestScanMultiArchImage(t *testing.T) {
     "Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"],
     "Labels":{"gitlab":"glpat-12345678901234567890"},
     "User":"builder",
-    "WorkingDir":"https://builder:pass@example.com/app"
+    "WorkingDir":"https://builder:realpass123@registry.internal/app"
   },
   "history":[{"created_by":"docker build --build-arg TOKEN=ghp_123456789012345678901234567890123456"}]
 }`

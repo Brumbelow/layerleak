@@ -17,28 +17,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidel
 - Scans image config metadata, env vars, labels, and history
 - Deduplicates findings by secret fingerprint and collapses repeated identical context snippets per manifest
 
-
-## This project will:
-- Scan public Docker Hub repositories and tags
-- Resolve tags to manifests and scan by digest
-- Treat a bare repository name such as `mongo` as a repository-wide scan across all public tags
-- Support multi-arch images by scanning platform-specific manifests
-- Skip attestation and provenance manifests embedded in OCI indexes and scan only runnable image manifests
-- Inspect image metadata:
-  - config
-  - env
-  - labels
-  - history
-- Inspect layer contents:
-  - final filesystem contents
-  - deleted-layer artifacts recoverable from prior layers
-- Detect likely secrets using structured, contextual, and file-aware detectors
-- Parse common credential files such as `.aws/credentials`, `.aws/config`, `.docker/config.json`, `.git-credentials`, `.terraformrc`, and `credentials.tfrc.json`
-- Include the upstream TruffleHog default git-source detector catalog alongside local file-aware and entropy detectors
-- Redact secrets in output and persist only stable fingerprints for deduplication
-- Classify likely test/example/demo placeholders separately from actionable findings instead of dropping provenance
-- Provide a CLI-first workflow, then an API and UI
-
 ## How to install
 
 Prerequisites:

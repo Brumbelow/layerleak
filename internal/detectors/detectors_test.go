@@ -103,7 +103,7 @@ func TestDefaultSetScan(t *testing.T) {
 		{
 			name: "basic auth url",
 			input: ScanInput{
-				Content: "https://user:pass@example.com/config",
+				Content: "https://deploy:supersecretvalue@registry.internal/config",
 				Path:    "/root/.netrc",
 			},
 			wantDetector: "basic_auth_url",
@@ -248,6 +248,47 @@ func TestFileSpecificDetectorsRequireExpectedPath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDefaultSetDiscardsPlaceholderDockerAuthBlob(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Path:    "/root/.docker/config.json",
+		Content: `{"auth":"Zm9vOmJhcg=="}`,
+	})
+
+	for _, match := range matches {
+		if match.Detector == "docker_auth_blob" {
+			t.Fatalf("unexpected docker_auth_blob match: %#v", match)
+		}
+	}
+}
+
+func TestDefaultSetDiscardsPlaceholderBasicAuthURL(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Content: "https://foo:bar@example.com/config",
+	})
+
+	for _, match := range matches {
+		if match.Detector == "basic_auth_url" {
+			t.Fatalf("unexpected basic_auth_url match: %#v", match)
+		}
+	}
+}
+
+func TestDefaultSetDiscardsPlaceholderNetrcPassword(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Path:    "/root/.netrc",
+		Content: "machine example.com login deploy password foobar",
+	})
+
+	for _, match := range matches {
+		if match.Detector == "netrc_password" {
+			t.Fatalf("unexpected netrc_password match: %#v", match)
+		}
 	}
 }
 

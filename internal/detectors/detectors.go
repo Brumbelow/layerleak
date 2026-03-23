@@ -97,6 +97,15 @@ func (s Set) Scan(input ScanInput) []Match {
 		matches = append(matches, detector.Scan(input)...)
 	}
 
+	filtered := matches[:0]
+	for _, match := range matches {
+		if shouldDiscardMatchValue(match.Value) {
+			continue
+		}
+		filtered = append(filtered, match)
+	}
+	matches = filtered
+
 	sort.Slice(matches, func(i, j int) bool {
 		if matches[i].Start == matches[j].Start {
 			if matches[i].End == matches[j].End {
@@ -739,6 +748,83 @@ func passesEntropy(value string) bool {
 		entropy += -probability * math.Log2(probability)
 	}
 	return entropy >= 3.75
+}
+
+func shouldDiscardMatchValue(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return true
+	}
+
+	for _, candidate := range discardValueCandidates(trimmed) {
+		if containsDiscardPlaceholder(candidate) {
+			return true
+		}
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err == nil && shouldDiscardPlaceholderURL(parsed) {
+		return true
+	}
+
+	return false
+}
+
+func discardValueCandidates(value string) []string {
+	candidates := []string{strings.ToLower(strings.TrimSpace(value))}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		decoded, err := encoding.DecodeString(strings.TrimSpace(value))
+		if err != nil {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(string(decoded)))
+		if text == "" || !isPrintableText(text) {
+			continue
+		}
+		candidates = append(candidates, text)
+	}
+
+	return candidates
+}
+
+func containsDiscardPlaceholder(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range []string{
+		"foobar",
+		"foo:bar",
+		"user@example.com",
+		"admin@example.com",
+		"test@example.com",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldDiscardPlaceholderURL(parsed *url.URL) bool {
+	if parsed == nil || parsed.User == nil {
+		return false
+	}
+
+	username := strings.ToLower(strings.TrimSpace(parsed.User.Username()))
+	password, _ := parsed.User.Password()
+	password = strings.ToLower(strings.TrimSpace(password))
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+
+	if containsDiscardPlaceholder(username + ":" + password) {
+		return true
+	}
+	if containsDiscardPlaceholder(username + "@" + host) {
+		return true
+	}
+	return false
 }
 
 func confidenceRank(value Confidence) int {

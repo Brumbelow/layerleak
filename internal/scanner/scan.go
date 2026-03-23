@@ -53,17 +53,21 @@ type ProgressUpdate struct {
 type ProgressFunc func(ProgressUpdate)
 
 type Result struct {
-	RequestedReference     string                     `json:"requested_reference"`
-	ResolvedReference      string                     `json:"resolved_reference"`
-	RequestedDigest        string                     `json:"requested_digest"`
-	ManifestCount          int                        `json:"manifest_count"`
-	CompletedManifestCount int                        `json:"completed_manifest_count"`
-	FailedManifestCount    int                        `json:"failed_manifest_count"`
-	PlatformResults        []PlatformResult           `json:"platform_results"`
-	Findings               []findings.Finding         `json:"findings"`
-	DetailedFindings       []findings.DetailedFinding `json:"-"`
-	TotalFindings          int                        `json:"total_findings"`
-	UniqueFingerprints     int                        `json:"unique_fingerprints"`
+	RequestedReference           string                     `json:"requested_reference"`
+	ResolvedReference            string                     `json:"resolved_reference"`
+	RequestedDigest              string                     `json:"requested_digest"`
+	ManifestCount                int                        `json:"manifest_count"`
+	CompletedManifestCount       int                        `json:"completed_manifest_count"`
+	FailedManifestCount          int                        `json:"failed_manifest_count"`
+	PlatformResults              []PlatformResult           `json:"platform_results"`
+	Findings                     []findings.Finding         `json:"findings"`
+	DetailedFindings             []findings.DetailedFinding `json:"-"`
+	SuppressedFindings           []findings.Finding         `json:"suppressed_findings,omitempty"`
+	SuppressedDetailedFindings   []findings.DetailedFinding `json:"-"`
+	TotalFindings                int                        `json:"total_findings"`
+	UniqueFingerprints           int                        `json:"unique_fingerprints"`
+	SuppressedFindingsCount      int                        `json:"suppressed_findings_count,omitempty"`
+	SuppressedUniqueFingerprints int                        `json:"suppressed_unique_fingerprints,omitempty"`
 }
 
 type PlatformResult struct {
@@ -146,6 +150,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	})
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
+	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
 	findingsFound := 0
 	for _, target := range targets {
 		emitProgress(request, ProgressUpdate{
@@ -161,7 +166,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			Message:               manifestStatusMessage("Scanning", target.descriptor),
 		})
 
-		platformResult, platformFindings, err := scanManifest(ctx, request, target.descriptor, target.manifest)
+		platformResult, platformFindings, platformSuppressedFindings, err := scanManifest(ctx, request, target.descriptor, target.manifest)
 		if err != nil {
 			result.PlatformResults = append(result.PlatformResults, PlatformResult{
 				Platform:       target.descriptor.Platform,
@@ -188,6 +193,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 		result.CompletedManifestCount++
 		findingsFound += platformResult.FindingsCount
 		allDetailedFindings = append(allDetailedFindings, platformFindings...)
+		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, platformSuppressedFindings...)
 		emitProgress(request, ProgressUpdate{
 			Phase:                 ProgressPhaseManifestCompleted,
 			Repository:            request.Reference.Repository,
@@ -211,8 +217,15 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	for _, item := range result.DetailedFindings {
 		result.Findings = append(result.Findings, item.PublicFinding())
 	}
+	result.SuppressedDetailedFindings = findings.DeduplicateDetailed(allSuppressedDetailedFindings)
+	result.SuppressedFindings = make([]findings.Finding, 0, len(result.SuppressedDetailedFindings))
+	for _, item := range result.SuppressedDetailedFindings {
+		result.SuppressedFindings = append(result.SuppressedFindings, item.PublicFinding())
+	}
 	result.TotalFindings = len(result.Findings)
 	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
+	result.SuppressedFindingsCount = len(result.SuppressedFindings)
+	result.SuppressedUniqueFingerprints = findings.UniqueFingerprintCount(result.SuppressedFindings)
 	sortPlatformResults(result.PlatformResults)
 	emitProgress(request, ProgressUpdate{
 		Phase:                 ProgressPhaseCompleted,
@@ -229,29 +242,29 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	return result, nil
 }
 
-func scanManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (PlatformResult, []findings.DetailedFinding, error) {
+func scanManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (PlatformResult, []findings.DetailedFinding, []findings.DetailedFinding, error) {
 	if descriptor.Digest == "" {
-		return PlatformResult{}, nil, fmt.Errorf("manifest digest is required")
+		return PlatformResult{}, nil, nil, fmt.Errorf("manifest digest is required")
 	}
 
 	imageManifest, err := resolveImageManifest(ctx, request, descriptor, preloaded)
 	if err != nil {
-		return PlatformResult{}, nil, err
+		return PlatformResult{}, nil, nil, err
 	}
 
 	configBlob, err := request.Registry.OpenBlob(ctx, request.Reference.Repository, imageManifest.Config.Digest)
 	if err != nil {
-		return PlatformResult{}, nil, fmt.Errorf("fetch config blob: %w", err)
+		return PlatformResult{}, nil, nil, fmt.Errorf("fetch config blob: %w", err)
 	}
 	configBody, err := io.ReadAll(configBlob.Body)
 	configBlob.Body.Close()
 	if err != nil {
-		return PlatformResult{}, nil, fmt.Errorf("read config blob: %w", err)
+		return PlatformResult{}, nil, nil, fmt.Errorf("read config blob: %w", err)
 	}
 
 	imageConfig, err := manifest.ParseImageConfig(configBody)
 	if err != nil {
-		return PlatformResult{}, nil, err
+		return PlatformResult{}, nil, nil, err
 	}
 
 	platform := descriptor.Platform
@@ -274,26 +287,28 @@ func scanManifest(ctx context.Context, request Request, descriptor manifest.Desc
 		return response.Body, nil
 	}))
 	if err != nil {
-		return PlatformResult{}, nil, err
+		return PlatformResult{}, nil, nil, err
 	}
 
 	fileFindings := scanArtifacts(request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileFinal, true, layerResult.FinalFiles)
 	fileFindings = append(fileFindings, scanArtifacts(request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileDeletedLayer, false, layerResult.DeletedArtifacts)...)
 
 	allFindings := append(metadataFindings, fileFindings...)
+	actionableFindings, suppressedFindings := splitDetailedFindings(allFindings)
 	if request.Logger != nil {
 		request.Logger.DebugContext(ctx, "scanned platform manifest",
 			"manifest_digest", descriptor.Digest,
 			"platform", platform.String(),
-			"findings", len(allFindings),
+			"findings", len(actionableFindings),
+			"suppressed_findings", len(suppressedFindings),
 		)
 	}
 
 	return PlatformResult{
 		Platform:       platform,
 		ManifestDigest: descriptor.Digest,
-		FindingsCount:  len(allFindings),
-	}, allFindings, nil
+		FindingsCount:  len(actionableFindings),
+	}, actionableFindings, suppressedFindings, nil
 }
 
 func resolveImageManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (manifest.ImageManifest, error) {
@@ -401,7 +416,7 @@ func scanMetadata(detectorSet detectors.Set, manifestDigest string, platform man
 func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
 	result := make([]findings.DetailedFinding, 0)
 	for _, artifact := range artifacts {
-		if !artifact.Scannable || len(artifact.Content) == 0 || findings.ShouldSuppressFilePath(artifact.Path) {
+		if !artifact.Scannable || len(artifact.Content) == 0 {
 			continue
 		}
 		result = append(result, scanString(detectorSet, findings.Input{
@@ -431,6 +446,21 @@ func scanString(detectorSet detectors.Set, input findings.Input, scanInput detec
 		result = append(result, finding)
 	}
 	return result
+}
+
+func splitDetailedFindings(items []findings.DetailedFinding) ([]findings.DetailedFinding, []findings.DetailedFinding) {
+	actionable := make([]findings.DetailedFinding, 0, len(items))
+	suppressed := make([]findings.DetailedFinding, 0)
+	for _, item := range items {
+		switch item.Disposition {
+		case findings.DispositionExample:
+			suppressed = append(suppressed, item)
+		default:
+			actionable = append(actionable, item)
+		}
+	}
+
+	return actionable, suppressed
 }
 
 func sortPlatformResults(items []PlatformResult) {

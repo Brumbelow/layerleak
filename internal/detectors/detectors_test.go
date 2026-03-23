@@ -289,6 +289,115 @@ domain: "nonprod-test.cloud.databricks.com"
 	}
 }
 
+func TestAWSSharedCredentialsDetectorPromotesPairedProfile(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Path: "/root/.aws/credentials",
+		Content: `[default]
+aws_access_key_id = AKIA1234567890ABCDEF
+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+`,
+	})
+
+	accessKeyMatch, ok := findDetectorMatch(matches, "aws_shared_credentials_access_key_id")
+	if !ok {
+		t.Fatalf("expected aws_shared_credentials_access_key_id in %#v", matches)
+	}
+	if accessKeyMatch.Confidence != ConfidenceHigh {
+		t.Fatalf("accessKeyMatch.Confidence = %q", accessKeyMatch.Confidence)
+	}
+
+	secretMatch, ok := findDetectorMatch(matches, "aws_shared_credentials_secret_access_key")
+	if !ok {
+		t.Fatalf("expected aws_shared_credentials_secret_access_key in %#v", matches)
+	}
+	if secretMatch.Confidence != ConfidenceHigh {
+		t.Fatalf("secretMatch.Confidence = %q", secretMatch.Confidence)
+	}
+
+	legacyCount := 0
+	for _, match := range matches {
+		if match.Value == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" {
+			legacyCount++
+		}
+	}
+	if legacyCount != 1 {
+		t.Fatalf("secret value match count = %d, matches = %#v", legacyCount, matches)
+	}
+}
+
+func TestAWSSharedCredentialsDetectorKeepsUnpairedAccessKeyMedium(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Path: "/root/.aws/credentials",
+		Content: `[default]
+aws_access_key_id = AKIA1234567890ABCDEF
+`,
+	})
+
+	match, ok := findDetectorMatch(matches, "aws_shared_credentials_access_key_id")
+	if !ok {
+		t.Fatalf("expected aws_shared_credentials_access_key_id in %#v", matches)
+	}
+	if match.Confidence != ConfidenceMedium {
+		t.Fatalf("match.Confidence = %q", match.Confidence)
+	}
+}
+
+func TestGitCredentialsDetectorExtractsPassword(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Path:    "/root/.git-credentials",
+		Content: "https://deploy:supersecretvalue@example.com/org/repo.git\n",
+	})
+
+	match, ok := findDetectorMatch(matches, "git_credentials_password")
+	if !ok {
+		t.Fatalf("expected git_credentials_password in %#v", matches)
+	}
+	if match.Value != "supersecretvalue" {
+		t.Fatalf("match.Value = %q", match.Value)
+	}
+}
+
+func TestTerraformCredentialsDetectorFindsToken(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Path: "/root/.terraformrc",
+		Content: `credentials "app.terraform.io" {
+  token = "atlasv1.1234567890abcdefghijklmnopqrstuv"
+}`,
+	})
+
+	match, ok := findDetectorMatch(matches, "terraform_cloud_token")
+	if !ok {
+		t.Fatalf("expected terraform_cloud_token in %#v", matches)
+	}
+	if !strings.Contains(match.Value, "atlasv1.") {
+		t.Fatalf("match.Value = %q", match.Value)
+	}
+}
+
+func TestDefaultSetUsesMediumBaseConfidenceForTrufflehogMatches(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Content: `
+System Log - Authentication Token Issued
+Date: 2025-02-04 14:32:10 UTC
+Service: Anthropic API Gateway
+API Key: sk-ant-api03-abc123xyz-456def789ghij-klmnopqrstuvwx-3456yza789bcde-1234fghijklmnopby56aaaogaopaaaabc123xyzAA
+`,
+	})
+
+	match, ok := findDetectorMatch(matches, "anthropic")
+	if !ok {
+		t.Fatalf("expected anthropic detector in %#v", matches)
+	}
+	if match.Confidence != ConfidenceMedium {
+		t.Fatalf("match.Confidence = %q", match.Confidence)
+	}
+}
+
 func TestDefaultSetDeduplicatesOverlappingGithubDetectors(t *testing.T) {
 	set := Default()
 	matches := set.Scan(ScanInput{

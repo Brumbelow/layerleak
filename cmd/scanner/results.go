@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,23 +15,26 @@ import (
 )
 
 type persistedFinding struct {
-	DetectorName        string              `json:"detector_name"`
-	Confidence          string              `json:"confidence"`
-	SourceType          findings.SourceType `json:"source_type"`
-	ManifestDigest      string              `json:"manifest_digest"`
-	Platform            manifest.Platform   `json:"platform,omitempty"`
-	FilePath            string              `json:"file_path,omitempty"`
-	LayerDigest         string              `json:"layer_digest,omitempty"`
-	Key                 string              `json:"key,omitempty"`
-	Value               string              `json:"value"`
-	Fingerprint         string              `json:"fingerprint"`
-	ContextSnippet      string              `json:"context_snippet"`
-	SourceLocation      string              `json:"source_location"`
-	MatchStart          int                 `json:"match_start"`
-	MatchEnd            int                 `json:"match_end"`
-	PresentInFinalImage bool                `json:"present_in_final_image"`
-	OccurrenceCount     int                 `json:"occurrence_count,omitempty"`
-	SuppressedCount     int                 `json:"suppressed_occurrence_count,omitempty"`
+	DetectorName        string                     `json:"detector_name"`
+	Confidence          string                     `json:"confidence"`
+	Disposition         findings.Disposition       `json:"disposition"`
+	DispositionReason   findings.DispositionReason `json:"disposition_reason,omitempty"`
+	SourceType          findings.SourceType        `json:"source_type"`
+	ManifestDigest      string                     `json:"manifest_digest"`
+	Platform            manifest.Platform          `json:"platform,omitempty"`
+	FilePath            string                     `json:"file_path,omitempty"`
+	LayerDigest         string                     `json:"layer_digest,omitempty"`
+	Key                 string                     `json:"key,omitempty"`
+	LineNumber          int                        `json:"line_number,omitempty"`
+	Value               string                     `json:"value"`
+	Fingerprint         string                     `json:"fingerprint"`
+	ContextSnippet      string                     `json:"context_snippet"`
+	SourceLocation      string                     `json:"source_location"`
+	MatchStart          int                        `json:"match_start"`
+	MatchEnd            int                        `json:"match_end"`
+	PresentInFinalImage bool                       `json:"present_in_final_image"`
+	OccurrenceCount     int                        `json:"occurrence_count,omitempty"`
+	SuppressedCount     int                        `json:"suppressed_occurrence_count,omitempty"`
 }
 
 const persistedLowConfidenceGroupCap = 3
@@ -61,17 +65,23 @@ func writeResultFile(configuredDir string, result jobs.Result) (string, error) {
 }
 
 func buildPersistedFindings(result jobs.Result) []persistedFinding {
-	items := make([]persistedFinding, 0, len(result.DetailedFindings))
-	for _, item := range result.DetailedFindings {
+	allDetailedFindings := append([]findings.DetailedFinding{}, result.DetailedFindings...)
+	allDetailedFindings = append(allDetailedFindings, result.SuppressedDetailedFindings...)
+
+	items := make([]persistedFinding, 0, len(allDetailedFindings))
+	for _, item := range allDetailedFindings {
 		items = append(items, persistedFinding{
 			DetectorName:        item.DetectorName,
 			Confidence:          item.Confidence,
+			Disposition:         item.Disposition,
+			DispositionReason:   item.DispositionReason,
 			SourceType:          item.SourceType,
 			ManifestDigest:      item.ManifestDigest,
 			Platform:            item.Platform,
 			FilePath:            item.FilePath,
 			LayerDigest:         item.LayerDigest,
 			Key:                 item.Key,
+			LineNumber:          item.LineNumber,
 			Value:               item.Value,
 			Fingerprint:         item.Fingerprint,
 			ContextSnippet:      item.RawSnippet,
@@ -123,12 +133,14 @@ func persistedFindingGroupKey(item persistedFinding) (string, bool) {
 	return strings.Join([]string{
 		item.DetectorName,
 		item.Confidence,
+		string(item.Disposition),
 		string(item.SourceType),
 		item.ManifestDigest,
 		item.Platform.String(),
 		item.FilePath,
 		item.LayerDigest,
 		item.Key,
+		strconv.Itoa(item.LineNumber),
 		item.Value,
 		item.Fingerprint,
 		boolString(item.PresentInFinalImage),

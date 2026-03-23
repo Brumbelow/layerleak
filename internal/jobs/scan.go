@@ -56,26 +56,30 @@ type ProgressUpdate struct {
 type ProgressFunc func(ProgressUpdate)
 
 type Result struct {
-	RequestedReference     string                     `json:"requested_reference"`
-	Repository             string                     `json:"repository"`
-	Mode                   string                     `json:"mode"`
-	ResolvedReference      string                     `json:"resolved_reference,omitempty"`
-	RequestedDigest        string                     `json:"requested_digest,omitempty"`
-	TagsEnumerated         int                        `json:"tags_enumerated,omitempty"`
-	TagsResolved           int                        `json:"tags_resolved,omitempty"`
-	TagsFailed             int                        `json:"tags_failed,omitempty"`
-	TargetCount            int                        `json:"target_count"`
-	CompletedTargetCount   int                        `json:"completed_target_count"`
-	FailedTargetCount      int                        `json:"failed_target_count"`
-	ManifestCount          int                        `json:"manifest_count"`
-	CompletedManifestCount int                        `json:"completed_manifest_count"`
-	FailedManifestCount    int                        `json:"failed_manifest_count"`
-	TagResults             []TagResult                `json:"tag_results,omitempty"`
-	Targets                []TargetResult             `json:"targets"`
-	Findings               []findings.Finding         `json:"findings"`
-	DetailedFindings       []findings.DetailedFinding `json:"-"`
-	TotalFindings          int                        `json:"total_findings"`
-	UniqueFingerprints     int                        `json:"unique_fingerprints"`
+	RequestedReference           string                     `json:"requested_reference"`
+	Repository                   string                     `json:"repository"`
+	Mode                         string                     `json:"mode"`
+	ResolvedReference            string                     `json:"resolved_reference,omitempty"`
+	RequestedDigest              string                     `json:"requested_digest,omitempty"`
+	TagsEnumerated               int                        `json:"tags_enumerated,omitempty"`
+	TagsResolved                 int                        `json:"tags_resolved,omitempty"`
+	TagsFailed                   int                        `json:"tags_failed,omitempty"`
+	TargetCount                  int                        `json:"target_count"`
+	CompletedTargetCount         int                        `json:"completed_target_count"`
+	FailedTargetCount            int                        `json:"failed_target_count"`
+	ManifestCount                int                        `json:"manifest_count"`
+	CompletedManifestCount       int                        `json:"completed_manifest_count"`
+	FailedManifestCount          int                        `json:"failed_manifest_count"`
+	TagResults                   []TagResult                `json:"tag_results,omitempty"`
+	Targets                      []TargetResult             `json:"targets"`
+	Findings                     []findings.Finding         `json:"findings"`
+	DetailedFindings             []findings.DetailedFinding `json:"-"`
+	SuppressedFindings           []findings.Finding         `json:"suppressed_findings,omitempty"`
+	SuppressedDetailedFindings   []findings.DetailedFinding `json:"-"`
+	TotalFindings                int                        `json:"total_findings"`
+	UniqueFingerprints           int                        `json:"unique_fingerprints"`
+	SuppressedFindingsCount      int                        `json:"suppressed_findings_count,omitempty"`
+	SuppressedUniqueFingerprints int                        `json:"suppressed_unique_fingerprints,omitempty"`
 }
 
 type TagResult struct {
@@ -144,10 +148,14 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 		Targets: []TargetResult{
 			targetResultFromScanResult(scanResult, tags),
 		},
-		Findings:           scanResult.Findings,
-		DetailedFindings:   scanResult.DetailedFindings,
-		TotalFindings:      scanResult.TotalFindings,
-		UniqueFingerprints: scanResult.UniqueFingerprints,
+		Findings:                     scanResult.Findings,
+		DetailedFindings:             scanResult.DetailedFindings,
+		SuppressedFindings:           scanResult.SuppressedFindings,
+		SuppressedDetailedFindings:   scanResult.SuppressedDetailedFindings,
+		TotalFindings:                scanResult.TotalFindings,
+		UniqueFingerprints:           scanResult.UniqueFingerprints,
+		SuppressedFindingsCount:      scanResult.SuppressedFindingsCount,
+		SuppressedUniqueFingerprints: scanResult.SuppressedUniqueFingerprints,
 	}
 	if len(tags) > 0 {
 		result.TagResults = []TagResult{{
@@ -258,6 +266,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 
 	result.TargetCount = len(groupList)
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
+	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
 	for _, group := range groupList {
 		scanReference := request.Reference.WithDigest(group.digest)
 		scanResult, err := scanTarget(ctx, request, scanReference, group.tags, progressState{
@@ -301,6 +310,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 		result.CompletedManifestCount += scanResult.CompletedManifestCount
 		result.FailedManifestCount += scanResult.FailedManifestCount
 		allDetailedFindings = append(allDetailedFindings, scanResult.DetailedFindings...)
+		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, scanResult.SuppressedDetailedFindings...)
 		emitProgress(request, ProgressUpdate{
 			Phase:            ProgressPhaseTargetDone,
 			Repository:       request.Reference.Repository,
@@ -326,8 +336,15 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 	for _, item := range result.DetailedFindings {
 		result.Findings = append(result.Findings, item.PublicFinding())
 	}
+	result.SuppressedDetailedFindings = findings.DeduplicateDetailed(allSuppressedDetailedFindings)
+	result.SuppressedFindings = make([]findings.Finding, 0, len(result.SuppressedDetailedFindings))
+	for _, item := range result.SuppressedDetailedFindings {
+		result.SuppressedFindings = append(result.SuppressedFindings, item.PublicFinding())
+	}
 	result.TotalFindings = len(result.Findings)
 	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
+	result.SuppressedFindingsCount = len(result.SuppressedFindings)
+	result.SuppressedUniqueFingerprints = findings.UniqueFingerprintCount(result.SuppressedFindings)
 	sortTargetResults(result.Targets)
 	emitProgress(request, ProgressUpdate{
 		Phase:            ProgressPhaseCompleted,

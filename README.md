@@ -33,9 +33,10 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidel
   - final filesystem contents
   - deleted-layer artifacts recoverable from prior layers
 - Detect likely secrets using structured, contextual, and file-aware detectors
+- Parse common credential files such as `.aws/credentials`, `.aws/config`, `.docker/config.json`, `.git-credentials`, `.terraformrc`, and `credentials.tfrc.json`
 - Include the upstream TruffleHog default git-source detector catalog alongside local file-aware and entropy detectors
 - Redact secrets in output and persist only stable fingerprints for deduplication
-- Skip file-backed findings under `test/` and `tests/` directories
+- Classify likely test/example/demo placeholders separately from actionable findings instead of dropping provenance
 - Provide a CLI-first workflow, then an API and UI
 
 ## How to install
@@ -71,20 +72,28 @@ Saved findings files contain only detections, including unredacted finding value
 `LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
 If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
 
+Result behavior:
+
+- Actionable findings remain in `findings` and drive the non-zero scan exit status.
+- Likely test/example/demo placeholders are emitted separately as suppressed example findings and do not count toward `total_findings`.
+- Finding records now include `disposition`, `disposition_reason`, and `line_number` to make triage and false-positive review easier.
+
 ## Postgres persistence
 
 Layerleak ships versioned SQL migrations under `migrations/`.
 Migrations are manual on purpose. The scanner does not auto-create or auto-upgrade the schema.
 
-Apply the initial schema with `psql`:
+Apply the migrations with `psql` in order:
 
 ```bash
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.up.sql
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.up.sql
 ```
 
-Rollback the initial schema:
+Rollback the migrations in reverse order:
 
 ```bash
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.down.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.down.sql
 ```
 
@@ -124,7 +133,7 @@ Run a scan against a public Docker Hub image:
 
 
 Every scan also writes a JSON findings file to the findings output directory.
-Those saved findings files contain only finding records, including the exact match value, exact source location, and unredacted snippet for each finding.
+Those saved findings files contain only finding records, including the exact match value, exact source location, unredacted snippet, disposition metadata, and line number for each finding.
 If Postgres persistence is enabled, the same raw finding material is stored in the `findings` and `finding_occurrences` tables.
 For multi-arch images, layerleak skips attestation and provenance manifests such as `application/vnd.in-toto+json` instead of counting them as failed platform scans.
 If you pass a bare repository name such as `mongo`, layerleak enumerates all public tags in that repository, resolves each tag to a digest, groups duplicate digests, and scans the distinct targets. If you want a single image only, pass an explicit tag or digest such as `mongo:latest` or `mongo@sha256:...`.

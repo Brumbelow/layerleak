@@ -245,6 +245,8 @@ func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, i
 			finding_id,
 			detector_name,
 			confidence,
+			disposition,
+			disposition_reason,
 			source_type,
 			platform_os,
 			platform_architecture,
@@ -252,6 +254,7 @@ func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, i
 			file_path,
 			layer_digest,
 			source_key,
+			line_number,
 			context_snippet,
 			raw_snippet,
 			source_location,
@@ -261,7 +264,7 @@ func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, i
 			first_seen_at,
 			last_seen_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
 		ON CONFLICT (
 			finding_id,
 			detector_name,
@@ -280,8 +283,12 @@ func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, i
 			match_end,
 			present_in_final_image
 		)
-		DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
-	`, findingID, item.DetectorName, item.Confidence, string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.ContextSnippet, item.RawSnippet, item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt); err != nil {
+		DO UPDATE SET
+			disposition = EXCLUDED.disposition,
+			disposition_reason = EXCLUDED.disposition_reason,
+			line_number = EXCLUDED.line_number,
+			last_seen_at = EXCLUDED.last_seen_at
+	`, findingID, item.DetectorName, item.Confidence, string(item.Disposition), string(item.DispositionReason), string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.LineNumber, item.ContextSnippet, item.RawSnippet, item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt); err != nil {
 		return fmt.Errorf("upsert finding occurrence %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
 	}
 

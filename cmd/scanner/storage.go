@@ -37,7 +37,10 @@ func buildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		RequestedDigest:    strings.TrimSpace(result.RequestedDigest),
 		Mode:               result.Mode,
 		ScannedAt:          scannedAt,
-		DetailedFindings:   findings.DeduplicateDetailed(slices.Clone(result.DetailedFindings)),
+		DetailedFindings: findings.DeduplicateDetailed(append(
+			slices.Clone(result.DetailedFindings),
+			result.SuppressedDetailedFindings...,
+		)),
 	}
 
 	record.Targets = make([]storage.TargetRecord, 0, len(result.Targets))

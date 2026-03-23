@@ -103,6 +103,62 @@ func TestNormalizeDetailed(t *testing.T) {
 	}
 }
 
+func TestNormalizeDetailedClassifiesExampleTestPath(t *testing.T) {
+	content := "TOKEN=ghp_123456789012345678901234567890123456"
+	match := detectors.Match{
+		Detector:   "github_token",
+		Value:      "ghp_123456789012345678901234567890123456",
+		Start:      6,
+		End:        len(content),
+		Confidence: detectors.ConfidenceHigh,
+	}
+
+	finding, err := NormalizeDetailed(Input{
+		ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Platform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
+		SourceType:     SourceTypeFileFinal,
+		FilePath:       "app/tests/.env",
+		Content:        content,
+	}, match)
+	if err != nil {
+		t.Fatalf("NormalizeDetailed() error = %v", err)
+	}
+
+	if finding.Disposition != DispositionExample {
+		t.Fatalf("finding.Disposition = %q", finding.Disposition)
+	}
+	if finding.DispositionReason != DispositionReasonTestPath {
+		t.Fatalf("finding.DispositionReason = %q", finding.DispositionReason)
+	}
+}
+
+func TestNormalizeDetailedSetsLineNumber(t *testing.T) {
+	content := "one\ntwo\ntoken=ghp_123456789012345678901234567890123456"
+	start := strings.Index(content, "ghp_123456789012345678901234567890123456")
+	match := detectors.Match{
+		Detector:   "github_token",
+		Value:      "ghp_123456789012345678901234567890123456",
+		Start:      start,
+		End:        start + len("ghp_123456789012345678901234567890123456"),
+		Confidence: detectors.ConfidenceHigh,
+	}
+
+	finding, err := NormalizeDetailed(Input{
+		ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Platform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
+		SourceType:     SourceTypeEnv,
+		Key:            "TOKEN",
+		Content:        content,
+	}, match)
+	if err != nil {
+		t.Fatalf("NormalizeDetailed() error = %v", err)
+	}
+
+	if finding.LineNumber != 3 {
+		t.Fatalf("finding.LineNumber = %d", finding.LineNumber)
+	}
+}
+
 func TestShouldSuppressFilePath(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -126,18 +182,18 @@ func TestShouldSuppressFilePath(t *testing.T) {
 	}
 }
 
-func TestDeduplicateDetailedUsesRawSnippetAcrossFilePaths(t *testing.T) {
+func TestDeduplicateDetailedPreservesDistinctSourceLocations(t *testing.T) {
 	items := []DetailedFinding{
 		testDetailedFinding("z.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
 		testDetailedFinding("a.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
 	}
 
 	deduped := DeduplicateDetailed(items)
-	if len(deduped) != 1 {
+	if len(deduped) != 2 {
 		t.Fatalf("len(deduped) = %d", len(deduped))
 	}
-	if deduped[0].FilePath != "a.env" {
-		t.Fatalf("deduped[0].FilePath = %q", deduped[0].FilePath)
+	if deduped[0].FilePath != "a.env" || deduped[1].FilePath != "z.env" {
+		t.Fatalf("deduped file paths = %q, %q", deduped[0].FilePath, deduped[1].FilePath)
 	}
 }
 
@@ -168,7 +224,7 @@ func TestDeduplicateDetailedPreservesDistinctRawSnippetsForSameFingerprint(t *te
 	}
 }
 
-func TestDeduplicateUsesContextSnippetAcrossPublicFindings(t *testing.T) {
+func TestDeduplicatePreservesDistinctPublicSourceLocations(t *testing.T) {
 	items := []Finding{
 		{
 			DetectorName:   "github_token",
@@ -189,11 +245,11 @@ func TestDeduplicateUsesContextSnippetAcrossPublicFindings(t *testing.T) {
 	}
 
 	deduped := Deduplicate(items)
-	if len(deduped) != 1 {
+	if len(deduped) != 2 {
 		t.Fatalf("len(deduped) = %d", len(deduped))
 	}
-	if deduped[0].FilePath != "a.env" {
-		t.Fatalf("deduped[0].FilePath = %q", deduped[0].FilePath)
+	if deduped[0].FilePath != "a.env" || deduped[1].FilePath != "z.env" {
+		t.Fatalf("deduped file paths = %q, %q", deduped[0].FilePath, deduped[1].FilePath)
 	}
 }
 
@@ -226,6 +282,7 @@ func testDetailedFinding(filePath, detectorName, rawSnippet, contextSnippet stri
 		Finding: Finding{
 			DetectorName:   detectorName,
 			Confidence:     "high",
+			Disposition:    DispositionActionable,
 			SourceType:     SourceTypeFileFinal,
 			ManifestDigest: "sha256:a",
 			Platform: manifest.Platform{

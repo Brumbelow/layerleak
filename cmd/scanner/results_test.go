@@ -67,6 +67,32 @@ func TestWriteResultFileUsesConfiguredDirectory(t *testing.T) {
 	}
 }
 
+func TestBuildPersistedFindingsIncludesSuppressedExampleFindings(t *testing.T) {
+	result := buildPersistedFindings(jobs.Result{
+		DetailedFindings: []findings.DetailedFinding{
+			testDetailedFinding("line one", "file:1"),
+		},
+		SuppressedDetailedFindings: []findings.DetailedFinding{
+			func() findings.DetailedFinding {
+				item := testDetailedFinding("line two", "file:2")
+				item.Disposition = findings.DispositionExample
+				item.DispositionReason = findings.DispositionReasonTestPath
+				return item
+			}(),
+		},
+	})
+
+	if len(result) != 2 {
+		t.Fatalf("len(result) = %d", len(result))
+	}
+	if result[1].Disposition != findings.DispositionExample {
+		t.Fatalf("result[1].Disposition = %q", result[1].Disposition)
+	}
+	if result[1].DispositionReason != findings.DispositionReasonTestPath {
+		t.Fatalf("result[1].DispositionReason = %q", result[1].DispositionReason)
+	}
+}
+
 func TestResolveFindingsDirDefaultsToRepoRootFindings(t *testing.T) {
 	dir, err := resolveFindingsDir("")
 	if err != nil {
@@ -109,6 +135,7 @@ func testDetailedFinding(snippet, location string) findings.DetailedFinding {
 		Finding: findings.Finding{
 			DetectorName:        "keyword_entropy",
 			Confidence:          "low",
+			Disposition:         findings.DispositionActionable,
 			SourceType:          findings.SourceTypeFileFinal,
 			ManifestDigest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			Platform:            manifest.Platform{OS: "linux", Architecture: "amd64"},

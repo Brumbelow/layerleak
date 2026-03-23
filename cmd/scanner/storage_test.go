@@ -191,7 +191,7 @@ func TestBuildScanRecordCreatesFailedManifestForFailedTarget(t *testing.T) {
 	}
 }
 
-func TestBuildScanRecordDeduplicatesIdenticalRawSnippets(t *testing.T) {
+func TestBuildScanRecordPreservesDistinctSourceLocations(t *testing.T) {
 	record := buildScanRecord(manifest.Reference{
 		Registry:   "docker.io",
 		Repository: "library/app",
@@ -241,11 +241,11 @@ func TestBuildScanRecordDeduplicatesIdenticalRawSnippets(t *testing.T) {
 		},
 	}, time.Now().UTC())
 
-	if len(record.DetailedFindings) != 1 {
+	if len(record.DetailedFindings) != 2 {
 		t.Fatalf("len(record.DetailedFindings) = %d", len(record.DetailedFindings))
 	}
-	if record.DetailedFindings[0].FilePath != "a.env" {
-		t.Fatalf("record.DetailedFindings[0].FilePath = %q", record.DetailedFindings[0].FilePath)
+	if record.DetailedFindings[0].FilePath != "a.env" || record.DetailedFindings[1].FilePath != "z.env" {
+		t.Fatalf("record.DetailedFindings file paths = %q, %q", record.DetailedFindings[0].FilePath, record.DetailedFindings[1].FilePath)
 	}
 }
 
@@ -254,6 +254,7 @@ func testDetailedFindingForManifest(manifestDigest string, platform manifest.Pla
 		Finding: findings.Finding{
 			DetectorName:        "github_token",
 			Confidence:          "high",
+			Disposition:         findings.DispositionActionable,
 			SourceType:          findings.SourceTypeEnv,
 			ManifestDigest:      manifestDigest,
 			Platform:            platform,
@@ -261,6 +262,7 @@ func testDetailedFindingForManifest(manifestDigest string, platform manifest.Pla
 			RedactedValue:       "ghp********************************56",
 			Fingerprint:         manifestDigest,
 			ContextSnippet:      "GH_TOKEN=ghp********************************56",
+			LineNumber:          1,
 			PresentInFinalImage: true,
 		},
 		Value:          "ghp_123456789012345678901234567890123456",

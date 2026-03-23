@@ -76,6 +76,21 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	if !strings.Contains(rawSnippet, "ghp_123456789012345678901234567890123456") {
 		t.Fatalf("rawSnippet = %q", rawSnippet)
 	}
+
+	var disposition, reason string
+	var lineNumber int
+	if err := db.QueryRow("SELECT disposition, disposition_reason, line_number FROM finding_occurrences ORDER BY source_location LIMIT 1").Scan(&disposition, &reason, &lineNumber); err != nil {
+		t.Fatalf("QueryRow(disposition) error = %v", err)
+	}
+	if disposition != string(findings.DispositionActionable) {
+		t.Fatalf("disposition = %q", disposition)
+	}
+	if reason != "" {
+		t.Fatalf("reason = %q", reason)
+	}
+	if lineNumber <= 0 {
+		t.Fatalf("lineNumber = %d", lineNumber)
+	}
 }
 
 func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
@@ -285,6 +300,7 @@ func integrationScanRecord(scannedAt time.Time) ScanRecord {
 				Finding: findings.Finding{
 					DetectorName:        "github_token",
 					Confidence:          "high",
+					Disposition:         findings.DispositionActionable,
 					SourceType:          findings.SourceTypeEnv,
 					ManifestDigest:      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 					Platform:            manifest.Platform{OS: "linux", Architecture: "amd64"},
@@ -292,6 +308,7 @@ func integrationScanRecord(scannedAt time.Time) ScanRecord {
 					RedactedValue:       "ghp********************************56",
 					Fingerprint:         "fingerprint-one",
 					ContextSnippet:      "GH_TOKEN=ghp********************************56",
+					LineNumber:          1,
 					PresentInFinalImage: true,
 				},
 				Value:          "ghp_123456789012345678901234567890123456",
@@ -304,6 +321,7 @@ func integrationScanRecord(scannedAt time.Time) ScanRecord {
 				Finding: findings.Finding{
 					DetectorName:        "github_token",
 					Confidence:          "high",
+					Disposition:         findings.DispositionActionable,
 					SourceType:          findings.SourceTypeLabel,
 					ManifestDigest:      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 					Platform:            manifest.Platform{OS: "linux", Architecture: "amd64"},
@@ -311,6 +329,7 @@ func integrationScanRecord(scannedAt time.Time) ScanRecord {
 					RedactedValue:       "ghp********************************56",
 					Fingerprint:         "fingerprint-one",
 					ContextSnippet:      "token=ghp********************************56",
+					LineNumber:          1,
 					PresentInFinalImage: true,
 				},
 				Value:          "ghp_123456789012345678901234567890123456",

@@ -151,7 +151,8 @@ func (l *matchLocator) matchFromResult(input ScanInput, detector thdetectors.Det
 		Value:      fullValue,
 		Start:      start,
 		End:        end,
-		Confidence: adjustConfidence(ConfidenceHigh, input.Path, input.Key, fullValue),
+		Confidence: adjustConfidence(ConfidenceMedium, input.Path, input.Key, fullValue),
+		Priority:   priorityTrufflehog,
 	}, true
 }
 

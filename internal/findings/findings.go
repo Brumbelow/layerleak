@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/brumbelow/layerleak/internal/detectors"
@@ -14,6 +15,10 @@ import (
 
 type SourceType string
 
+type Disposition string
+
+type DispositionReason string
+
 const (
 	SourceTypeFileFinal        SourceType = "file_final"
 	SourceTypeFileDeletedLayer SourceType = "file_deleted_layer"
@@ -21,6 +26,16 @@ const (
 	SourceTypeLabel            SourceType = "label"
 	SourceTypeHistory          SourceType = "history"
 	SourceTypeConfig           SourceType = "config"
+
+	DispositionActionable Disposition = "actionable"
+	DispositionExample    Disposition = "example"
+
+	DispositionReasonNone              DispositionReason = ""
+	DispositionReasonTestPath          DispositionReason = "test_path"
+	DispositionReasonExamplePath       DispositionReason = "example_path"
+	DispositionReasonPlaceholderMarker DispositionReason = "placeholder_marker"
+	DispositionReasonReservedHost      DispositionReason = "reserved_host"
+	DispositionReasonKnownDummyValue   DispositionReason = "known_dummy_value"
 )
 
 type Input struct {
@@ -37,12 +52,15 @@ type Input struct {
 type Finding struct {
 	DetectorName        string            `json:"detector_name"`
 	Confidence          string            `json:"confidence"`
+	Disposition         Disposition       `json:"disposition"`
+	DispositionReason   DispositionReason `json:"disposition_reason,omitempty"`
 	SourceType          SourceType        `json:"source_type"`
 	ManifestDigest      string            `json:"manifest_digest"`
 	Platform            manifest.Platform `json:"platform,omitempty"`
 	FilePath            string            `json:"file_path,omitempty"`
 	LayerDigest         string            `json:"layer_digest,omitempty"`
 	Key                 string            `json:"key,omitempty"`
+	LineNumber          int               `json:"line_number,omitempty"`
 	RedactedValue       string            `json:"redacted_value"`
 	Fingerprint         string            `json:"fingerprint"`
 	ContextSnippet      string            `json:"context_snippet"`
@@ -109,16 +127,21 @@ func NormalizeDetailed(input Input, match detectors.Match) (DetailedFinding, err
 		return DetailedFinding{}, fmt.Errorf("match value is required")
 	}
 
+	disposition, reason := Classify(input, match)
+
 	return DetailedFinding{
 		Finding: Finding{
 			DetectorName:        match.Detector,
 			Confidence:          string(match.Confidence),
+			Disposition:         disposition,
+			DispositionReason:   reason,
 			SourceType:          input.SourceType,
 			ManifestDigest:      input.ManifestDigest,
 			Platform:            input.Platform,
 			FilePath:            input.FilePath,
 			LayerDigest:         input.LayerDigest,
 			Key:                 input.Key,
+			LineNumber:          lineNumberForOffset(input.Content, match.Start),
 			RedactedValue:       Redact(match.Value),
 			Fingerprint:         Fingerprint(match.Value),
 			ContextSnippet:      buildContextSnippet(input.Content, match),
@@ -274,6 +297,9 @@ func buildSourceLocation(input Input) string {
 func findingSnippetDedupKey(item Finding) string {
 	return strings.Join([]string{
 		item.ManifestDigest,
+		string(item.Disposition),
+		publicSourceLocation(item),
+		strconv.Itoa(item.LineNumber),
 		firstNonEmpty(item.ContextSnippet, item.Fingerprint),
 	}, "|")
 }
@@ -281,6 +307,11 @@ func findingSnippetDedupKey(item Finding) string {
 func detailedFindingSnippetDedupKey(item DetailedFinding) string {
 	return strings.Join([]string{
 		item.ManifestDigest,
+		string(item.Disposition),
+		item.SourceLocation,
+		strconv.Itoa(item.LineNumber),
+		strconv.Itoa(item.MatchStart),
+		strconv.Itoa(item.MatchEnd),
 		firstNonEmpty(item.RawSnippet, item.ContextSnippet, item.Fingerprint),
 	}, "|")
 }
@@ -295,6 +326,9 @@ func compareFindings(left, right Finding) int {
 	if value := strings.Compare(string(left.SourceType), string(right.SourceType)); value != 0 {
 		return value
 	}
+	if value := strings.Compare(string(left.Disposition), string(right.Disposition)); value != 0 {
+		return value
+	}
 	if value := strings.Compare(left.FilePath, right.FilePath); value != 0 {
 		return value
 	}
@@ -303,6 +337,9 @@ func compareFindings(left, right Finding) int {
 	}
 	if value := strings.Compare(left.DetectorName, right.DetectorName); value != 0 {
 		return value
+	}
+	if left.LineNumber != right.LineNumber {
+		return left.LineNumber - right.LineNumber
 	}
 	if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
 		return value
@@ -314,7 +351,37 @@ func compareDetailedFindings(left, right DetailedFinding) int {
 	if value := compareFindings(left.Finding, right.Finding); value != 0 {
 		return value
 	}
+	if left.MatchStart != right.MatchStart {
+		return left.MatchStart - right.MatchStart
+	}
+	if left.MatchEnd != right.MatchEnd {
+		return left.MatchEnd - right.MatchEnd
+	}
 	return strings.Compare(left.SourceLocation, right.SourceLocation)
+}
+
+func lineNumberForOffset(content string, offset int) int {
+	if offset <= 0 {
+		return 1
+	}
+	if offset > len(content) {
+		offset = len(content)
+	}
+	return 1 + strings.Count(content[:offset], "\n")
+}
+
+func publicSourceLocation(item Finding) string {
+	location := ""
+	switch {
+	case strings.TrimSpace(item.FilePath) != "":
+		location = item.FilePath
+	case strings.TrimSpace(item.Key) != "":
+		location = item.Key
+	default:
+		location = string(item.SourceType)
+	}
+
+	return string(item.SourceType) + ":" + location
 }
 
 func firstNonEmpty(values ...string) string {

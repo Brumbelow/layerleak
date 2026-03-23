@@ -154,8 +154,11 @@ func TestScanMultiArchImage(t *testing.T) {
 		t.Fatal("len(result.DetailedFindings) = 0")
 	}
 
-	sourceTypes := make([]findings.SourceType, 0, len(result.Findings))
+	sourceTypes := make([]findings.SourceType, 0, len(result.Findings)+len(result.SuppressedFindings))
 	for _, item := range result.Findings {
+		sourceTypes = append(sourceTypes, item.SourceType)
+	}
+	for _, item := range result.SuppressedFindings {
 		sourceTypes = append(sourceTypes, item.SourceType)
 	}
 	for _, expected := range []findings.SourceType{
@@ -232,17 +235,17 @@ func TestScanArtifactsSkipsNonTextArtifacts(t *testing.T) {
 	}
 }
 
-func TestScanArtifactsSkipsSuppressedTestDirectories(t *testing.T) {
+func TestScanArtifactsClassifiesExampleTestDirectories(t *testing.T) {
 	tests := []struct {
-		name     string
-		path     string
-		wantPath string
+		name            string
+		path            string
+		wantDisposition findings.Disposition
 	}{
-		{name: "test directory", path: "app/test/.env"},
-		{name: "tests directory", path: "app/tests/.env"},
-		{name: "case insensitive directory", path: "app/Test/.env"},
-		{name: "filename remains scannable", path: "app/app_test.go", wantPath: "app/app_test.go"},
-		{name: "non test substring remains scannable", path: "app/latest/.env", wantPath: "app/latest/.env"},
+		{name: "test directory", path: "app/test/.env", wantDisposition: findings.DispositionExample},
+		{name: "tests directory", path: "app/tests/.env", wantDisposition: findings.DispositionExample},
+		{name: "case insensitive directory", path: "app/Test/.env", wantDisposition: findings.DispositionExample},
+		{name: "filename remains scannable", path: "app/app_test.go", wantDisposition: findings.DispositionActionable},
+		{name: "non test substring remains scannable", path: "app/latest/.env", wantDisposition: findings.DispositionActionable},
 	}
 
 	for _, tt := range tests {
@@ -264,18 +267,14 @@ func TestScanArtifactsSkipsSuppressedTestDirectories(t *testing.T) {
 				},
 			)
 
-			if tt.wantPath == "" {
-				if len(items) != 0 {
-					t.Fatalf("len(items) = %d", len(items))
-				}
-				return
-			}
-
 			if len(items) != 1 {
 				t.Fatalf("len(items) = %d", len(items))
 			}
-			if items[0].FilePath != tt.wantPath {
+			if items[0].FilePath != tt.path {
 				t.Fatalf("items[0].FilePath = %q", items[0].FilePath)
+			}
+			if items[0].Disposition != tt.wantDisposition {
+				t.Fatalf("items[0].Disposition = %q", items[0].Disposition)
 			}
 		})
 	}

@@ -33,6 +33,7 @@ type Match struct {
 	Start      int
 	End        int
 	Confidence Confidence
+	Priority   int
 }
 
 type Detector interface {
@@ -44,9 +45,22 @@ type Set struct {
 	detectors []Detector
 }
 
+const (
+	priorityEntropy    = 1
+	priorityTrufflehog = 2
+	priorityLocal      = 3
+	priorityStructured = 4
+)
+
 func Default() Set {
 	return Set{
 		detectors: []Detector{
+			awsSharedCredentialsDetector{},
+			gitCredentialsDetector{},
+			newTerraformCredentialsDetector(),
+			newPathRegexDetector("docker_auth_blob", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"auth"\s*:\s*"([A-Za-z0-9+/=]{8,})"`), 1, ConfidenceHigh, looksLikeDockerAuth),
+			newPathRegexDetector("docker_config_identitytoken", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"identitytoken"\s*:\s*"([^"\s]{16,})"`), 1, ConfidenceHigh, looksLikeAssignedSensitiveValue),
+			newKeyValueDetector("assigned_sensitive_value", regexp.MustCompile(`(?i)client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token`), regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9+/=_.:-]{15,}`), ConfidenceMedium, looksLikeAssignedSensitiveValue),
 			newTrufflehogDetector(),
 			newRegexDetector("pem_private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), 0, ConfidenceHigh, nil),
 			newRegexDetector("github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`), 0, ConfidenceHigh, nil),
@@ -86,6 +100,15 @@ func (s Set) Scan(input ScanInput) []Match {
 	sort.Slice(matches, func(i, j int) bool {
 		if matches[i].Start == matches[j].Start {
 			if matches[i].End == matches[j].End {
+				if matches[i].Priority != matches[j].Priority {
+					return matches[i].Priority > matches[j].Priority
+				}
+				if confidenceRank(matches[i].Confidence) != confidenceRank(matches[j].Confidence) {
+					return confidenceRank(matches[i].Confidence) > confidenceRank(matches[j].Confidence)
+				}
+				if matches[i].Value != matches[j].Value {
+					return matches[i].Value < matches[j].Value
+				}
 				return matches[i].Detector < matches[j].Detector
 			}
 			return matches[i].End < matches[j].End
@@ -94,7 +117,8 @@ func (s Set) Scan(input ScanInput) []Match {
 	})
 
 	deduped := make([]Match, 0, len(matches))
-	seen := make(map[string]struct{})
+	seenExact := make(map[string]struct{})
+	seenSpanValue := make(map[string]struct{})
 	for _, match := range matches {
 		key := strings.Join([]string{
 			match.Detector,
@@ -102,11 +126,22 @@ func (s Set) Scan(input ScanInput) []Match {
 			strconv.Itoa(match.Start),
 			strconv.Itoa(match.End),
 			string(match.Confidence),
+			strconv.Itoa(match.Priority),
 		}, "|")
-		if _, ok := seen[key]; ok {
+		if _, ok := seenExact[key]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seenExact[key] = struct{}{}
+
+		spanValueKey := strings.Join([]string{
+			match.Value,
+			strconv.Itoa(match.Start),
+			strconv.Itoa(match.End),
+		}, "|")
+		if _, ok := seenSpanValue[spanValueKey]; ok {
+			continue
+		}
+		seenSpanValue[spanValueKey] = struct{}{}
 		deduped = append(deduped, match)
 	}
 
@@ -136,7 +171,7 @@ func (d regexDetector) Name() string {
 }
 
 func (d regexDetector) Scan(input ScanInput) []Match {
-	return scanRegexMatches(d.name, d.expression, d.group, d.base, d.validator, input)
+	return scanRegexMatches(d.name, d.expression, d.group, d.base, priorityLocal, d.validator, input)
 }
 
 type pathRegexDetector struct {
@@ -168,7 +203,11 @@ func (d pathRegexDetector) Scan(input ScanInput) []Match {
 	if pathValue == "" || !d.pathExpression.MatchString(pathValue) {
 		return nil
 	}
-	return scanRegexMatches(d.name, d.expression, d.group, d.base, d.validator, input)
+	priority := priorityLocal
+	if d.name == "docker_auth_blob" || strings.HasPrefix(d.name, "docker_config_") || d.name == "terraform_cloud_token" {
+		priority = priorityStructured
+	}
+	return scanRegexMatches(d.name, d.expression, d.group, d.base, priority, d.validator, input)
 }
 
 type keyValueDetector struct {
@@ -223,6 +262,7 @@ func (d keyValueDetector) Scan(input ScanInput) []Match {
 				Start:      line.Offset + start,
 				End:        line.Offset + end,
 				Confidence: adjustConfidence(d.base, input.Path, input.Key, value),
+				Priority:   priorityForKeyValueDetector(d.name),
 			})
 		}
 	}
@@ -230,7 +270,7 @@ func (d keyValueDetector) Scan(input ScanInput) []Match {
 	return matches
 }
 
-func scanRegexMatches(name string, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool, input ScanInput) []Match {
+func scanRegexMatches(name string, expression *regexp.Regexp, group int, base Confidence, priority int, validator func(string) bool, input ScanInput) []Match {
 	indexes := expression.FindAllStringSubmatchIndex(input.Content, -1)
 	matches := make([]Match, 0, len(indexes))
 	for _, index := range indexes {
@@ -253,6 +293,7 @@ func scanRegexMatches(name string, expression *regexp.Regexp, group int, base Co
 			Start:      start,
 			End:        end,
 			Confidence: adjustConfidence(base, input.Path, input.Key, value),
+			Priority:   priority,
 		})
 	}
 
@@ -295,6 +336,7 @@ func (contextEntropyDetector) Scan(input ScanInput) []Match {
 				Start:      line.Offset + candidate[0],
 				End:        line.Offset + candidate[1],
 				Confidence: adjustConfidence(ConfidenceLow, input.Path, input.Key, value),
+				Priority:   priorityEntropy,
 			})
 		}
 	}
@@ -697,4 +739,26 @@ func passesEntropy(value string) bool {
 		entropy += -probability * math.Log2(probability)
 	}
 	return entropy >= 3.75
+}
+
+func confidenceRank(value Confidence) int {
+	switch value {
+	case ConfidenceHigh:
+		return 3
+	case ConfidenceMedium:
+		return 2
+	case ConfidenceLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func priorityForKeyValueDetector(name string) int {
+	switch name {
+	case "assigned_sensitive_value":
+		return priorityStructured
+	default:
+		return priorityLocal
+	}
 }

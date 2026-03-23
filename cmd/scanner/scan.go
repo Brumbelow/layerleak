@@ -262,6 +262,9 @@ func renderSummary(output io.Writer, result jobs.Result) error {
 	if _, err := fmt.Fprintf(writer, "Unique Fingerprints:\t%d\n", result.UniqueFingerprints); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintf(writer, "Suppressed Example Findings:\t%d\n", result.SuppressedFindingsCount); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintln(writer, ""); err != nil {
 		return err
 	}

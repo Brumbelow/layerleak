@@ -27,8 +27,16 @@ Build from source:
 ```bash
 git clone https://github.com/brumbelow/layerleak.git
 cd layerleak
-go build -o layerleak ./cmd/scanner
+go build -o layerleak .
 ```
+
+Install with Go:
+
+```bash
+go install github.com/Brumbelow/layerleak@latest
+```
+
+To install a specific release, replace `latest` with a tag such as `v1.0.0-beta`.
 
 Optional environment configuration:
 

@@ -5,7 +5,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidel
 - Docker Hub / OCI image secret scanner that analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
 - Traditional secret scanners often treat a container image as a flat blob or depend on a local Docker daemon. This project is designed around OCI image internals
 
-
 ## Current Scope:
 
 - Public Docker Hub images only
@@ -122,3 +121,20 @@ Command syntax:
 layerleak [command]
 layerleak scan <image-ref> [flags]
 ```
+
+## Support this project
+
+<details open>
+<summary><strong>☕ Enjoying this project? Click here to support it</strong></summary>
+
+<br>
+
+If this repo saved you time or helped you out, you can support future updates here:
+
+👉 **[Sponsor this project](https://github.com/sponsors/Brumbelow)**  
+or  
+👉 **[Buy me a coffee](https://ko-fi.com/brumbelow)**
+
+Thank you :) it genuinely helps keep the project maintained.
+
+</details>

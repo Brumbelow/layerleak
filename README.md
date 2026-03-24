@@ -22,6 +22,11 @@ Prerequisites:
 
 - Go 1.24+
 
+Install with Go:
+```bash
+go install github.com/Brumbelow/layerleak@v1.0.0-beta
+```
+
 Build from source:
 
 ```bash

@@ -162,7 +162,7 @@ func TestListTagsFollowsPagination(t *testing.T) {
 		},
 	})
 
-	tags, err := client.ListTags(context.Background(), "library/app", 2)
+	tags, err := client.ListTags(context.Background(), "library/app", 2, 0)
 	if err != nil {
 		t.Fatalf("ListTags() error = %v", err)
 	}
@@ -170,6 +170,39 @@ func TestListTagsFollowsPagination(t *testing.T) {
 		t.Fatalf("len(tags) = %d", len(tags))
 	}
 	if strings.Join(tags, ",") != "1.0,2.0,3.0" {
+		t.Fatalf("tags = %q", strings.Join(tags, ","))
+	}
+}
+
+func TestListTagsReturnsPartialTagsWhenLimitExceeded(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest","2.0","1.0"]}`), nil), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL: "https://registry.test",
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	tags, err := client.ListTags(context.Background(), "library/app", 100, 2)
+	if err == nil {
+		t.Fatal("ListTags() error = nil")
+	}
+	if !strings.Contains(err.Error(), "max repository tags limit") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Join(tags, ",") != "2.0,latest" {
 		t.Fatalf("tags = %q", strings.Join(tags, ","))
 	}
 }
@@ -270,6 +303,62 @@ func TestResolveManifestRetriesRequestTimeout(t *testing.T) {
 	}
 	if resolved.Digest != "sha256:resolved" {
 		t.Fatalf("resolved.Digest = %q", resolved.Digest)
+	}
+}
+
+func TestFetchManifestHonorsConfiguredRequestAttempts(t *testing.T) {
+	requests := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return nil, context.DeadlineExceeded
+	})
+
+	client := NewClient(Options{
+		BaseURL:         "https://registry.test",
+		RequestAttempts: 1,
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	if _, err := client.FetchManifest(context.Background(), "library/app", "latest"); err == nil {
+		t.Fatal("FetchManifest() error = nil")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
+func TestFetchManifestFailsWhenManifestBodyExceedsLimit(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2}`), map[string]string{
+			"Docker-Content-Digest": "sha256:manifest",
+		}), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL:          "https://registry.test",
+		MaxManifestBytes: 8,
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	if _, err := client.FetchManifest(context.Background(), "library/app", "latest"); err == nil {
+		t.Fatal("FetchManifest() error = nil")
+	} else if !strings.Contains(err.Error(), "max manifest bytes limit") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

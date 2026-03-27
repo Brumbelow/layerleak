@@ -40,12 +40,20 @@ Result and database configuration:
 ```bash
 export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_TAG_PAGE_SIZE=100
+export LAYERLEAK_MAX_MANIFEST_BYTES=0
+export LAYERLEAK_MAX_CONFIG_BYTES=0
+export LAYERLEAK_MAX_REPOSITORY_TAGS=0
+export LAYERLEAK_MAX_REPOSITORY_TARGETS=0
+export LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
 export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable
 ```
 
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
 Saved findings files contain only detections, including unredacted finding values and unredacted context snippets.
 `LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
+`LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are off by default when set to `0`.
+If enabled, those limits fail the scan with a clear error instead of silently truncating work.
+`LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
 If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
 
 Result behavior:
@@ -53,6 +61,7 @@ Result behavior:
 - Actionable findings remain in `findings` and drive the non-zero scan exit status.
 - Likely test/example/demo placeholders are emitted separately as suppressed example findings and do not count toward `total_findings`.
 - Finding records include `disposition`, `disposition_reason`, and `line_number` to make triage and false-positive review easier.
+- If a configured operational limit is exceeded, layerleak still writes and renders the partial results produced before the failure, then exits with status `1` because the scan is incomplete.
 
 ## Postgres persistence
 
@@ -108,7 +117,8 @@ Run a scan against a public Docker Hub image:
 ![cli pic](https://github.com/user-attachments/assets/f1940103-8940-4ffa-a5e0-759f079fd1b7)
 
 
-Every scan writes a JSON findings file to the findings output directory. (Default if not set is `~/findings` OR `layerleak/findings`
+Every scan writes a JSON findings file to the findings output directory.
+If `LAYERLEAK_FINDINGS_DIR` is not set, the default output directory is `findings/` under the repo root.
 
 Those saved findings files contain only finding records, including the exact match value, exact source location, unredacted snippet, disposition metadata, and line number for each finding.
 If Postgres persistence is enabled, the same raw finding material is stored in the `findings` and `finding_occurrences` tables.

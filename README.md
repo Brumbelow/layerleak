@@ -52,7 +52,7 @@ Result behavior:
 
 - Actionable findings remain in `findings` and drive the non-zero scan exit status.
 - Likely test/example/demo placeholders are emitted separately as suppressed example findings and do not count toward `total_findings`.
-- Finding records now include `disposition`, `disposition_reason`, and `line_number` to make triage and false-positive review easier.
+- Finding records include `disposition`, `disposition_reason`, and `line_number` to make triage and false-positive review easier.
 
 ## Postgres persistence
 
@@ -108,7 +108,8 @@ Run a scan against a public Docker Hub image:
 ![cli pic](https://github.com/user-attachments/assets/f1940103-8940-4ffa-a5e0-759f079fd1b7)
 
 
-Every scan also writes a JSON findings file to the findings output directory.
+Every scan writes a JSON findings file to the findings output directory. (Default if not set is `~/findings` OR `layerleak/findings`
+
 Those saved findings files contain only finding records, including the exact match value, exact source location, unredacted snippet, disposition metadata, and line number for each finding.
 If Postgres persistence is enabled, the same raw finding material is stored in the `findings` and `finding_occurrences` tables.
 For multi-arch images, layerleak skips attestation and provenance manifests such as `application/vnd.in-toto+json` instead of counting them as failed platform scans.

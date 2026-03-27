@@ -14,21 +14,26 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 )
 
 type Options struct {
-	BaseURL    string
-	AuthURL    string
-	HTTPClient *http.Client
+	BaseURL          string
+	AuthURL          string
+	HTTPClient       *http.Client
+	RequestAttempts  int
+	MaxManifestBytes int64
 }
 
 type Client struct {
-	baseURL      *url.URL
-	authURL      *url.URL
-	httpClient   *http.Client
-	tokenCache   map[string]string
-	tokenCacheMu sync.Mutex
+	baseURL          *url.URL
+	authURL          *url.URL
+	httpClient       *http.Client
+	requestAttempts  int
+	maxManifestBytes int64
+	tokenCache       map[string]string
+	tokenCacheMu     sync.Mutex
 }
 
 type ManifestResponse struct {
@@ -55,8 +60,6 @@ type bearerChallenge struct {
 	Scope   string
 }
 
-const requestAttempts = 2
-
 func NewClient(options Options) *Client {
 	baseURL, _ := url.Parse(defaultString(options.BaseURL, "https://registry-1.docker.io"))
 	authURL, _ := url.Parse(defaultString(options.AuthURL, "https://auth.docker.io/token"))
@@ -64,12 +67,18 @@ func NewClient(options Options) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
+	requestAttempts := options.RequestAttempts
+	if requestAttempts <= 0 {
+		requestAttempts = 2
+	}
 
 	return &Client{
-		baseURL:    baseURL,
-		authURL:    authURL,
-		httpClient: httpClient,
-		tokenCache: make(map[string]string),
+		baseURL:          baseURL,
+		authURL:          authURL,
+		httpClient:       httpClient,
+		requestAttempts:  requestAttempts,
+		maxManifestBytes: options.MaxManifestBytes,
+		tokenCache:       make(map[string]string),
 	}
 }
 
@@ -113,9 +122,9 @@ func (c *Client) FetchManifest(ctx context.Context, repository, identifier strin
 	}
 	defer response.Body.Close()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := readManifestBody(response.Body, c.maxManifestBytes, identifier)
 	if err != nil {
-		return ManifestResponse{}, fmt.Errorf("read manifest response: %w", err)
+		return ManifestResponse{}, err
 	}
 
 	return ManifestResponse{
@@ -168,7 +177,7 @@ func (c *Client) OpenBlob(ctx context.Context, repository, digest string) (BlobR
 	}, nil
 }
 
-func (c *Client) ListTags(ctx context.Context, repository string, pageSize int) ([]string, error) {
+func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxTags int) ([]string, error) {
 	if pageSize <= 0 {
 		pageSize = 100
 	}
@@ -206,6 +215,10 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize int) 
 			}
 			if _, ok := seen[tag]; ok {
 				continue
+			}
+			if maxTags > 0 && len(tags) >= maxTags {
+				sort.Strings(tags)
+				return tags, limits.NewExceeded(limits.KindRepositoryTags, int64(maxTags), "repository "+repository)
 			}
 			seen[tag] = struct{}{}
 			tags = append(tags, tag)
@@ -289,7 +302,7 @@ func (c *Client) checkResponse(response *http.Response) (*http.Response, error) 
 
 func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, token string) (*http.Response, error) {
 	var lastErr error
-	for attempt := 0; attempt < requestAttempts; attempt++ {
+	for attempt := 0; attempt < c.requestAttempts; attempt++ {
 		request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
 		if err != nil {
 			return nil, fmt.Errorf("create registry request: %w", err)
@@ -304,12 +317,12 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 		response, err := c.httpClient.Do(request)
 		if err != nil {
 			lastErr = err
-			if attempt+1 < requestAttempts && isRetryableRequestError(ctx, err) {
+			if attempt+1 < c.requestAttempts && isRetryableRequestError(ctx, err) {
 				continue
 			}
 			return nil, err
 		}
-		if attempt+1 < requestAttempts && isRetryableStatus(response.StatusCode) {
+		if attempt+1 < c.requestAttempts && isRetryableStatus(response.StatusCode) {
 			response.Body.Close()
 			lastErr = fmt.Errorf("transient registry status %d", response.StatusCode)
 			continue
@@ -507,6 +520,27 @@ func appendURLQuery(targetURL string, values map[string]string) (string, error) 
 	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
+}
+
+func readManifestBody(reader io.Reader, maxBytes int64, identifier string) ([]byte, error) {
+	if maxBytes <= 0 {
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read manifest response: %w", err)
+		}
+		return body, nil
+	}
+
+	limited := io.LimitReader(reader, maxBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest response: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, limits.NewExceeded(limits.KindManifestBytes, maxBytes, "manifest "+strings.TrimSpace(identifier))
+	}
+
+	return body, nil
 }
 
 func nextLinkURL(currentURL, header string) (string, bool, error) {

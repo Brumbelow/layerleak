@@ -11,18 +11,20 @@ import (
 	"github.com/brumbelow/layerleak/internal/detectors"
 	"github.com/brumbelow/layerleak/internal/findings"
 	"github.com/brumbelow/layerleak/internal/layers"
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/registry"
 )
 
 type Request struct {
-	Reference    manifest.Reference
-	Platform     string
-	Registry     *registry.Client
-	Detectors    detectors.Set
-	Logger       *slog.Logger
-	MaxFileBytes int64
-	Progress     ProgressFunc
+	Reference      manifest.Reference
+	Platform       string
+	Registry       *registry.Client
+	Detectors      detectors.Set
+	Logger         *slog.Logger
+	MaxFileBytes   int64
+	MaxConfigBytes int64
+	Progress       ProgressFunc
 }
 
 type ProgressPhase string
@@ -78,8 +80,11 @@ type PlatformResult struct {
 }
 
 func Scan(ctx context.Context, request Request) (Result, error) {
+	result := Result{
+		RequestedReference: request.Reference.Original,
+	}
 	if request.Registry == nil {
-		return Result{}, fmt.Errorf("registry client is required")
+		return result, fmt.Errorf("registry client is required")
 	}
 	if request.MaxFileBytes <= 0 {
 		request.MaxFileBytes = 1 << 20
@@ -94,24 +99,20 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 	rootResponse, err := request.Registry.FetchManifest(ctx, request.Reference.Repository, request.Reference.Identifier())
 	if err != nil {
-		return Result{}, err
+		return result, err
 	}
 
 	document, err := manifest.ParseDocument(rootResponse.MediaType, rootResponse.Body)
 	if err != nil {
-		return Result{}, err
+		return result, err
 	}
 
 	requestedDigest := firstNonEmpty(rootResponse.Digest, request.Reference.Digest)
 	if requestedDigest == "" {
-		return Result{}, fmt.Errorf("registry did not return a resolved digest for %s", request.Reference.Original)
+		return result, fmt.Errorf("registry did not return a resolved digest for %s", request.Reference.Original)
 	}
-
-	result := Result{
-		RequestedReference: request.Reference.Original,
-		ResolvedReference:  request.Reference.CanonicalString(requestedDigest),
-		RequestedDigest:    requestedDigest,
-	}
+	result.ResolvedReference = request.Reference.CanonicalString(requestedDigest)
+	result.RequestedDigest = requestedDigest
 
 	type target struct {
 		descriptor manifest.Descriptor
@@ -131,13 +132,13 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	case manifest.DocumentKindIndex:
 		selected, err := manifest.SelectDescriptors(document.Index, request.Platform)
 		if err != nil {
-			return Result{}, err
+			return result, err
 		}
 		for _, descriptor := range selected {
 			targets = append(targets, target{descriptor: descriptor})
 		}
 	default:
-		return Result{}, fmt.Errorf("unsupported manifest document kind: %s", document.Kind)
+		return result, fmt.Errorf("unsupported manifest document kind: %s", document.Kind)
 	}
 
 	result.ManifestCount = len(targets)
@@ -186,6 +187,10 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 				CurrentManifestDigest: target.descriptor.Digest,
 				Message:               err.Error(),
 			})
+			if limits.IsExceeded(err) {
+				finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+				return result, err
+			}
 			continue
 		}
 
@@ -208,25 +213,10 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 		})
 	}
 
+	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
 	if result.CompletedManifestCount == 0 {
 		return result, allSelectedManifestsFailedError(result.PlatformResults)
 	}
-
-	result.DetailedFindings = findings.DeduplicateDetailed(allDetailedFindings)
-	result.Findings = make([]findings.Finding, 0, len(result.DetailedFindings))
-	for _, item := range result.DetailedFindings {
-		result.Findings = append(result.Findings, item.PublicFinding())
-	}
-	result.SuppressedDetailedFindings = findings.DeduplicateDetailed(allSuppressedDetailedFindings)
-	result.SuppressedFindings = make([]findings.Finding, 0, len(result.SuppressedDetailedFindings))
-	for _, item := range result.SuppressedDetailedFindings {
-		result.SuppressedFindings = append(result.SuppressedFindings, item.PublicFinding())
-	}
-	result.TotalFindings = len(result.Findings)
-	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
-	result.SuppressedFindingsCount = len(result.SuppressedFindings)
-	result.SuppressedUniqueFingerprints = findings.UniqueFingerprintCount(result.SuppressedFindings)
-	sortPlatformResults(result.PlatformResults)
 	emitProgress(request, ProgressUpdate{
 		Phase:                 ProgressPhaseCompleted,
 		Repository:            request.Reference.Repository,
@@ -256,10 +246,10 @@ func scanManifest(ctx context.Context, request Request, descriptor manifest.Desc
 	if err != nil {
 		return PlatformResult{}, nil, nil, fmt.Errorf("fetch config blob: %w", err)
 	}
-	configBody, err := io.ReadAll(configBlob.Body)
+	configBody, err := readConfigBody(configBlob.Body, request.MaxConfigBytes, imageManifest.Config.Digest)
 	configBlob.Body.Close()
 	if err != nil {
-		return PlatformResult{}, nil, nil, fmt.Errorf("read config blob: %w", err)
+		return PlatformResult{}, nil, nil, err
 	}
 
 	imageConfig, err := manifest.ParseImageConfig(configBody)
@@ -527,6 +517,45 @@ func emitProgress(request Request, update ProgressUpdate) {
 		update.Repository = request.Reference.Repository
 	}
 	request.Progress(update)
+}
+
+func finalizeResult(result *Result, actionable, suppressed []findings.DetailedFinding) {
+	result.DetailedFindings = findings.DeduplicateDetailed(actionable)
+	result.Findings = make([]findings.Finding, 0, len(result.DetailedFindings))
+	for _, item := range result.DetailedFindings {
+		result.Findings = append(result.Findings, item.PublicFinding())
+	}
+	result.SuppressedDetailedFindings = findings.DeduplicateDetailed(suppressed)
+	result.SuppressedFindings = make([]findings.Finding, 0, len(result.SuppressedDetailedFindings))
+	for _, item := range result.SuppressedDetailedFindings {
+		result.SuppressedFindings = append(result.SuppressedFindings, item.PublicFinding())
+	}
+	result.TotalFindings = len(result.Findings)
+	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
+	result.SuppressedFindingsCount = len(result.SuppressedFindings)
+	result.SuppressedUniqueFingerprints = findings.UniqueFingerprintCount(result.SuppressedFindings)
+	sortPlatformResults(result.PlatformResults)
+}
+
+func readConfigBody(reader io.Reader, maxBytes int64, digest string) ([]byte, error) {
+	if maxBytes <= 0 {
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read config blob: %w", err)
+		}
+		return body, nil
+	}
+
+	limited := io.LimitReader(reader, maxBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read config blob: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, limits.NewExceeded(limits.KindConfigBytes, maxBytes, "config blob "+strings.TrimSpace(digest))
+	}
+
+	return body, nil
 }
 
 func manifestStatusMessage(prefix string, descriptor manifest.Descriptor) string {

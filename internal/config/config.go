@@ -9,14 +9,19 @@ import (
 )
 
 type Config struct {
-	LogLevel        string
-	RegistryBaseURL string
-	RegistryAuthURL string
-	HTTPTimeout     time.Duration
-	MaxFileBytes    int64
-	TagPageSize     int
-	FindingsDir     string
-	DatabaseURL     string
+	LogLevel                string
+	RegistryBaseURL         string
+	RegistryAuthURL         string
+	HTTPTimeout             time.Duration
+	MaxFileBytes            int64
+	MaxManifestBytes        int64
+	MaxConfigBytes          int64
+	TagPageSize             int
+	MaxRepositoryTags       int
+	MaxRepositoryTargets    int
+	RegistryRequestAttempts int
+	FindingsDir             string
+	DatabaseURL             string
 }
 
 func Load() (Config, error) {
@@ -28,20 +33,45 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxManifestBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_MANIFEST_BYTES", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	maxConfigBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_CONFIG_BYTES", 0)
+	if err != nil {
+		return Config{}, err
+	}
 	tagPageSize, err := intFromEnv("LAYERLEAK_TAG_PAGE_SIZE", 100)
+	if err != nil {
+		return Config{}, err
+	}
+	maxRepositoryTags, err := nonNegativeIntFromEnv("LAYERLEAK_MAX_REPOSITORY_TAGS", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	maxRepositoryTargets, err := nonNegativeIntFromEnv("LAYERLEAK_MAX_REPOSITORY_TARGETS", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	registryRequestAttempts, err := intFromEnv("LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS", 2)
 	if err != nil {
 		return Config{}, err
 	}
 
 	return Config{
-		LogLevel:        envOrDefault("LAYERLEAK_LOG_LEVEL", "info"),
-		RegistryBaseURL: envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", "https://registry-1.docker.io"),
-		RegistryAuthURL: envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", "https://auth.docker.io/token"),
-		HTTPTimeout:     timeout,
-		MaxFileBytes:    maxFileBytes,
-		TagPageSize:     tagPageSize,
-		FindingsDir:     strings.TrimSpace(os.Getenv("LAYERLEAK_FINDINGS_DIR")),
-		DatabaseURL:     strings.TrimSpace(os.Getenv("LAYERLEAK_DATABASE_URL")),
+		LogLevel:                envOrDefault("LAYERLEAK_LOG_LEVEL", "info"),
+		RegistryBaseURL:         envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", "https://registry-1.docker.io"),
+		RegistryAuthURL:         envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", "https://auth.docker.io/token"),
+		HTTPTimeout:             timeout,
+		MaxFileBytes:            maxFileBytes,
+		MaxManifestBytes:        maxManifestBytes,
+		MaxConfigBytes:          maxConfigBytes,
+		TagPageSize:             tagPageSize,
+		MaxRepositoryTags:       maxRepositoryTags,
+		MaxRepositoryTargets:    maxRepositoryTargets,
+		RegistryRequestAttempts: registryRequestAttempts,
+		FindingsDir:             strings.TrimSpace(os.Getenv("LAYERLEAK_FINDINGS_DIR")),
+		DatabaseURL:             strings.TrimSpace(os.Getenv("LAYERLEAK_DATABASE_URL")),
 	}, nil
 }
 
@@ -97,6 +127,40 @@ func intFromEnv(key string, fallback int) (int, error) {
 	}
 	if parsed <= 0 {
 		return 0, fmt.Errorf("%s must be greater than zero", key)
+	}
+
+	return parsed, nil
+}
+
+func nonNegativeInt64FromEnv(key string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s must be greater than or equal to zero", key)
+	}
+
+	return parsed, nil
+}
+
+func nonNegativeIntFromEnv(key string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s must be greater than or equal to zero", key)
 	}
 
 	return parsed, nil

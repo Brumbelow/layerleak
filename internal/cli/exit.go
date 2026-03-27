@@ -1,11 +1,12 @@
 package cli
 
 type exitError struct {
-	code int
+	code    int
+	message string
 }
 
 func (e exitError) Error() string {
-	return ""
+	return e.message
 }
 
 func (e exitError) ExitCode() int {

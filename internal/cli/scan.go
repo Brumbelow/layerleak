@@ -12,6 +12,7 @@ import (
 	"github.com/brumbelow/layerleak/internal/config"
 	"github.com/brumbelow/layerleak/internal/detectors"
 	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/registry"
 	"github.com/spf13/cobra"
@@ -47,6 +48,8 @@ func newScanCmd() *cobra.Command {
 				HTTPClient: &http.Client{
 					Timeout: cfg.HTTPTimeout,
 				},
+				RequestAttempts:  cfg.RegistryRequestAttempts,
+				MaxManifestBytes: cfg.MaxManifestBytes,
 			})
 			detectorSet := detectors.Default()
 
@@ -79,24 +82,43 @@ func newScanCmd() *cobra.Command {
 			}
 
 			result, err := jobs.Scan(ctx, jobs.Request{
-				Reference:    ref,
-				Platform:     platform,
-				Registry:     registryClient,
-				Detectors:    detectorSet,
-				Logger:       logger,
-				MaxFileBytes: cfg.MaxFileBytes,
-				TagPageSize:  cfg.TagPageSize,
+				Reference:            ref,
+				Platform:             platform,
+				Registry:             registryClient,
+				Detectors:            detectorSet,
+				Logger:               logger,
+				MaxFileBytes:         cfg.MaxFileBytes,
+				MaxConfigBytes:       cfg.MaxConfigBytes,
+				TagPageSize:          cfg.TagPageSize,
+				MaxRepositoryTags:    cfg.MaxRepositoryTags,
+				MaxRepositoryTargets: cfg.MaxRepositoryTargets,
 				Progress: func(update jobs.ProgressUpdate) {
 					_ = progress.UpdateFromJob(update)
 				},
 			})
-			if err != nil {
+			scanErr := err
+			limitExceeded := limits.IsExceeded(scanErr)
+			if scanErr != nil && !limitExceeded {
 				_ = progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
-					message:    err.Error(),
+					message:    scanErr.Error(),
 				})
-				return err
+				return scanErr
+			}
+			if scanErr != nil {
+				_ = progress.Update(progressSnapshot{
+					repository:       ref.Repository,
+					tagsCompleted:    result.TagsResolved,
+					tagsFailed:       result.TagsFailed,
+					tagsTotal:        result.TagsEnumerated,
+					targetsCompleted: result.CompletedTargetCount,
+					targetsFailed:    result.FailedTargetCount,
+					targetsTotal:     result.TargetCount,
+					findingsFound:    result.TotalFindings,
+					phase:            "Error",
+					message:          scanErr.Error(),
+				})
 			}
 
 			scannedAt := time.Now().UTC()
@@ -195,6 +217,9 @@ func newScanCmd() *cobra.Command {
 				return fmt.Errorf("unsupported output format: %s", format)
 			}
 
+			if scanErr != nil {
+				return exitError{code: 1, message: scanErr.Error()}
+			}
 			if result.TotalFindings > 0 {
 				return exitError{code: 2}
 			}

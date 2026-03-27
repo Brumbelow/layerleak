@@ -9,20 +9,24 @@ import (
 
 	"github.com/brumbelow/layerleak/internal/detectors"
 	"github.com/brumbelow/layerleak/internal/findings"
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/registry"
 	"github.com/brumbelow/layerleak/internal/scanner"
 )
 
 type Request struct {
-	Reference    manifest.Reference
-	Platform     string
-	Registry     *registry.Client
-	Detectors    detectors.Set
-	Logger       *slog.Logger
-	MaxFileBytes int64
-	TagPageSize  int
-	Progress     ProgressFunc
+	Reference            manifest.Reference
+	Platform             string
+	Registry             *registry.Client
+	Detectors            detectors.Set
+	Logger               *slog.Logger
+	MaxFileBytes         int64
+	MaxConfigBytes       int64
+	TagPageSize          int
+	MaxRepositoryTags    int
+	MaxRepositoryTargets int
+	Progress             ProgressFunc
 }
 
 type ProgressPhase string
@@ -128,10 +132,6 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 		currentRef:     request.Reference.CanonicalString(""),
 		findingsBefore: 0,
 	})
-	if err != nil {
-		return Result{}, err
-	}
-
 	result := Result{
 		RequestedReference:     request.Reference.Original,
 		Repository:             request.Reference.Repository,
@@ -146,7 +146,7 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 		CompletedManifestCount: scanResult.CompletedManifestCount,
 		FailedManifestCount:    scanResult.FailedManifestCount,
 		Targets: []TargetResult{
-			targetResultFromScanResult(scanResult, tags),
+			targetResultFromScanResult(request.Reference, scanResult, tags),
 		},
 		Findings:                     scanResult.Findings,
 		DetailedFindings:             scanResult.DetailedFindings,
@@ -157,13 +157,16 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 		SuppressedFindingsCount:      scanResult.SuppressedFindingsCount,
 		SuppressedUniqueFingerprints: scanResult.SuppressedUniqueFingerprints,
 	}
-	if len(tags) > 0 {
+	if len(tags) > 0 && err == nil {
 		result.TagResults = []TagResult{{
 			Tag:             tags[0],
 			RootDigest:      scanResult.RequestedDigest,
 			TargetReference: scanResult.ResolvedReference,
 			Status:          "scanned",
 		}}
+	}
+	if err != nil {
+		return result, err
 	}
 
 	emitProgress(request, ProgressUpdate{
@@ -181,25 +184,26 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 }
 
 func scanRepository(ctx context.Context, request Request) (Result, error) {
+	result := Result{
+		RequestedReference: request.Reference.Original,
+		Repository:         request.Reference.Repository,
+		Mode:               "repository",
+		ResolvedReference:  request.Reference.RepositoryString(),
+		TagResults:         make([]TagResult, 0),
+		Targets:            make([]TargetResult, 0),
+	}
+
 	emitProgress(request, ProgressUpdate{
 		Phase:      ProgressPhaseListingTags,
 		Repository: request.Reference.Repository,
 		Message:    "Listing repository tags",
 	})
 
-	tags, err := request.Registry.ListTags(ctx, request.Reference.Repository, request.TagPageSize)
+	tags, err := request.Registry.ListTags(ctx, request.Reference.Repository, request.TagPageSize, request.MaxRepositoryTags)
+	result.TagsEnumerated = len(tags)
 	if err != nil {
-		return Result{}, err
-	}
-
-	result := Result{
-		RequestedReference: request.Reference.Original,
-		Repository:         request.Reference.Repository,
-		Mode:               "repository",
-		ResolvedReference:  request.Reference.RepositoryString(),
-		TagsEnumerated:     len(tags),
-		TagResults:         make([]TagResult, 0, len(tags)),
-		Targets:            make([]TargetResult, 0),
+		finalizeResult(&result, nil, nil)
+		return result, err
 	}
 
 	groups := make(map[string]*targetGroup)
@@ -265,6 +269,11 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 	})
 
 	result.TargetCount = len(groupList)
+	if request.MaxRepositoryTargets > 0 && len(groupList) > request.MaxRepositoryTargets {
+		finalizeResult(&result, nil, nil)
+		return result, limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
+	}
+
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
 	for _, group := range groupList {
@@ -280,13 +289,16 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			currentRef:       scanReference.CanonicalString(""),
 			findingsBefore:   len(allDetailedFindings),
 		})
+		targetResult := targetResultFromScanResult(scanReference, scanResult, group.tags)
 		if err != nil {
-			result.Targets = append(result.Targets, TargetResult{
-				Reference: scanReference.CanonicalString(""),
-				Tags:      slices.Clone(group.tags),
-				Error:     err.Error(),
-			})
+			targetResult.Error = err.Error()
+			result.Targets = append(result.Targets, targetResult)
 			result.FailedTargetCount++
+			result.ManifestCount += scanResult.ManifestCount
+			result.CompletedManifestCount += scanResult.CompletedManifestCount
+			result.FailedManifestCount += scanResult.FailedManifestCount
+			allDetailedFindings = append(allDetailedFindings, scanResult.DetailedFindings...)
+			allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, scanResult.SuppressedDetailedFindings...)
 			emitProgress(request, ProgressUpdate{
 				Phase:            ProgressPhaseTargetFailed,
 				Repository:       request.Reference.Repository,
@@ -301,10 +313,14 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 				CurrentReference: scanReference.CanonicalString(""),
 				Message:          err.Error(),
 			})
+			if limits.IsExceeded(err) {
+				finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+				return result, err
+			}
 			continue
 		}
 
-		result.Targets = append(result.Targets, targetResultFromScanResult(scanResult, group.tags))
+		result.Targets = append(result.Targets, targetResult)
 		result.CompletedTargetCount++
 		result.ManifestCount += scanResult.ManifestCount
 		result.CompletedManifestCount += scanResult.CompletedManifestCount
@@ -327,25 +343,10 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 		})
 	}
 
+	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
 	if result.CompletedTargetCount == 0 {
 		return result, allRepositoryTargetsFailedError(result.Targets)
 	}
-
-	result.DetailedFindings = findings.DeduplicateDetailed(allDetailedFindings)
-	result.Findings = make([]findings.Finding, 0, len(result.DetailedFindings))
-	for _, item := range result.DetailedFindings {
-		result.Findings = append(result.Findings, item.PublicFinding())
-	}
-	result.SuppressedDetailedFindings = findings.DeduplicateDetailed(allSuppressedDetailedFindings)
-	result.SuppressedFindings = make([]findings.Finding, 0, len(result.SuppressedDetailedFindings))
-	for _, item := range result.SuppressedDetailedFindings {
-		result.SuppressedFindings = append(result.SuppressedFindings, item.PublicFinding())
-	}
-	result.TotalFindings = len(result.Findings)
-	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
-	result.SuppressedFindingsCount = len(result.SuppressedFindings)
-	result.SuppressedUniqueFingerprints = findings.UniqueFingerprintCount(result.SuppressedFindings)
-	sortTargetResults(result.Targets)
 	emitProgress(request, ProgressUpdate{
 		Phase:            ProgressPhaseCompleted,
 		Repository:       request.Reference.Repository,
@@ -376,12 +377,13 @@ type progressState struct {
 
 func scanTarget(ctx context.Context, request Request, reference manifest.Reference, tags []string, state progressState) (scanner.Result, error) {
 	return scanner.Scan(ctx, scanner.Request{
-		Reference:    reference,
-		Platform:     request.Platform,
-		Registry:     request.Registry,
-		Detectors:    request.Detectors,
-		Logger:       request.Logger,
-		MaxFileBytes: request.MaxFileBytes,
+		Reference:      reference,
+		Platform:       request.Platform,
+		Registry:       request.Registry,
+		Detectors:      request.Detectors,
+		Logger:         request.Logger,
+		MaxFileBytes:   request.MaxFileBytes,
+		MaxConfigBytes: request.MaxConfigBytes,
 		Progress: func(update scanner.ProgressUpdate) {
 			emitProgress(request, ProgressUpdate{
 				Phase:                 mapScannerPhase(update.Phase),
@@ -403,9 +405,13 @@ func scanTarget(ctx context.Context, request Request, reference manifest.Referen
 	})
 }
 
-func targetResultFromScanResult(scanResult scanner.Result, tags []string) TargetResult {
+func targetResultFromScanResult(reference manifest.Reference, scanResult scanner.Result, tags []string) TargetResult {
+	referenceValue := scanResult.RequestedReference
+	if strings.TrimSpace(referenceValue) == "" {
+		referenceValue = reference.CanonicalString("")
+	}
 	return TargetResult{
-		Reference:              scanResult.RequestedReference,
+		Reference:              referenceValue,
 		Tags:                   slices.Clone(tags),
 		ResolvedReference:      scanResult.ResolvedReference,
 		RequestedDigest:        scanResult.RequestedDigest,
@@ -462,6 +468,24 @@ func emitProgress(request Request, update ProgressUpdate) {
 	if request.Progress != nil {
 		request.Progress(update)
 	}
+}
+
+func finalizeResult(result *Result, actionable, suppressed []findings.DetailedFinding) {
+	result.DetailedFindings = findings.DeduplicateDetailed(actionable)
+	result.Findings = make([]findings.Finding, 0, len(result.DetailedFindings))
+	for _, item := range result.DetailedFindings {
+		result.Findings = append(result.Findings, item.PublicFinding())
+	}
+	result.SuppressedDetailedFindings = findings.DeduplicateDetailed(suppressed)
+	result.SuppressedFindings = make([]findings.Finding, 0, len(result.SuppressedDetailedFindings))
+	for _, item := range result.SuppressedDetailedFindings {
+		result.SuppressedFindings = append(result.SuppressedFindings, item.PublicFinding())
+	}
+	result.TotalFindings = len(result.Findings)
+	result.UniqueFingerprints = findings.UniqueFingerprintCount(result.Findings)
+	result.SuppressedFindingsCount = len(result.SuppressedFindings)
+	result.SuppressedUniqueFingerprints = findings.UniqueFingerprintCount(result.SuppressedFindings)
+	sortTargetResults(result.Targets)
 }
 
 func allRepositoryTargetsFailedError(items []TargetResult) error {

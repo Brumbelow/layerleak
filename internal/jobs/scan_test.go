@@ -38,24 +38,18 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 			}), nil
 		case request.URL.Path == "/v2/library/app/tags/list" && request.URL.Query().Get("n") == "2" && request.URL.Query().Get("last") == "2.0":
 			return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["1.0"]}`), nil), nil
-		case request.URL.Path == "/v2/library/app/manifests/latest":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestOne,
-				}), nil
-			}
-		case request.URL.Path == "/v2/library/app/manifests/2.0":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestOne,
-				}), nil
-			}
-		case request.URL.Path == "/v2/library/app/manifests/1.0":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestTwo,
-				}), nil
-			}
+		case request.URL.Path == "/v2/library/app/manifests/latest" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestOne,
+			}), nil
+		case request.URL.Path == "/v2/library/app/manifests/2.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestOne,
+			}), nil
+		case request.URL.Path == "/v2/library/app/manifests/1.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestTwo,
+			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestOne:
 			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configOne+`","size":1},"layers":[]}`), map[string]string{
 				"Docker-Content-Digest": digestOne,
@@ -71,8 +65,6 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
-
-		return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 	})
 
 	ref, err := manifest.ParseReference("library/app")
@@ -169,8 +161,6 @@ func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
-
-		return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 	})
 
 	ref, err := manifest.ParseReference("library/app")
@@ -216,26 +206,20 @@ func TestScanRepositoryReturnsPartialResultWhenTargetLimitExceeded(t *testing.T)
 			}), nil
 		}
 
-		switch request.URL.Path {
-		case "/v2/library/app/tags/list":
+		switch {
+		case request.URL.Path == "/v2/library/app/tags/list":
 			return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest","1.0"]}`), nil), nil
-		case "/v2/library/app/manifests/latest":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestOne,
-				}), nil
-			}
-		case "/v2/library/app/manifests/1.0":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestTwo,
-				}), nil
-			}
+		case request.URL.Path == "/v2/library/app/manifests/latest" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestOne,
+			}), nil
+		case request.URL.Path == "/v2/library/app/manifests/1.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestTwo,
+			}), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
-
-		return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 	})
 
 	ref, err := manifest.ParseReference("library/app")
@@ -290,38 +274,32 @@ func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing
 			}), nil
 		}
 
-		switch request.URL.Path {
-		case "/v2/library/app/tags/list":
+		switch {
+		case request.URL.Path == "/v2/library/app/tags/list":
 			return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["1.0","latest"]}`), nil), nil
-		case "/v2/library/app/manifests/1.0":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestOne,
-				}), nil
-			}
-		case "/v2/library/app/manifests/latest":
-			if request.Method == http.MethodHead {
-				return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
-					"Docker-Content-Digest": digestTwo,
-				}), nil
-			}
-		case "/v2/library/app/manifests/" + digestOne:
+		case request.URL.Path == "/v2/library/app/manifests/1.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestOne,
+			}), nil
+		case request.URL.Path == "/v2/library/app/manifests/latest" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+				"Docker-Content-Digest": digestTwo,
+			}), nil
+		case request.URL.Path == "/v2/library/app/manifests/"+digestOne:
 			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configOne+`","size":1},"layers":[]}`), map[string]string{
 				"Docker-Content-Digest": digestOne,
 			}), nil
-		case "/v2/library/app/manifests/" + digestTwo:
+		case request.URL.Path == "/v2/library/app/manifests/"+digestTwo:
 			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configTwo+`","size":1},"layers":[]}`), map[string]string{
 				"Docker-Content-Digest": digestTwo,
 			}), nil
-		case "/v2/library/app/blobs/" + configOne:
+		case request.URL.Path == "/v2/library/app/blobs/"+configOne:
 			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`), nil), nil
-		case "/v2/library/app/blobs/" + configTwo:
+		case request.URL.Path == "/v2/library/app/blobs/"+configTwo:
 			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"],"User":"builder","WorkingDir":"https://builder:supersecretvalue@registry.internal/app"}}`), nil), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
-
-		return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 	})
 
 	ref, err := manifest.ParseReference("library/app")

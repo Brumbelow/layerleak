@@ -2,11 +2,9 @@ name: Analyze
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
   go:
@@ -14,13 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
-      - name: Show Go version
-        run: go version
-
-      - name: Run go vet
-        run: go vet ./...
+      - run: go vet ./...

@@ -1,0 +1,11 @@
+{
+  "name": "precedence_npmrc_auth_token",
+  "source_type": "file_final",
+  "path": "root/.npmrc",
+  "key": "",
+  "content": "//registry.npmjs.org/:_authToken=npm_123456789012345678901234567890123456",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["npmrc_auth_token"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

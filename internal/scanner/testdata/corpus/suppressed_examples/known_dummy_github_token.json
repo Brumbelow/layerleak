@@ -1,0 +1,11 @@
+{
+  "name": "suppressed_known_dummy_github_token",
+  "source_type": "env",
+  "path": "",
+  "key": "GITHUB_TOKEN",
+  "content": "GITHUB_TOKEN=ghp_EXAMPLEEXAMPLEEXAMPLEEXAMPLEABCDEFGH",
+  "expected_outcome": "suppressed",
+  "expected_detectors": ["github_token", "keyword_entropy"],
+  "expected_confidence_floor": "high",
+  "expected_reason": "known_dummy_value"
+}

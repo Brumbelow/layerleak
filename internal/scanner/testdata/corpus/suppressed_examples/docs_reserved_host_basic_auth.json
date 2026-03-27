@@ -1,0 +1,11 @@
+{
+  "name": "suppressed_docs_reserved_host_basic_auth",
+  "source_type": "file_final",
+  "path": "docs/setup.env",
+  "key": "",
+  "content": "REGISTRY_URL=https://deploy:supersecretvalue@localhost/org/repo.git",
+  "expected_outcome": "suppressed",
+  "expected_detectors": ["basic_auth_url", "uri"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": "example_path"
+}

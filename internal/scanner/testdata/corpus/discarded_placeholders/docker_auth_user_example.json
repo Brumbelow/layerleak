@@ -1,0 +1,11 @@
+{
+  "name": "discarded_docker_auth_user_example",
+  "source_type": "file_final",
+  "path": "root/.docker/config.json",
+  "key": "",
+  "content": "{\"auth\":\"dXNlckBleGFtcGxlLmNvbTpzdXBlcnNlY3JldA==\"}",
+  "expected_outcome": "discarded",
+  "expected_detectors": [],
+  "expected_confidence_floor": "",
+  "expected_reason": ""
+}

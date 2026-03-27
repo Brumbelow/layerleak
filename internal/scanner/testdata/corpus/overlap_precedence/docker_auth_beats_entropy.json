@@ -1,0 +1,11 @@
+{
+  "name": "precedence_docker_auth_beats_entropy",
+  "source_type": "file_final",
+  "path": "root/.docker/config.json",
+  "key": "",
+  "content": "{\"auth\":\"cmVhbHVzZXI6U3VwZXJTZWNyZXQxMjM0NQ==\"}",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["docker_auth_blob"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

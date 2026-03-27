@@ -1,0 +1,11 @@
+{
+  "name": "discarded_npmrc_auth_foo_bar",
+  "source_type": "file_final",
+  "path": "root/.npmrc",
+  "key": "",
+  "content": "//registry.npmjs.org/:_auth=Zm9vOmJhcg==",
+  "expected_outcome": "discarded",
+  "expected_detectors": [],
+  "expected_confidence_floor": "",
+  "expected_reason": ""
+}

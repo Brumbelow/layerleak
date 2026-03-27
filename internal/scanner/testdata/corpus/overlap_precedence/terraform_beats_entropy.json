@@ -1,0 +1,11 @@
+{
+  "name": "precedence_terraform_beats_entropy",
+  "source_type": "file_final",
+  "path": "root/.terraformrc",
+  "key": "",
+  "content": "credentials \"app.terraform.io\" {\n  token = \"atlasv1.1234567890abcdefghijklmnopqrstuv\"\n}",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["terraform_cloud_token"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

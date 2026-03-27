@@ -1,0 +1,11 @@
+{
+  "name": "config_basic_auth_url_actionable",
+  "source_type": "config",
+  "path": "",
+  "key": "config.working_dir",
+  "content": "https://builder:realpass123@registry.internal/app",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["basic_auth_url", "uri"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

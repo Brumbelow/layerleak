@@ -1,0 +1,11 @@
+{
+  "name": "discarded_basic_auth_url_foo_bar",
+  "source_type": "config",
+  "path": "",
+  "key": "config.working_dir",
+  "content": "https://foo:bar@example.com/config",
+  "expected_outcome": "discarded",
+  "expected_detectors": [],
+  "expected_confidence_floor": "",
+  "expected_reason": ""
+}

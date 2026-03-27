@@ -4,11 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/brumbelow/layerleak/internal/detectionpolicy"
 	"github.com/brumbelow/layerleak/internal/detectors"
 	"github.com/brumbelow/layerleak/internal/manifest"
 )
@@ -201,38 +201,7 @@ func Fingerprint(value string) string {
 }
 
 func ShouldSuppressFilePath(filePath string) bool {
-	value := strings.TrimSpace(filePath)
-	if value == "" {
-		return false
-	}
-
-	value = strings.ReplaceAll(value, "\\", "/")
-	value = path.Clean(value)
-	if value == "." || value == "/" {
-		return false
-	}
-
-	parts := strings.Split(value, "/")
-	normalized := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" || part == "." {
-			continue
-		}
-		normalized = append(normalized, part)
-	}
-	if len(normalized) <= 1 {
-		return false
-	}
-
-	for _, part := range normalized[:len(normalized)-1] {
-		switch strings.ToLower(part) {
-		case "test", "tests":
-			return true
-		}
-	}
-
-	return false
+	return detectionpolicy.TestPathReason(filePath) == detectionpolicy.ReasonTestPath
 }
 
 func buildContextSnippet(content string, match detectors.Match) string {

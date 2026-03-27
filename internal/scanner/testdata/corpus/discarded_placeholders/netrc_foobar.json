@@ -1,0 +1,11 @@
+{
+  "name": "discarded_netrc_foobar",
+  "source_type": "file_final",
+  "path": "root/.netrc",
+  "key": "",
+  "content": "machine example.com login deploy password foobar",
+  "expected_outcome": "discarded",
+  "expected_detectors": [],
+  "expected_confidence_floor": "",
+  "expected_reason": ""
+}

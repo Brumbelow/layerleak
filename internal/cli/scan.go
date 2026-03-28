@@ -5,16 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"text/tabwriter"
-	"time"
 
 	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/detectors"
 	"github.com/brumbelow/layerleak/internal/jobs"
 	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/registry"
+	"github.com/brumbelow/layerleak/internal/scanservice"
 	"github.com/spf13/cobra"
 )
 
@@ -41,17 +38,6 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			registryClient := registry.NewClient(registry.Options{
-				BaseURL: cfg.RegistryBaseURL,
-				AuthURL: cfg.RegistryAuthURL,
-				HTTPClient: &http.Client{
-					Timeout: cfg.HTTPTimeout,
-				},
-				RequestAttempts:  cfg.RegistryRequestAttempts,
-				MaxManifestBytes: cfg.MaxManifestBytes,
-			})
-			detectorSet := detectors.Default()
 
 			ctx := cmd.Context()
 			if ctx == nil {
@@ -81,19 +67,30 @@ func newScanCmd() *cobra.Command {
 				defer closer.Close()
 			}
 
-			result, err := jobs.Scan(ctx, jobs.Request{
-				Reference:            ref,
-				Platform:             platform,
-				Registry:             registryClient,
-				Detectors:            detectorSet,
-				Logger:               logger,
-				MaxFileBytes:         cfg.MaxFileBytes,
-				MaxConfigBytes:       cfg.MaxConfigBytes,
-				TagPageSize:          cfg.TagPageSize,
-				MaxRepositoryTags:    cfg.MaxRepositoryTags,
-				MaxRepositoryTargets: cfg.MaxRepositoryTargets,
+			service := scanservice.New(cfg, store)
+			result, err := service.ScanAndSave(ctx, scanservice.Request{
+				Reference: ref,
+				Platform:  platform,
+				Logger:    logger,
 				Progress: func(update jobs.ProgressUpdate) {
 					_ = progress.UpdateFromJob(update)
+				},
+				BeforeSave: func(result jobs.Result) error {
+					if store.Name() == "noop" {
+						return nil
+					}
+					return progress.Update(progressSnapshot{
+						repository:       ref.Repository,
+						tagsCompleted:    result.TagsResolved,
+						tagsFailed:       result.TagsFailed,
+						tagsTotal:        result.TagsEnumerated,
+						targetsCompleted: result.CompletedTargetCount,
+						targetsFailed:    result.FailedTargetCount,
+						targetsTotal:     result.TargetCount,
+						findingsFound:    result.TotalFindings,
+						phase:            "Saving Results",
+						message:          "Persisting findings to Postgres",
+					})
 				},
 			})
 			scanErr := err
@@ -119,40 +116,6 @@ func newScanCmd() *cobra.Command {
 					phase:            "Error",
 					message:          scanErr.Error(),
 				})
-			}
-
-			scannedAt := time.Now().UTC()
-			if store.Name() != "noop" {
-				if err := progress.Update(progressSnapshot{
-					repository:       ref.Repository,
-					tagsCompleted:    result.TagsResolved,
-					tagsFailed:       result.TagsFailed,
-					tagsTotal:        result.TagsEnumerated,
-					targetsCompleted: result.CompletedTargetCount,
-					targetsFailed:    result.FailedTargetCount,
-					targetsTotal:     result.TargetCount,
-					findingsFound:    result.TotalFindings,
-					phase:            "Saving Results",
-					message:          "Persisting findings to Postgres",
-				}); err != nil {
-					return err
-				}
-
-				if err := store.SaveScan(ctx, buildScanRecord(ref, result, scannedAt)); err != nil {
-					_ = progress.Update(progressSnapshot{
-						repository:       ref.Repository,
-						tagsCompleted:    result.TagsResolved,
-						tagsFailed:       result.TagsFailed,
-						tagsTotal:        result.TagsEnumerated,
-						targetsCompleted: result.CompletedTargetCount,
-						targetsFailed:    result.FailedTargetCount,
-						targetsTotal:     result.TargetCount,
-						findingsFound:    result.TotalFindings,
-						phase:            "Error",
-						message:          err.Error(),
-					})
-					return err
-				}
 			}
 
 			if err := progress.Update(progressSnapshot{

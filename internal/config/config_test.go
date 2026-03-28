@@ -7,6 +7,7 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_LOG_LEVEL", "")
+	t.Setenv("LAYERLEAK_API_ADDR", "")
 	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "")
 	t.Setenv("LAYERLEAK_REGISTRY_AUTH_URL", "")
 	t.Setenv("LAYERLEAK_HTTP_TIMEOUT", "")
@@ -27,6 +28,9 @@ func TestLoadDefaults(t *testing.T) {
 
 	if cfg.LogLevel != "info" {
 		t.Fatalf("cfg.LogLevel = %q", cfg.LogLevel)
+	}
+	if cfg.APIAddr != "127.0.0.1:8080" {
+		t.Fatalf("cfg.APIAddr = %q", cfg.APIAddr)
 	}
 
 	if cfg.RegistryBaseURL != "https://registry-1.docker.io" {

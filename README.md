@@ -39,6 +39,7 @@ Result and database configuration:
 
 ```bash
 export LAYERLEAK_FINDINGS_DIR=findings
+export LAYERLEAK_API_ADDR=127.0.0.1:8080
 export LAYERLEAK_TAG_PAGE_SIZE=100
 export LAYERLEAK_MAX_MANIFEST_BYTES=0
 export LAYERLEAK_MAX_CONFIG_BYTES=0
@@ -54,6 +55,7 @@ Saved findings files contain only detections, including unredacted finding value
 `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are off by default when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
+`LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080`.
 If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
 
 Result behavior:
@@ -131,6 +133,27 @@ Command syntax:
 layerleak [command]
 layerleak scan <image-ref> [flags]
 ```
+
+## HTTP API
+
+Layerleak also ships a minimal JSON API under `cmd/api`.
+The API is Postgres-backed and requires `LAYERLEAK_DATABASE_URL`; it does not serve from the findings files on disk.
+
+Start it with:
+
+```bash
+go run ./cmd/api
+```
+
+Current endpoints:
+
+- `POST /api/v1/scans`
+- `GET /api/v1/repositories`
+- `GET /api/v1/repositories/{repository}/findings`
+- `GET /api/v1/findings/{id}`
+
+API scan responses reuse the same redacted result schema as the CLI JSON output.
+Repository and finding endpoints also stay redacted: they return `redacted_value` and redacted `context_snippet`, never raw secret values or raw snippets from Postgres.
 
 ## Support this project
 

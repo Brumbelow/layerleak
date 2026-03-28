@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -54,6 +55,67 @@ type Store interface {
 	SaveScan(ctx context.Context, record ScanRecord) error
 	Name() string
 }
+
+type ReadStore interface {
+	ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error)
+	ListRepositoryFindings(ctx context.Context, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error)
+	GetFinding(ctx context.Context, id int64) (FindingDetail, error)
+}
+
+type RepositorySummary struct {
+	Registry    string
+	Repository  string
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
+}
+
+type FindingDispositionFilter string
+
+const (
+	FindingDispositionAll        FindingDispositionFilter = "all"
+	FindingDispositionActionable FindingDispositionFilter = "actionable"
+	FindingDispositionSuppressed FindingDispositionFilter = "suppressed"
+)
+
+type FindingSummary struct {
+	ID                        int64
+	ManifestDigest            string
+	Fingerprint               string
+	RedactedValue             string
+	FirstSeenAt               time.Time
+	LastSeenAt                time.Time
+	OccurrenceCount           int
+	ActionableOccurrenceCount int
+	SuppressedOccurrenceCount int
+	Detectors                 []string
+}
+
+type FindingDetail struct {
+	FindingSummary
+	Occurrences []FindingOccurrence
+}
+
+type FindingOccurrence struct {
+	DetectorName        string
+	Confidence          string
+	Disposition         findings.Disposition
+	DispositionReason   findings.DispositionReason
+	SourceType          findings.SourceType
+	Platform            manifest.Platform
+	FilePath            string
+	LayerDigest         string
+	Key                 string
+	LineNumber          int
+	ContextSnippet      string
+	SourceLocation      string
+	MatchStart          int
+	MatchEnd            int
+	PresentInFinalImage bool
+	FirstSeenAt         time.Time
+	LastSeenAt          time.Time
+}
+
+var ErrNotFound = errors.New("storage record not found")
 
 type NoopStore struct{}
 

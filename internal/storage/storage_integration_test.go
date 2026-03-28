@@ -155,6 +155,139 @@ func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	first := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	second := integrationScanRecord(time.Date(2026, time.March, 15, 13, 0, 0, 0, time.UTC))
+	second.Repository = "library/zebra"
+	second.RequestedReference = "library/zebra:latest"
+	second.ResolvedReference = "docker.io/library/zebra@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	second.Targets[0].Reference = "docker.io/library/zebra@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	if err := store.SaveScan(context.Background(), first); err != nil {
+		t.Fatalf("SaveScan(first) error = %v", err)
+	}
+	if err := store.SaveScan(context.Background(), second); err != nil {
+		t.Fatalf("SaveScan(second) error = %v", err)
+	}
+
+	items, err := store.ListRepositories(context.Background(), 50, 0)
+	if err != nil {
+		t.Fatalf("ListRepositories() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d", len(items))
+	}
+	if items[0].Repository != "library/zebra" || items[1].Repository != "library/app" {
+		t.Fatalf("repository order = %q, %q", items[0].Repository, items[1].Repository)
+	}
+}
+
+func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	record.DetailedFindings[1].Disposition = findings.DispositionExample
+	record.DetailedFindings[1].DispositionReason = findings.DispositionReasonExamplePath
+
+	if err := store.SaveScan(context.Background(), record); err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+
+	actionable, err := store.ListRepositoryFindings(context.Background(), "library/app", FindingDispositionActionable, 50, 0)
+	if err != nil {
+		t.Fatalf("ListRepositoryFindings(actionable) error = %v", err)
+	}
+	if len(actionable) != 1 {
+		t.Fatalf("len(actionable) = %d", len(actionable))
+	}
+	if actionable[0].OccurrenceCount != 2 {
+		t.Fatalf("OccurrenceCount = %d", actionable[0].OccurrenceCount)
+	}
+	if actionable[0].ActionableOccurrenceCount != 1 {
+		t.Fatalf("ActionableOccurrenceCount = %d", actionable[0].ActionableOccurrenceCount)
+	}
+	if actionable[0].SuppressedOccurrenceCount != 1 {
+		t.Fatalf("SuppressedOccurrenceCount = %d", actionable[0].SuppressedOccurrenceCount)
+	}
+	if len(actionable[0].Detectors) != 1 || actionable[0].Detectors[0] != "github_token" {
+		t.Fatalf("Detectors = %#v", actionable[0].Detectors)
+	}
+
+	suppressed, err := store.ListRepositoryFindings(context.Background(), "library/app", FindingDispositionSuppressed, 50, 0)
+	if err != nil {
+		t.Fatalf("ListRepositoryFindings(suppressed) error = %v", err)
+	}
+	if len(suppressed) != 1 {
+		t.Fatalf("len(suppressed) = %d", len(suppressed))
+	}
+}
+
+func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	if err := store.SaveScan(context.Background(), record); err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+
+	items, err := store.ListRepositoryFindings(context.Background(), "library/app", FindingDispositionAll, 50, 0)
+	if err != nil {
+		t.Fatalf("ListRepositoryFindings() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d", len(items))
+	}
+
+	detail, err := store.GetFinding(context.Background(), items[0].ID)
+	if err != nil {
+		t.Fatalf("GetFinding() error = %v", err)
+	}
+	if detail.ID != items[0].ID {
+		t.Fatalf("detail.ID = %d", detail.ID)
+	}
+	if len(detail.Occurrences) != 2 {
+		t.Fatalf("len(detail.Occurrences) = %d", len(detail.Occurrences))
+	}
+	if detail.Occurrences[0].ContextSnippet == "" {
+		t.Fatal("expected occurrence context snippet")
+	}
+	if detail.Occurrences[0].SourceLocation == "" {
+		t.Fatal("expected occurrence source location")
+	}
+}
+
 func openIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
 

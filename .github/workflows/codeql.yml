@@ -20,6 +20,7 @@ jobs:
         include:
           - language: go
             build-mode: autobuild
+            build-directory: ./cmd
     steps:
       - uses: actions/checkout@v6
 

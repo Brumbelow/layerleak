@@ -15,15 +15,14 @@ Contributions should keep the scanner:
 
 - Use Go 1.24 or newer.
 - Read [README.md](./README.md).
-- Remove any [AGENTS.md](./AGENTS.md) before committing, if you are working through an agent or automation flow.
-- Ensure you tag any AI assisted commit or PR as such. AI assisted commits NOT tagged will be rejected.
+- Ensure you tag any AI assisted commit or PR as such. AI assisted commits not tagged will be rejected.
 
 ## Local Setup
 
 Build the CLI:
 
 ```bash
-go build -o layerleak ./cmd/scanner
+go build -o layerleak ./cmd/layerleak
 ```
 
 Run the test suite:
@@ -35,7 +34,7 @@ go test ./...
 Run the scanner against a single tag:
 
 ```bash
-go run ./cmd/scanner scan redis:latest
+go run ./cmd/layerleak scan redis:latest
 ```
 
 The legacy entrypoint `go run ./cmd/layerleak ...` is also supported for backward compatibility.
@@ -43,7 +42,7 @@ The legacy entrypoint `go run ./cmd/layerleak ...` is also supported for backwar
 Run the scanner against an entire public repository:
 
 ```bash
-go run ./cmd/scanner scan mongo
+go run ./cmd/layerleak scan mongo
 ```
 
 Use an explicit tag or digest when you want to limit scope.
@@ -55,14 +54,6 @@ Use an explicit tag or digest when you want to limit scope.
 - Prefer immutable digests internally over mutable tags.
 - Do not add private registry support, secret verification, or unrelated platform features unless explicitly requested.
 - Do not rewrite unrelated files while implementing a focused change.
-
-## Secret-Safe Development
-
-- Never log raw secrets.
-- Never commit real secrets to fixtures, tests, screenshots, or documentation.
-- Use synthetic tokens, keys, and credentials in tests.
-- Treat image metadata, tar entries, file paths, and blobs as hostile input.
-- Preserve redaction behavior for CLI output unless a change explicitly targets persisted raw findings.
 
 ## Testing Expectations
 
@@ -97,13 +88,3 @@ Update docs when behavior changes:
 - `README.md` for user-facing behavior
 - `CONTRIBUTING.md` for contributor workflow
 - tests when command behavior, result shape, or detector logic changes
-
-## Pull Requests
-
-A good pull request should:
-
-- explain the problem being solved
-- describe the behavior change
-- note any security or false-positive tradeoffs
-- include test coverage for the change
-- mention any follow-up work that remains out of scope

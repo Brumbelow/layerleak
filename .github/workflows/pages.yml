@@ -31,6 +31,7 @@ jobs:
         run: |
           test -f web/index.html
           test -f web/docs/index.html
+          test -f web/docs/demo/index.html
           test -f web/demo/index.html
           test -f web/assets/styles.css
           test -f web/assets/site.js

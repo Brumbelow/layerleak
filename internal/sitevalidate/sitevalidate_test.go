@@ -31,6 +31,7 @@ func TestPagesSiteFilesExist(t *testing.T) {
 	required := []string{
 		"web/index.html",
 		"web/docs/index.html",
+		"web/docs/demo/index.html",
 		"web/demo/index.html",
 		"web/assets/styles.css",
 		"web/assets/site.js",
@@ -43,6 +44,30 @@ func TestPagesSiteFilesExist(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, relativePath)); err != nil {
 			t.Fatalf("missing required site file %s: %v", relativePath, err)
 		}
+	}
+}
+
+func TestPagesRoutesAreIntentional(t *testing.T) {
+	root := repoRoot(t)
+
+	indexBody, err := os.ReadFile(filepath.Join(root, "web/index.html"))
+	if err != nil {
+		t.Fatalf("ReadFile(index) error = %v", err)
+	}
+	indexHTML := string(indexBody)
+	if !strings.Contains(indexHTML, "https://github.com/brumbelow/layerleak") {
+		t.Fatal("web/index.html does not redirect to the GitHub repository")
+	}
+	if !strings.Contains(indexHTML, "./docs/") {
+		t.Fatal("web/index.html is missing the docs fallback link")
+	}
+
+	legacyDemoBody, err := os.ReadFile(filepath.Join(root, "web/demo/index.html"))
+	if err != nil {
+		t.Fatalf("ReadFile(legacy demo) error = %v", err)
+	}
+	if !strings.Contains(string(legacyDemoBody), "../docs/demo/") {
+		t.Fatal("web/demo/index.html does not redirect to the docs demo route")
 	}
 }
 

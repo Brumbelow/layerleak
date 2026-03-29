@@ -2,8 +2,9 @@
 
 Check [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guidelines.
 
-Docs site: https://brumbelow.github.io/layerleak/
-Browser demo: https://brumbelow.github.io/layerleak/demo/ (simulated replay, not a live scan backend)
+Pages root: https://brumbelow.github.io/layerleak/ (redirects to the GitHub repository)
+Docs site: https://brumbelow.github.io/layerleak/docs/
+Browser demo: https://brumbelow.github.io/layerleak/docs/demo/ (simulated replay, not a live scan backend)
 
 - Docker Hub / OCI image secret scanner that analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
 - Traditional secret scanners often treat a container image as a flat blob or depend on a local Docker daemon. This project is designed around OCI image internals

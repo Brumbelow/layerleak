@@ -21,7 +21,9 @@
     complete: false,
   };
 
-  fetch("../assets/demo-data.json", { cache: "no-store" })
+  const fixtureURL = new URL("demo-data.json", document.currentScript.src);
+
+  fetch(fixtureURL, { cache: "no-store" })
     .then((response) => {
       if (!response.ok) {
         throw new Error("demo fixture request failed");

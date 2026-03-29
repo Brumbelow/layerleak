@@ -6,101 +6,21 @@
     <title>layerleak Browser Demo</title>
     <meta
       name="description"
-      content="Simulated browser demo of a single layerleak scan and local Postgres-style result snapshot."
+      content="Redirecting to the layerleak browser demo under /docs/demo."
     />
-    <link rel="stylesheet" href="../assets/styles.css" />
-    <script defer src="../assets/site.js"></script>
-    <script defer src="../assets/demo.js"></script>
+    <meta http-equiv="refresh" content="0; url=../docs/demo/" />
+    <link rel="canonical" href="../docs/demo/" />
+    <script>
+      const nextPath = window.location.pathname.replace(/\/demo\/?$/, "/docs/demo/");
+      window.location.replace(window.location.origin + nextPath);
+    </script>
   </head>
-  <body data-page="demo">
-    <div class="site-shell">
-      <header class="site-header">
-        <a class="brand-lockup" href="../">
-          <span class="brand-badge">://</span>
-          <span class="brand-copy">
-            <strong>layerleak</strong>
-            <span>Docker Hub secret scanner</span>
-          </span>
-        </a>
-        <nav class="site-nav" aria-label="Primary">
-          <a class="nav-link" data-nav="home" href="../">Home</a>
-          <a class="nav-link" data-nav="docs" href="../docs/">Docs</a>
-          <a class="nav-link" data-nav="demo" href="./">Try It Out</a>
-          <a class="nav-link" href="https://github.com/brumbelow/layerleak">GitHub</a>
-        </nav>
-      </header>
-
-      <main class="demo-layout">
-        <section class="demo-panel" data-reveal>
-          <div class="section-heading">
-            <span>Browser replay</span>
-            <h2>One fixed scan, one synthetic local machine snapshot.</h2>
-          </div>
-          <div class="simulation-banner">
-            <span class="sim-label">Simulated demo</span>
-            <p>
-              This page does not run a live backend scan. It replays a curated transcript and loads
-              a fake Postgres-style dataset stored in the repository.
-            </p>
-          </div>
-          <div class="command-strip">
-            <div>
-              <div class="metric-label">Example command</div>
-              <div class="command-chip" id="demo-command">loading demo fixture...</div>
-            </div>
-            <div class="button-row">
-              <button class="button-primary" id="demo-start" type="button">Try it out</button>
-              <button class="button-secondary" id="demo-replay" type="button" disabled>Replay demo</button>
-            </div>
-          </div>
-          <p class="demo-subtitle">
-            Fixed target, fixed platform, fixed transcript: <code>latest</code> only and
-            <code>linux/amd64</code> only.
-          </p>
-        </section>
-
-        <section class="terminal-shell" data-reveal>
-          <div class="terminal-topbar">
-            <div class="terminal-dots" aria-hidden="true">
-              <span></span><span></span><span></span>
-            </div>
-            <div class="terminal-status" id="demo-status"><strong>Status:</strong> waiting to replay</div>
-          </div>
-          <pre class="terminal-screen" id="demo-terminal"></pre>
-        </section>
-
-        <section class="demo-panel" data-reveal>
-          <div class="section-heading">
-            <span>Local snapshot</span>
-            <h2>Fake Postgres rows that emulate the local machine setup.</h2>
-          </div>
-          <div class="stat-grid" id="demo-stats">
-            <article class="stat-card"><h3>Repository</h3><p>Awaiting replay</p></article>
-            <article class="stat-card"><h3>Platform</h3><p>Awaiting replay</p></article>
-            <article class="stat-card"><h3>Actionable findings</h3><p>Awaiting replay</p></article>
-            <article class="stat-card"><h3>Output file</h3><p>Awaiting replay</p></article>
-          </div>
-        </section>
-
-        <section class="table-shell" data-reveal>
-          <div class="table-topbar">
-            <div>
-              <div class="metric-label">Simulated local database</div>
-              <h2 style="margin: 0.25rem 0 0">layerleak tables after the replayed run</h2>
-            </div>
-            <div class="metric-label" id="table-meta">Run the replay to load rows</div>
-          </div>
-          <div class="tab-row" id="demo-tabs" role="tablist" aria-label="Database tables"></div>
-          <div class="table-wrap" id="demo-table-wrap">
-            <div class="table-empty">Run the simulated scan to load the fake Postgres snapshot.</div>
-          </div>
-        </section>
-      </main>
-
-      <footer class="site-footer">
-        <span>The transcript and table rows are synthetic and non-reusable by design.</span>
-        <span>GitHub Pages demo · <span data-current-year></span></span>
-      </footer>
-    </div>
+  <body>
+    <main>
+      <p>
+        Redirecting to the simulated browser demo at
+        <a href="../docs/demo/">../docs/demo/</a>.
+      </p>
+    </main>
   </body>
 </html>

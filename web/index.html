@@ -3,140 +3,62 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>layerleak Docs</title>
+    <title>layerleak</title>
     <meta
       name="description"
-      content="Static docs and a simulated browser demo for layerleak, the Docker Hub secret scanner."
+      content="Redirecting to the layerleak GitHub repository. Documentation lives under /docs."
     />
-    <link rel="stylesheet" href="assets/styles.css" />
-    <script defer src="assets/site.js"></script>
+    <meta http-equiv="refresh" content="0; url=https://github.com/brumbelow/layerleak" />
+    <link rel="canonical" href="https://github.com/brumbelow/layerleak" />
+    <script>
+      window.location.replace("https://github.com/brumbelow/layerleak");
+    </script>
+    <style>
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background: #f4efe5;
+        color: #1a1713;
+      }
+
+      main {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 2rem;
+      }
+
+      article {
+        max-width: 36rem;
+        padding: 2rem;
+        border: 1px solid rgba(26, 23, 19, 0.12);
+        border-radius: 1rem;
+        background: rgba(255, 251, 244, 0.92);
+        box-shadow: 0 24px 48px rgba(26, 23, 19, 0.08);
+      }
+
+      h1 {
+        margin-top: 0;
+      }
+
+      a {
+        color: #8f2d12;
+      }
+    </style>
   </head>
-  <body data-page="home">
-    <div class="site-shell">
-      <header class="site-header">
-        <a class="brand-lockup" href="./">
-          <span class="brand-badge">://</span>
-          <span class="brand-copy">
-            <strong>layerleak</strong>
-            <span>Docker Hub secret scanner</span>
-          </span>
-        </a>
-        <nav class="site-nav" aria-label="Primary">
-          <a class="nav-link" data-nav="home" href="./">Home</a>
-          <a class="nav-link" data-nav="docs" href="docs/">Docs</a>
-          <a class="nav-link" data-nav="demo" href="demo/">Try It Out</a>
-          <a class="nav-link" href="https://github.com/brumbelow/layerleak">GitHub</a>
-        </nav>
-      </header>
-
-      <main>
-        <section class="hero" data-reveal>
-          <article class="hero-card hero-copy">
-            <span class="eyebrow">Public Docker Hub Secret Scanner</span>
-            <h1>Layer-aware scanning for real image history.</h1>
-            <p>
-              layerleak inspects OCI manifests, config metadata, final files, and deleted-layer
-              artifacts so findings keep the provenance that flat blob scanning usually drops.
-            </p>
-            <div class="hero-actions" style="margin-top: 1.4rem">
-              <a class="button-primary" href="docs/">Read the docs</a>
-              <a class="button-secondary" href="demo/">Launch the browser demo</a>
-            </div>
-            <div class="hero-meta">
-              <div class="metric">
-                <span class="metric-label">Input model</span>
-                <span class="metric-value">Docker Hub tags and digests</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Detection path</span>
-                <span class="metric-value">Config, env, labels, history, layers</span>
-              </div>
-              <div class="metric">
-                <span class="metric-label">Browser demo</span>
-                <span class="metric-value">Simulated CLI replay + fake local Postgres</span>
-              </div>
-            </div>
-          </article>
-
-          <aside class="feature-panel" data-reveal>
-            <span class="site-kicker">What ships today</span>
-            <div class="card">
-              <h3>Scanner CLI</h3>
-              <p>Digest-first scans for public Docker Hub images without a local Docker daemon.</p>
-            </div>
-            <div class="card">
-              <h3>Postgres persistence</h3>
-              <p>Deduplicated findings and occurrences stored by manifest digest and fingerprint.</p>
-            </div>
-            <div class="card">
-              <h3>Minimal API</h3>
-              <p>Read endpoints plus a synchronous scan endpoint for a Postgres-backed instance.</p>
-            </div>
-          </aside>
-        </section>
-
-        <section class="page-section" data-reveal>
-          <div class="section-heading">
-            <span>Why it feels different</span>
-            <h2>Designed around OCI internals instead of opaque image blobs.</h2>
-          </div>
-          <div class="card-grid">
-            <article class="card">
-              <h3>History-aware</h3>
-              <p>Deleted-layer files still matter. layerleak keeps them visible instead of flattening them away.</p>
-            </article>
-            <article class="card">
-              <h3>Digest-first</h3>
-              <p>Tags are mutable labels. The scanner resolves them to immutable digests before attaching findings.</p>
-            </article>
-            <article class="card">
-              <h3>Secret-safe defaults</h3>
-              <p>CLI and API output stay redacted while local findings files and Postgres preserve raw material deliberately.</p>
-            </article>
-          </div>
-        </section>
-
-        <section class="page-section" data-reveal>
-          <div class="section-heading">
-            <span>Explore</span>
-            <h2>Start with the docs, then replay a single simulated scan in the browser.</h2>
-          </div>
-          <div class="note-grid">
-            <article class="callout">
-              <strong>Docs</strong>
-              <p>
-                Installation, environment variables, CLI behavior, Postgres persistence, and the
-                current HTTP API are all documented in one static reference.
-              </p>
-              <p style="margin-top: 0.8rem"><a class="button-secondary" href="docs/">Open docs</a></p>
-            </article>
-            <article class="callout">
-              <strong>Try it out</strong>
-              <p>
-                Replay a simulated run of
-                <code>layerleak scan vulnerableHost:latest --platform linux/amd64</code> and inspect
-                the fake local database snapshot it would leave behind.
-              </p>
-              <p style="margin-top: 0.8rem"><a class="button-primary" href="demo/">Open demo</a></p>
-            </article>
-            <article class="callout">
-              <strong>Source</strong>
-              <p>
-                The scanner, API, and this Pages site live in the same repository. The browser demo
-                is intentionally simulated and versioned in-repo as static fixture data.
-              </p>
-              <p style="margin-top: 0.8rem">
-                <a class="button-secondary" href="https://github.com/brumbelow/layerleak">View repository</a>
-              </p>
-            </article>
-          </div>
-        </section>
-      </main>
-
-      <footer class="site-footer">
-        <span>layerleak GitHub Pages docs</span>
-        <span>Static site updated in-repo · <span data-current-year></span></span>
-      </footer>
-    </div>
+  <body>
+    <main>
+      <article>
+        <h1>Redirecting to GitHub</h1>
+        <p>
+          The root Pages URL now redirects to
+          <a href="https://github.com/brumbelow/layerleak">github.com/brumbelow/layerleak</a>.
+        </p>
+        <p>
+          Documentation lives at <a href="./docs/">brumbelow.github.io/layerleak/docs</a> and the
+          simulated browser demo lives under that docs site.
+        </p>
+      </article>
+    </main>
   </body>
 </html>

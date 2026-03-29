@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>layerleak Docs</title>
+    <meta
+      name="description"
+      content="Installation, CLI usage, Postgres persistence, and API docs for layerleak."
+    />
+    <link rel="stylesheet" href="../assets/styles.css" />
+    <script defer src="../assets/site.js"></script>
+  </head>
+  <body data-page="docs">
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="brand-lockup" href="../">
+          <span class="brand-badge">://</span>
+          <span class="brand-copy">
+            <strong>layerleak</strong>
+            <span>Docker Hub secret scanner</span>
+          </span>
+        </a>
+        <nav class="site-nav" aria-label="Primary">
+          <a class="nav-link" data-nav="home" href="../">Home</a>
+          <a class="nav-link" data-nav="docs" href="./">Docs</a>
+          <a class="nav-link" data-nav="demo" href="../demo/">Try It Out</a>
+          <a class="nav-link" href="https://github.com/brumbelow/layerleak">GitHub</a>
+        </nav>
+      </header>
+
+      <section class="hero" data-reveal>
+        <article class="hero-card hero-copy">
+          <span class="eyebrow">Static reference</span>
+          <h1>Docs for the scanner, not just the command line.</h1>
+          <p>
+            This site mirrors the current repository behavior: public Docker Hub scans, Postgres
+            persistence, a minimal API, and an intentionally simulated browser demo.
+          </p>
+        </article>
+        <aside class="feature-panel" data-reveal>
+          <span class="site-kicker">Quick links</span>
+          <div class="card"><h3><a href="#install">Install</a></h3><p>Build from source with Go 1.24+.</p></div>
+          <div class="card"><h3><a href="#postgres">Postgres</a></h3><p>Manual migrations and current-state persistence.</p></div>
+          <div class="card"><h3><a href="#api">HTTP API</a></h3><p>JSON endpoints backed by a local Postgres instance.</p></div>
+        </aside>
+      </section>
+
+      <div class="docs-shell">
+        <aside class="docs-nav" data-reveal>
+          <strong>Contents</strong>
+          <a href="#install">Install and build</a>
+          <a href="#env">Environment</a>
+          <a href="#results">Result behavior</a>
+          <a href="#postgres">Postgres persistence</a>
+          <a href="#cli">CLI usage</a>
+          <a href="#api">HTTP API</a>
+          <a href="#demo">Browser demo</a>
+        </aside>
+
+        <div class="docs-content">
+          <section class="doc-block" id="install" data-reveal>
+            <h2>Install and build</h2>
+            <p>layerleak currently targets Go 1.24+ and builds directly from source.</p>
+            <pre><code>git clone https://github.com/brumbelow/layerleak.git
+cd layerleak
+go build -o layerleak .</code></pre>
+            <p>Optional local configuration still uses a plain environment file:</p>
+            <pre><code>cp .env.example .env</code></pre>
+          </section>
+
+          <section class="doc-block" id="env" data-reveal>
+            <h2>Environment</h2>
+            <p>
+              The scanner keeps its runtime surface small: registry endpoints, output location,
+              HTTP timeout, operational guardrails, and optional Postgres persistence.
+            </p>
+            <pre><code>export LAYERLEAK_FINDINGS_DIR=findings
+export LAYERLEAK_API_ADDR=127.0.0.1:8080
+export LAYERLEAK_TAG_PAGE_SIZE=100
+export LAYERLEAK_MAX_MANIFEST_BYTES=0
+export LAYERLEAK_MAX_CONFIG_BYTES=0
+export LAYERLEAK_MAX_REPOSITORY_TAGS=0
+export LAYERLEAK_MAX_REPOSITORY_TARGETS=0
+export LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
+export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable</code></pre>
+            <p>
+              The four size and repository caps are disabled when set to <code>0</code>.
+              If enabled and exceeded, the scan fails closed but still preserves partial results.
+            </p>
+          </section>
+
+          <section class="doc-block" id="results" data-reveal>
+            <h2>Result behavior</h2>
+            <p>
+              Actionable findings drive the CLI exit code and stay visible in <code>findings</code>.
+              Example or tutorial-like material is retained as suppressed findings with
+              <code>disposition</code> metadata for review.
+            </p>
+            <p>
+              Saved findings files and local Postgres storage both keep raw finding material on
+              purpose. CLI and API output stay redacted.
+            </p>
+            <div class="callout">
+              <strong>Secret-safety note</strong>
+              <p>
+                Use a dedicated local database or schema for layerleak. Persistence stores raw
+                values and raw snippets, not just redacted previews.
+              </p>
+            </div>
+          </section>
+
+          <section class="doc-block" id="postgres" data-reveal>
+            <h2>Postgres persistence</h2>
+            <p>
+              Migrations are manual by design. The scanner does not auto-create or auto-upgrade the
+              schema.
+            </p>
+            <pre><code>psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.up.sql
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.up.sql</code></pre>
+            <p>
+              The current schema keeps live deduplicated state by repository, tag, manifest,
+              fingerprint, and occurrence metadata. It does not keep a separate <code>scan_runs</code>
+              history table yet.
+            </p>
+          </section>
+
+          <section class="doc-block" id="cli" data-reveal>
+            <h2>CLI usage</h2>
+            <p>The primary command surface is still the scanner CLI.</p>
+            <pre><code>./layerleak --help
+./layerleak scan --help
+
+./layerleak scan ubuntu
+./layerleak scan library/nginx:latest --format json
+./layerleak scan alpine:latest --platform linux/amd64
+./layerleak scan mongo</code></pre>
+            <p>
+              Bare repository names enumerate public tags. If you only want a single image, use an
+              explicit tag or digest.
+            </p>
+          </section>
+
+          <section class="doc-block" id="api" data-reveal>
+            <h2>HTTP API</h2>
+            <p>
+              The API is a separate Go binary under <code>cmd/api</code>. It requires
+              <code>LAYERLEAK_DATABASE_URL</code> and serves JSON only.
+            </p>
+            <pre><code>go run ./cmd/api</code></pre>
+            <p>Current endpoints:</p>
+            <pre><code>POST /api/v1/scans
+GET  /api/v1/repositories
+GET  /api/v1/repositories/{repository}/findings
+GET  /api/v1/findings/{id}</code></pre>
+            <p>
+              API responses mirror the redacted CLI/API view. They never expose raw secret values or
+              raw snippets from local storage.
+            </p>
+          </section>
+
+          <section class="doc-block" id="demo" data-reveal>
+            <h2>Browser demo</h2>
+            <p>
+              The GitHub Pages demo is intentionally simulated. It replays a fixed scan command and
+              then shows a fake local Postgres snapshot that matches the storage model conceptually.
+            </p>
+            <pre><code>layerleak scan vulnerableHost:latest --platform linux/amd64</code></pre>
+            <p>
+              The transcript, findings file path, and database rows are all synthetic and versioned
+              in-repo as static fixture data.
+            </p>
+            <p><a class="button-primary" href="../demo/">Open the simulated demo</a></p>
+          </section>
+        </div>
+      </div>
+
+      <footer class="site-footer">
+        <span>layerleak documentation</span>
+        <span>Static Pages site · <span data-current-year></span></span>
+      </footer>
+    </div>
+  </body>
+</html>

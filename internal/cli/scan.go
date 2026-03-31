@@ -68,7 +68,7 @@ func newScanCmd() *cobra.Command {
 			}
 
 			service := scanservice.New(cfg, store)
-			result, err := service.ScanAndSave(ctx, scanservice.Request{
+			outcome, err := service.ScanAndSave(ctx, scanservice.Request{
 				Reference: ref,
 				Platform:  platform,
 				Logger:    logger,
@@ -93,6 +93,7 @@ func newScanCmd() *cobra.Command {
 					})
 				},
 			})
+			result := outcome.Result
 			scanErr := err
 			limitExceeded := limits.IsExceeded(scanErr)
 			if scanErr != nil && !limitExceeded {

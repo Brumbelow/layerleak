@@ -10,7 +10,6 @@ import (
 	"github.com/brumbelow/layerleak/internal/config"
 	"github.com/brumbelow/layerleak/internal/detectors"
 	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/registry"
 	"github.com/brumbelow/layerleak/internal/storage"
@@ -36,6 +35,11 @@ const (
 type Error struct {
 	Phase ErrorPhase
 	Err   error
+}
+
+type Outcome struct {
+	Result    jobs.Result
+	ScanRunID int64
 }
 
 func (e *Error) Error() string {
@@ -78,8 +82,8 @@ func New(cfg config.Config, store storage.Store) *Service {
 	}
 }
 
-func (s *Service) ScanAndSave(ctx context.Context, request Request) (jobs.Result, error) {
-	result, err := jobs.Scan(ctx, jobs.Request{
+func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, error) {
+	result, scanErr := jobs.Scan(ctx, jobs.Request{
 		Reference:            request.Reference,
 		Platform:             request.Platform,
 		Registry:             s.registryClient(),
@@ -92,30 +96,30 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (jobs.Result
 		MaxRepositoryTargets: s.config.MaxRepositoryTargets,
 		Progress:             request.Progress,
 	})
-	if err != nil && !limits.IsExceeded(err) {
-		return result, &Error{Phase: ErrorPhaseScan, Err: err}
-	}
+	outcome := Outcome{Result: result}
 
 	if s.store == nil || s.store.Name() == "noop" {
-		return result, err
+		return outcome, wrapScanError(scanErr)
 	}
 
 	if request.BeforeSave != nil {
 		if hookErr := request.BeforeSave(result); hookErr != nil {
-			return result, &Error{Phase: ErrorPhaseSave, Err: hookErr}
+			return outcome, &Error{Phase: ErrorPhaseSave, Err: hookErr}
 		}
 	}
 
 	scannedAt := s.now().UTC()
-	if storeErr := s.store.SaveScan(ctx, BuildScanRecord(request.Reference, result, scannedAt)); storeErr != nil {
-		return result, &Error{Phase: ErrorPhaseSave, Err: storeErr}
+	record, recordErr := BuildScanRecord(request.Reference, result, scannedAt, scanErr)
+	if recordErr != nil {
+		return outcome, &Error{Phase: ErrorPhaseSave, Err: recordErr}
 	}
-
-	if err != nil {
-		return result, &Error{Phase: ErrorPhaseScan, Err: err}
+	scanRunID, storeErr := s.store.SaveScan(ctx, record)
+	if storeErr != nil {
+		return outcome, &Error{Phase: ErrorPhaseSave, Err: storeErr}
 	}
+	outcome.ScanRunID = scanRunID
 
-	return result, nil
+	return outcome, wrapScanError(scanErr)
 }
 
 func (s *Service) registryClient() *registry.Client {
@@ -132,4 +136,11 @@ func (s *Service) registryClient() *registry.Client {
 		RequestAttempts:  s.config.RegistryRequestAttempts,
 		MaxManifestBytes: s.config.MaxManifestBytes,
 	})
+}
+
+func wrapScanError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &Error{Phase: ErrorPhaseScan, Err: err}
 }

@@ -78,11 +78,13 @@ Apply the migrations with `psql` in order:
 ```bash
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.up.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.up.sql
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql
 ```
 
 Rollback the migrations in reverse order:
 
 ```bash
+psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.down.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.down.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.down.sql
 ```
@@ -90,13 +92,15 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.down.sql
 Operational defaults:
 
 - Migrations are expected to remain additive.
-- The schema keeps current deduplicated state with `first_seen_at` and `last_seen_at`; it does not keep a `scan_runs` history table yet.
+- The schema keeps current deduplicated state with `first_seen_at` and `last_seen_at`, and also stores append-only scan history in `scan_runs`.
 - Tag mappings are refreshed for tags touched by the current scan.
 - Findings are deduplicated canonically by `(manifest_digest, fingerprint)`, and repeated identical context snippets are collapsed before persistence.
+- Scan history stores a redacted snapshot of the public result JSON, not raw values or raw snippets.
 
 Secret-safety note:
 
 - Postgres persistence stores raw finding values and raw snippets, not only redacted previews.
+- The `scan_runs.result_json` snapshot stays redacted.
 - Use a dedicated database or schema for layerleak.
 - For the safest purge path, drop the dedicated database or schema instead of trying to surgically delete individual rows.
 
@@ -151,11 +155,15 @@ go run ./cmd/api
 Current endpoints:
 
 - `POST /api/v1/scans`
+- `GET /api/v1/scans/{id}`
 - `GET /api/v1/repositories`
+- `GET /api/v1/repositories/{repository}/scans`
 - `GET /api/v1/repositories/{repository}/findings`
 - `GET /api/v1/findings/{id}`
 
+`POST /api/v1/scans` stays synchronous and now returns `scan_run_id` whenever Postgres persistence is enabled.
 API scan responses reuse the same redacted result schema as the CLI JSON output.
+`GET /api/v1/scans/{id}` returns the persisted run metadata plus the stored redacted result snapshot.
 Repository and finding endpoints also stay redacted: they return `redacted_value` and redacted `context_snippet`, never raw secret values or raw snippets from Postgres.
 
 ## Support this project

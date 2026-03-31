@@ -89,17 +89,20 @@ func TestScanAndSavePersistsPartialResultOnLimitError(t *testing.T) {
 		t.Fatalf("ParseReference() error = %v", err)
 	}
 
-	result, err := service.ScanAndSave(context.Background(), Request{Reference: reference})
+	outcome, err := service.ScanAndSave(context.Background(), Request{Reference: reference})
 	if err == nil {
 		t.Fatal("ScanAndSave() error = nil")
 	}
 	if !limits.IsExceeded(err) {
 		t.Fatalf("err = %v", err)
 	}
+	if outcome.ScanRunID != 1 {
+		t.Fatalf("outcome.ScanRunID = %d", outcome.ScanRunID)
+	}
 	if len(store.records) != 1 {
 		t.Fatalf("len(store.records) = %d", len(store.records))
 	}
-	if result.TotalFindings == 0 {
+	if outcome.Result.TotalFindings == 0 {
 		t.Fatal("result.TotalFindings = 0")
 	}
 	if len(store.records[0].DetailedFindings) == 0 {
@@ -114,9 +117,9 @@ type recordingStore struct {
 	records []storage.ScanRecord
 }
 
-func (s *recordingStore) SaveScan(_ context.Context, record storage.ScanRecord) error {
+func (s *recordingStore) SaveScan(_ context.Context, record storage.ScanRecord) (int64, error) {
 	s.records = append(s.records, record)
-	return nil
+	return int64(len(s.records)), nil
 }
 
 func (s *recordingStore) Name() string {

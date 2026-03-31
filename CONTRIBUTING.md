@@ -22,7 +22,7 @@ Contributions should keep the scanner:
 Build the CLI:
 
 ```bash
-go build -o layerleak ./cmd/layerleak
+go build -o layerleak .
 ```
 
 Run the test suite:
@@ -34,15 +34,15 @@ go test ./...
 Run the scanner against a single tag:
 
 ```bash
-go run ./cmd/layerleak scan redis:latest
+go run . scan redis:latest
 ```
 
-The legacy entrypoint `go run ./cmd/layerleak ...` is also supported for backward compatibility.
+The explicit scanner entrypoint `go run ./cmd/scanner ...` is also supported when you prefer command-specific binaries.
 
 Run the scanner against an entire public repository:
 
 ```bash
-go run ./cmd/layerleak scan mongo
+go run . scan mongo
 ```
 
 Use an explicit tag or digest when you want to limit scope.

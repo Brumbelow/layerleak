@@ -48,18 +48,18 @@ func (s *PostgresStore) Name() string {
 	return "postgres"
 }
 
-func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) error {
+func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64, error) {
 	if s == nil || s.db == nil {
-		return fmt.Errorf("postgres store is not initialized")
+		return 0, fmt.Errorf("postgres store is not initialized")
 	}
 	if err := validateScanRecord(record); err != nil {
-		return err
+		return 0, err
 	}
 
 	scannedAt := record.ScannedAt.UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin scan transaction: %w", err)
+		return 0, fmt.Errorf("begin scan transaction: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback()
@@ -67,37 +67,42 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) error {
 
 	repositoryID, err := upsertRepository(ctx, tx, record, scannedAt)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	for _, item := range collectManifestRecords(record) {
 		if err := upsertManifest(ctx, tx, item, scannedAt); err != nil {
-			return err
+			return 0, err
 		}
 		if err := upsertRepositoryManifest(ctx, tx, repositoryID, item, scannedAt); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	if err := replaceTagMappings(ctx, tx, repositoryID, normalizeTagRecords(record.Tags), scannedAt); err != nil {
-		return err
+		return 0, err
 	}
 
 	for _, item := range findings.DeduplicateDetailed(record.DetailedFindings) {
 		findingID, err := upsertFinding(ctx, tx, item, scannedAt)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if err := upsertFindingOccurrence(ctx, tx, findingID, item, scannedAt); err != nil {
-			return err
+			return 0, err
 		}
+	}
+
+	scanRunID, err := insertScanRun(ctx, tx, repositoryID, record, scannedAt)
+	if err != nil {
+		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit scan transaction: %w", err)
+		return 0, fmt.Errorf("commit scan transaction: %w", err)
 	}
 
-	return nil
+	return scanRunID, nil
 }
 
 func upsertRepository(ctx context.Context, tx *sql.Tx, record ScanRecord, scannedAt time.Time) (int64, error) {
@@ -293,6 +298,64 @@ func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, i
 	}
 
 	return nil
+}
+
+func insertScanRun(ctx context.Context, tx *sql.Tx, repositoryID int64, record ScanRecord, scannedAt time.Time) (int64, error) {
+	var scanRunID int64
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO scan_runs (
+			repository_id,
+			requested_reference,
+			resolved_reference,
+			requested_digest,
+			mode,
+			status,
+			error_message,
+			tags_enumerated,
+			tags_resolved,
+			tags_failed,
+			target_count,
+			completed_target_count,
+			failed_target_count,
+			manifest_count,
+			completed_manifest_count,
+			failed_manifest_count,
+			total_findings,
+			unique_fingerprints,
+			suppressed_findings_count,
+			suppressed_unique_fingerprints,
+			result_json,
+			scanned_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		RETURNING id
+	`, repositoryID,
+		strings.TrimSpace(record.RequestedReference),
+		strings.TrimSpace(record.ResolvedReference),
+		strings.TrimSpace(record.RequestedDigest),
+		strings.TrimSpace(record.Mode),
+		string(record.Status),
+		strings.TrimSpace(record.ErrorMessage),
+		record.TagsEnumerated,
+		record.TagsResolved,
+		record.TagsFailed,
+		record.TargetCount,
+		record.CompletedTargetCount,
+		record.FailedTargetCount,
+		record.ManifestCount,
+		record.CompletedManifestCount,
+		record.FailedManifestCount,
+		record.TotalFindings,
+		record.UniqueFingerprints,
+		record.SuppressedFindingsCount,
+		record.SuppressedUniqueFingerprints,
+		string(record.ResultJSON),
+		scannedAt,
+	).Scan(&scanRunID); err != nil {
+		return 0, fmt.Errorf("insert scan run for %s: %w", record.Repository, err)
+	}
+
+	return scanRunID, nil
 }
 
 func collectManifestRecords(record ScanRecord) []ManifestRecord {

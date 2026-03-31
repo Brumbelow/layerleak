@@ -22,6 +22,8 @@ type Request struct {
 	Detectors            detectors.Set
 	Logger               *slog.Logger
 	MaxFileBytes         int64
+	MaxLayerBytes        int64
+	MaxLayerEntries      int
 	MaxConfigBytes       int64
 	TagPageSize          int
 	MaxRepositoryTags    int
@@ -377,13 +379,15 @@ type progressState struct {
 
 func scanTarget(ctx context.Context, request Request, reference manifest.Reference, tags []string, state progressState) (scanner.Result, error) {
 	return scanner.Scan(ctx, scanner.Request{
-		Reference:      reference,
-		Platform:       request.Platform,
-		Registry:       request.Registry,
-		Detectors:      request.Detectors,
-		Logger:         request.Logger,
-		MaxFileBytes:   request.MaxFileBytes,
-		MaxConfigBytes: request.MaxConfigBytes,
+		Reference:       reference,
+		Platform:        request.Platform,
+		Registry:        request.Registry,
+		Detectors:       request.Detectors,
+		Logger:          request.Logger,
+		MaxFileBytes:    request.MaxFileBytes,
+		MaxLayerBytes:   request.MaxLayerBytes,
+		MaxLayerEntries: request.MaxLayerEntries,
+		MaxConfigBytes:  request.MaxConfigBytes,
 		Progress: func(update scanner.ProgressUpdate) {
 			emitProgress(request, ProgressUpdate{
 				Phase:                 mapScannerPhase(update.Phase),

@@ -15,6 +15,8 @@ type Config struct {
 	RegistryAuthURL         string
 	HTTPTimeout             time.Duration
 	MaxFileBytes            int64
+	MaxLayerBytes           int64
+	MaxLayerEntries         int
 	MaxManifestBytes        int64
 	MaxConfigBytes          int64
 	TagPageSize             int
@@ -31,6 +33,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	maxFileBytes, err := int64FromEnv("LAYERLEAK_MAX_FILE_BYTES", 1<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	maxLayerBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_LAYER_BYTES", 512*(1<<20))
+	if err != nil {
+		return Config{}, err
+	}
+	maxLayerEntries, err := nonNegativeIntFromEnv("LAYERLEAK_MAX_LAYER_ENTRIES", 50000)
 	if err != nil {
 		return Config{}, err
 	}
@@ -66,6 +76,8 @@ func Load() (Config, error) {
 		RegistryAuthURL:         envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", "https://auth.docker.io/token"),
 		HTTPTimeout:             timeout,
 		MaxFileBytes:            maxFileBytes,
+		MaxLayerBytes:           maxLayerBytes,
+		MaxLayerEntries:         maxLayerEntries,
 		MaxManifestBytes:        maxManifestBytes,
 		MaxConfigBytes:          maxConfigBytes,
 		TagPageSize:             tagPageSize,

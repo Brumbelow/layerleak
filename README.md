@@ -44,6 +44,8 @@ Result and database configuration:
 export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_API_ADDR=127.0.0.1:8080
 export LAYERLEAK_TAG_PAGE_SIZE=100
+export LAYERLEAK_MAX_LAYER_BYTES=536870912
+export LAYERLEAK_MAX_LAYER_ENTRIES=50000
 export LAYERLEAK_MAX_MANIFEST_BYTES=0
 export LAYERLEAK_MAX_CONFIG_BYTES=0
 export LAYERLEAK_MAX_REPOSITORY_TAGS=0
@@ -55,7 +57,8 @@ export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerl
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
 Saved findings files contain only detections, including unredacted finding values and unredacted context snippets.
 `LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
-`LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are off by default when set to `0`.
+`LAYERLEAK_MAX_LAYER_BYTES` defaults to `536870912` (512 MiB) of decompressed layer stream data per layer, and `LAYERLEAK_MAX_LAYER_ENTRIES` defaults to `50000` tar entries per layer.
+`LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
 `LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080`.

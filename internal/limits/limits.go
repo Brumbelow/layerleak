@@ -9,6 +9,8 @@ import (
 type Kind string
 
 const (
+	KindLayerBytes        Kind = "layer_bytes"
+	KindLayerEntries      Kind = "layer_entries"
 	KindManifestBytes     Kind = "manifest_bytes"
 	KindConfigBytes       Kind = "config_bytes"
 	KindRepositoryTags    Kind = "repository_tags"
@@ -28,6 +30,10 @@ func (e *ExceededError) Error() string {
 	}
 
 	switch e.Kind {
+	case KindLayerBytes:
+		return fmt.Sprintf("%s exceeded max layer bytes limit of %d", subject, e.Limit)
+	case KindLayerEntries:
+		return fmt.Sprintf("%s exceeded max layer entries limit of %d", subject, e.Limit)
 	case KindManifestBytes:
 		return fmt.Sprintf("%s exceeded max manifest bytes limit of %d", subject, e.Limit)
 	case KindConfigBytes:

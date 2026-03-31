@@ -90,6 +90,8 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		Detectors:            s.detectors,
 		Logger:               request.Logger,
 		MaxFileBytes:         s.config.MaxFileBytes,
+		MaxLayerBytes:        s.config.MaxLayerBytes,
+		MaxLayerEntries:      s.config.MaxLayerEntries,
 		MaxConfigBytes:       s.config.MaxConfigBytes,
 		TagPageSize:          s.config.TagPageSize,
 		MaxRepositoryTags:    s.config.MaxRepositoryTags,

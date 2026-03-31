@@ -8,6 +8,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/klauspost/compress/zstd"
 )
@@ -23,7 +24,7 @@ func TestReplayTracksDeletedArtifacts(t *testing.T) {
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:one", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
 		{Digest: "sha256:two", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
-	}, 1<<20, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
 		switch descriptor.Digest {
 		case "sha256:one":
 			return io.NopCloser(bytes.NewReader(layerOne)), nil
@@ -64,7 +65,7 @@ func TestReplayTracksOverwrittenFilesAndOpaqueWhiteout(t *testing.T) {
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:one", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
 		{Digest: "sha256:two", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
-	}, 1<<20, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
 		switch descriptor.Digest {
 		case "sha256:one":
 			return io.NopCloser(bytes.NewReader(layerOne)), nil
@@ -98,7 +99,7 @@ func TestReplaySupportsZstd(t *testing.T) {
 
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:zstd", MediaType: manifest.MediaTypeOCIImageLayerZstd},
-	}, 1<<20, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err != nil {
@@ -121,7 +122,7 @@ func TestReplayClassifiesRegularFilesBeforeScanning(t *testing.T) {
 
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:classified", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
-	}, 1<<20, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err != nil {
@@ -163,6 +164,111 @@ func TestReplayClassifiesRegularFilesBeforeScanning(t *testing.T) {
 		if !tt.keepBody && len(artifact.Content) != 0 {
 			t.Fatalf("%s content length = %d", tt.path, len(artifact.Content))
 		}
+	}
+}
+
+func TestReplayReturnsPartialResultWhenGzipLayerByteLimitExceeded(t *testing.T) {
+	layer := gzipLayer(t, []tarEntry{
+		{name: "app/one.txt", body: "one"},
+		{name: "app/two.txt", body: "two"},
+	})
+
+	result, err := Replay(context.Background(), []manifest.Descriptor{
+		{Digest: "sha256:limited", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+	}, ReplayOptions{
+		MaxFileBytes:  1 << 20,
+		MaxLayerBytes: 1536,
+	}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(layer)), nil
+	}))
+	if err == nil {
+		t.Fatal("Replay() error = nil")
+	}
+
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok {
+		t.Fatalf("err = %v", err)
+	}
+	if exceeded.Kind != limits.KindLayerBytes {
+		t.Fatalf("exceeded.Kind = %q", exceeded.Kind)
+	}
+	if exceeded.Subject != "layer sha256:limited" {
+		t.Fatalf("exceeded.Subject = %q", exceeded.Subject)
+	}
+	if len(result.FinalFiles) != 1 {
+		t.Fatalf("len(result.FinalFiles) = %d", len(result.FinalFiles))
+	}
+	if result.FinalFiles[0].Path != "app/one.txt" {
+		t.Fatalf("result.FinalFiles[0].Path = %q", result.FinalFiles[0].Path)
+	}
+}
+
+func TestReplayReturnsPartialResultWhenZstdLayerByteLimitExceeded(t *testing.T) {
+	layer := zstdLayer(t, []tarEntry{
+		{name: "app/one.txt", body: "one"},
+		{name: "app/two.txt", body: "two"},
+	})
+
+	result, err := Replay(context.Background(), []manifest.Descriptor{
+		{Digest: "sha256:zstdlimited", MediaType: manifest.MediaTypeOCIImageLayerZstd},
+	}, ReplayOptions{
+		MaxFileBytes:  1 << 20,
+		MaxLayerBytes: 1536,
+	}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(layer)), nil
+	}))
+	if err == nil {
+		t.Fatal("Replay() error = nil")
+	}
+
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok {
+		t.Fatalf("err = %v", err)
+	}
+	if exceeded.Kind != limits.KindLayerBytes {
+		t.Fatalf("exceeded.Kind = %q", exceeded.Kind)
+	}
+	if len(result.FinalFiles) != 1 {
+		t.Fatalf("len(result.FinalFiles) = %d", len(result.FinalFiles))
+	}
+	if result.FinalFiles[0].Path != "app/one.txt" {
+		t.Fatalf("result.FinalFiles[0].Path = %q", result.FinalFiles[0].Path)
+	}
+}
+
+func TestReplayReturnsPartialResultWhenLayerEntryLimitExceeded(t *testing.T) {
+	layer := gzipLayer(t, []tarEntry{
+		{name: "app/one.txt", body: "one"},
+		{name: "app/two.txt", body: "two"},
+	})
+
+	result, err := Replay(context.Background(), []manifest.Descriptor{
+		{Digest: "sha256:entries", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+	}, ReplayOptions{
+		MaxFileBytes:    1 << 20,
+		MaxLayerEntries: 1,
+	}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(layer)), nil
+	}))
+	if err == nil {
+		t.Fatal("Replay() error = nil")
+	}
+
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok {
+		t.Fatalf("err = %v", err)
+	}
+	if exceeded.Kind != limits.KindLayerEntries {
+		t.Fatalf("exceeded.Kind = %q", exceeded.Kind)
+	}
+	if exceeded.Subject != "layer sha256:entries" {
+		t.Fatalf("exceeded.Subject = %q", exceeded.Subject)
+	}
+	if len(result.FinalFiles) != 1 {
+		t.Fatalf("len(result.FinalFiles) = %d", len(result.FinalFiles))
+	}
+	if result.FinalFiles[0].Path != "app/one.txt" {
+		t.Fatalf("result.FinalFiles[0].Path = %q", result.FinalFiles[0].Path)
 	}
 }
 

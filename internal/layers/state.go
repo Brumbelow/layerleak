@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/klauspost/compress/zstd"
 )
@@ -52,6 +53,12 @@ type ReplayResult struct {
 	DeletedArtifacts []Artifact
 }
 
+type ReplayOptions struct {
+	MaxFileBytes    int64
+	MaxLayerBytes   int64
+	MaxLayerEntries int
+}
+
 type BlobOpener interface {
 	OpenLayer(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error)
 }
@@ -73,36 +80,40 @@ func NewState() *State {
 	}
 }
 
-func Replay(ctx context.Context, descriptors []manifest.Descriptor, maxFileBytes int64, opener BlobOpener) (ReplayResult, error) {
-	if maxFileBytes <= 0 {
-		maxFileBytes = 1 << 20
+func Replay(ctx context.Context, descriptors []manifest.Descriptor, options ReplayOptions, opener BlobOpener) (ReplayResult, error) {
+	if options.MaxFileBytes <= 0 {
+		options.MaxFileBytes = 1 << 20
 	}
 
 	state := NewState()
 	for _, descriptor := range descriptors {
 		if manifest.IsForeignLayerMediaType(descriptor.MediaType) {
-			return ReplayResult{}, fmt.Errorf("foreign layer media type is not supported: %s", descriptor.MediaType)
+			return state.Result(), fmt.Errorf("foreign layer media type is not supported: %s", descriptor.MediaType)
 		}
 		if !manifest.IsLayerMediaType(descriptor.MediaType) {
-			return ReplayResult{}, fmt.Errorf("unsupported layer media type: %s", descriptor.MediaType)
+			return state.Result(), fmt.Errorf("unsupported layer media type: %s", descriptor.MediaType)
 		}
 
 		stream, err := opener.OpenLayer(ctx, descriptor)
 		if err != nil {
-			return ReplayResult{}, fmt.Errorf("open layer %s: %w", descriptor.Digest, err)
+			return state.Result(), fmt.Errorf("open layer %s: %w", descriptor.Digest, err)
 		}
 
-		if err := state.applyLayer(descriptor, stream, maxFileBytes); err != nil {
+		if err := state.applyLayer(descriptor, stream, options); err != nil {
 			stream.Close()
-			return ReplayResult{}, fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
+			return state.Result(), fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
 		}
 		stream.Close()
 	}
 
+	return state.Result(), nil
+}
+
+func (s *State) Result() ReplayResult {
 	return ReplayResult{
-		FinalFiles:       state.FinalFiles(),
-		DeletedArtifacts: state.DeletedArtifacts(),
-	}, nil
+		FinalFiles:       s.FinalFiles(),
+		DeletedArtifacts: s.DeletedArtifacts(),
+	}
 }
 
 func (s *State) FinalFiles() []Artifact {
@@ -122,14 +133,15 @@ func (s *State) DeletedArtifacts() []Artifact {
 	return artifacts
 }
 
-func (s *State) applyLayer(descriptor manifest.Descriptor, blob io.Reader, maxFileBytes int64) error {
+func (s *State) applyLayer(descriptor manifest.Descriptor, blob io.Reader, options ReplayOptions) error {
 	reader, cleanup, err := decompressLayer(descriptor.MediaType, blob)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	tarReader := tar.NewReader(reader)
+	tarReader := tar.NewReader(newLayerLimitReader(reader, descriptor.Digest, options.MaxLayerBytes))
+	entryCount := 0
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -137,6 +149,10 @@ func (s *State) applyLayer(descriptor manifest.Descriptor, blob io.Reader, maxFi
 		}
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
+		}
+		entryCount++
+		if options.MaxLayerEntries > 0 && entryCount > options.MaxLayerEntries {
+			return limits.NewExceeded(limits.KindLayerEntries, int64(options.MaxLayerEntries), "layer "+descriptor.Digest)
 		}
 
 		entryPath, err := normalizePath(header.Name)
@@ -200,7 +216,7 @@ func (s *State) applyLayer(descriptor manifest.Descriptor, blob io.Reader, maxFi
 				Scannable:    target.Scannable,
 			})
 		case tar.TypeReg, tar.TypeRegA:
-			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, tarReader, header.Size, maxFileBytes)
+			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, tarReader, header.Size, options.MaxFileBytes)
 			if err != nil {
 				return err
 			}
@@ -404,6 +420,46 @@ func decompressLayer(mediaType string, reader io.Reader) (io.Reader, func(), err
 	default:
 		return nil, nil, fmt.Errorf("unsupported layer compression for media type: %s", mediaType)
 	}
+}
+
+type layerLimitReader struct {
+	reader    io.Reader
+	subject   string
+	maxBytes  int64
+	readBytes int64
+}
+
+func newLayerLimitReader(reader io.Reader, digest string, maxBytes int64) io.Reader {
+	return &layerLimitReader{
+		reader:   reader,
+		subject:  "layer " + strings.TrimSpace(digest),
+		maxBytes: maxBytes,
+	}
+}
+
+func (r *layerLimitReader) Read(buffer []byte) (int, error) {
+	if r.maxBytes <= 0 {
+		return r.reader.Read(buffer)
+	}
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+
+	maxRead := len(buffer)
+	remaining := r.maxBytes - r.readBytes
+	if remaining+1 < int64(maxRead) {
+		maxRead = int(remaining + 1)
+	}
+	if maxRead <= 0 {
+		maxRead = 1
+	}
+
+	count, err := r.reader.Read(buffer[:maxRead])
+	r.readBytes += int64(count)
+	if r.readBytes > r.maxBytes {
+		return count, limits.NewExceeded(limits.KindLayerBytes, r.maxBytes, r.subject)
+	}
+	return count, err
 }
 
 func normalizePath(value string) (string, error) {

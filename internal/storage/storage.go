@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,16 +14,32 @@ import (
 )
 
 type ScanRecord struct {
-	Registry           string
-	Repository         string
-	RequestedReference string
-	ResolvedReference  string
-	RequestedDigest    string
-	Mode               string
-	ScannedAt          time.Time
-	Tags               []TagRecord
-	Targets            []TargetRecord
-	DetailedFindings   []findings.DetailedFinding
+	Registry                     string
+	Repository                   string
+	RequestedReference           string
+	ResolvedReference            string
+	RequestedDigest              string
+	Mode                         string
+	TagsEnumerated               int
+	TagsResolved                 int
+	TagsFailed                   int
+	TargetCount                  int
+	CompletedTargetCount         int
+	FailedTargetCount            int
+	ManifestCount                int
+	CompletedManifestCount       int
+	FailedManifestCount          int
+	TotalFindings                int
+	UniqueFingerprints           int
+	SuppressedFindingsCount      int
+	SuppressedUniqueFingerprints int
+	Status                       ScanRunStatus
+	ErrorMessage                 string
+	ResultJSON                   json.RawMessage
+	ScannedAt                    time.Time
+	Tags                         []TagRecord
+	Targets                      []TargetRecord
+	DetailedFindings             []findings.DetailedFinding
 }
 
 type TagRecord struct {
@@ -52,13 +69,15 @@ type ManifestRecord struct {
 }
 
 type Store interface {
-	SaveScan(ctx context.Context, record ScanRecord) error
+	SaveScan(ctx context.Context, record ScanRecord) (int64, error)
 	Name() string
 }
 
 type ReadStore interface {
 	ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error)
+	ListRepositoryScans(ctx context.Context, repository string, limit, offset int) ([]ScanRunSummary, error)
 	ListRepositoryFindings(ctx context.Context, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error)
+	GetScanRun(ctx context.Context, id int64) (ScanRunDetail, error)
 	GetFinding(ctx context.Context, id int64) (FindingDetail, error)
 }
 
@@ -67,6 +86,45 @@ type RepositorySummary struct {
 	Repository  string
 	FirstSeenAt time.Time
 	LastSeenAt  time.Time
+}
+
+type ScanRunStatus string
+
+const (
+	ScanRunStatusCompleted ScanRunStatus = "completed"
+	ScanRunStatusPartial   ScanRunStatus = "partial"
+	ScanRunStatusFailed    ScanRunStatus = "failed"
+)
+
+type ScanRunSummary struct {
+	ID                           int64
+	RequestedReference           string
+	ResolvedReference            string
+	RequestedDigest              string
+	Mode                         string
+	Status                       ScanRunStatus
+	ErrorMessage                 string
+	ScannedAt                    time.Time
+	TagsEnumerated               int
+	TagsResolved                 int
+	TagsFailed                   int
+	TargetCount                  int
+	CompletedTargetCount         int
+	FailedTargetCount            int
+	ManifestCount                int
+	CompletedManifestCount       int
+	FailedManifestCount          int
+	TotalFindings                int
+	UniqueFingerprints           int
+	SuppressedFindingsCount      int
+	SuppressedUniqueFingerprints int
+}
+
+type ScanRunDetail struct {
+	ScanRunSummary
+	Registry   string
+	Repository string
+	ResultJSON json.RawMessage
 }
 
 type FindingDispositionFilter string
@@ -127,8 +185,8 @@ func NewNoopStore() NoopStore {
 	return NoopStore{}
 }
 
-func (NoopStore) SaveScan(ctx context.Context, record ScanRecord) error {
-	return nil
+func (NoopStore) SaveScan(ctx context.Context, record ScanRecord) (int64, error) {
+	return 0, nil
 }
 
 func (NoopStore) Name() string {
@@ -158,6 +216,12 @@ func validateScanRecord(record ScanRecord) error {
 	}
 	if strings.TrimSpace(record.Repository) == "" {
 		return fmt.Errorf("scan record repository is required")
+	}
+	if !isValidScanRunStatus(record.Status) {
+		return fmt.Errorf("scan record status is invalid: %s", record.Status)
+	}
+	if !json.Valid(record.ResultJSON) {
+		return fmt.Errorf("scan record result json must be valid JSON")
 	}
 	if record.ScannedAt.IsZero() {
 		return fmt.Errorf("scan record scanned at is required")
@@ -198,6 +262,15 @@ func validateScanRecord(record ScanRecord) error {
 func isValidScanStatus(value string) bool {
 	switch strings.TrimSpace(value) {
 	case "scanned", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidScanRunStatus(value ScanRunStatus) bool {
+	switch value {
+	case ScanRunStatusCompleted, ScanRunStatusPartial, ScanRunStatusFailed:
 		return true
 	default:
 		return false

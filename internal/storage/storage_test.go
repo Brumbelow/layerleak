@@ -49,6 +49,8 @@ func TestValidateScanRecord(t *testing.T) {
 		return ScanRecord{
 			Registry:   "docker.io",
 			Repository: "library/app",
+			Status:     ScanRunStatusCompleted,
+			ResultJSON: []byte(`{"requested_reference":"library/app:latest","status":"redacted"}`),
 			ScannedAt:  time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC),
 			Tags: []TagRecord{
 				{
@@ -101,10 +103,28 @@ func TestValidateScanRecord(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "invalid scan status",
+			record: func() ScanRecord {
+				item := validRecord()
+				item.Status = "broken"
+				return item
+			}(),
+			wantErr: true,
+		},
+		{
 			name: "invalid tag status",
 			record: func() ScanRecord {
 				item := validRecord()
 				item.Tags[0].Status = "resolved"
+				return item
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "invalid result json",
+			record: func() ScanRecord {
+				item := validRecord()
+				item.ResultJSON = []byte("{")
 				return item
 			}(),
 			wantErr: true,

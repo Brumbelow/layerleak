@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -50,11 +51,11 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	defer store.Close()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
-	if err := store.SaveScan(context.Background(), record); err != nil {
+	if _, err := store.SaveScan(context.Background(), record); err != nil {
 		t.Fatalf("SaveScan() error = %v", err)
 	}
 	record.ScannedAt = record.ScannedAt.Add(2 * time.Hour)
-	if err := store.SaveScan(context.Background(), record); err != nil {
+	if _, err := store.SaveScan(context.Background(), record); err != nil {
 		t.Fatalf("SaveScan() second error = %v", err)
 	}
 
@@ -90,6 +91,55 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	}
 	if lineNumber <= 0 {
 		t.Fatalf("lineNumber = %d", lineNumber)
+	}
+}
+
+func TestPostgresStoreSaveScanPersistsScanRunHistory(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	record.Status = ScanRunStatusPartial
+	record.ErrorMessage = "config blob sha256:bbbb exceeded max config bytes limit of 128"
+
+	scanRunID, err := store.SaveScan(context.Background(), record)
+	if err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+	if scanRunID <= 0 {
+		t.Fatalf("scanRunID = %d", scanRunID)
+	}
+
+	assertCount(t, db, "SELECT COUNT(*) FROM scan_runs", 1)
+
+	var status, errorMessage, resultJSON string
+	if err := db.QueryRow(`
+		SELECT status, error_message, result_json::text
+		FROM scan_runs
+		WHERE id = $1
+	`, scanRunID).Scan(&status, &errorMessage, &resultJSON); err != nil {
+		t.Fatalf("QueryRow(scan_runs) error = %v", err)
+	}
+	if status != string(ScanRunStatusPartial) {
+		t.Fatalf("status = %q", status)
+	}
+	if errorMessage != record.ErrorMessage {
+		t.Fatalf("errorMessage = %q", errorMessage)
+	}
+	if strings.Contains(resultJSON, "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("result_json leaked raw secret: %q", resultJSON)
+	}
+	if !strings.Contains(resultJSON, "ghp********************************56") {
+		t.Fatalf("result_json missing redacted value: %q", resultJSON)
 	}
 }
 
@@ -137,10 +187,10 @@ func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
 		second.DetailedFindings[index].Platform = manifest.Platform{OS: "linux", Architecture: "amd64"}
 	}
 
-	if err := store.SaveScan(context.Background(), first); err != nil {
+	if _, err := store.SaveScan(context.Background(), first); err != nil {
 		t.Fatalf("SaveScan(first) error = %v", err)
 	}
-	if err := store.SaveScan(context.Background(), second); err != nil {
+	if _, err := store.SaveScan(context.Background(), second); err != nil {
 		t.Fatalf("SaveScan(second) error = %v", err)
 	}
 
@@ -175,10 +225,10 @@ func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 	second.ResolvedReference = "docker.io/library/zebra@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	second.Targets[0].Reference = "docker.io/library/zebra@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	if err := store.SaveScan(context.Background(), first); err != nil {
+	if _, err := store.SaveScan(context.Background(), first); err != nil {
 		t.Fatalf("SaveScan(first) error = %v", err)
 	}
-	if err := store.SaveScan(context.Background(), second); err != nil {
+	if _, err := store.SaveScan(context.Background(), second); err != nil {
 		t.Fatalf("SaveScan(second) error = %v", err)
 	}
 
@@ -191,6 +241,49 @@ func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 	}
 	if items[0].Repository != "library/zebra" || items[1].Repository != "library/app" {
 		t.Fatalf("repository order = %q, %q", items[0].Repository, items[1].Repository)
+	}
+}
+
+func TestPostgresStoreListRepositoryScansOrdersByScannedAt(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	first := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	second := integrationScanRecord(time.Date(2026, time.March, 15, 13, 0, 0, 0, time.UTC))
+	second.Status = ScanRunStatusPartial
+	second.ErrorMessage = "target scan incomplete"
+
+	if _, err := store.SaveScan(context.Background(), first); err != nil {
+		t.Fatalf("SaveScan(first) error = %v", err)
+	}
+	if _, err := store.SaveScan(context.Background(), second); err != nil {
+		t.Fatalf("SaveScan(second) error = %v", err)
+	}
+
+	items, err := store.ListRepositoryScans(context.Background(), "library/app", 50, 0)
+	if err != nil {
+		t.Fatalf("ListRepositoryScans() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d", len(items))
+	}
+	if items[0].ScannedAt.Before(items[1].ScannedAt) {
+		t.Fatalf("scan order = %s then %s", items[0].ScannedAt, items[1].ScannedAt)
+	}
+	if items[0].Status != ScanRunStatusPartial {
+		t.Fatalf("items[0].Status = %q", items[0].Status)
+	}
+	if items[1].Status != ScanRunStatusCompleted {
+		t.Fatalf("items[1].Status = %q", items[1].Status)
 	}
 }
 
@@ -211,7 +304,7 @@ func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *
 	record.DetailedFindings[1].Disposition = findings.DispositionExample
 	record.DetailedFindings[1].DispositionReason = findings.DispositionReasonExamplePath
 
-	if err := store.SaveScan(context.Background(), record); err != nil {
+	if _, err := store.SaveScan(context.Background(), record); err != nil {
 		t.Fatalf("SaveScan() error = %v", err)
 	}
 
@@ -258,7 +351,7 @@ func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
 	defer store.Close()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
-	if err := store.SaveScan(context.Background(), record); err != nil {
+	if _, err := store.SaveScan(context.Background(), record); err != nil {
 		t.Fatalf("SaveScan() error = %v", err)
 	}
 
@@ -285,6 +378,46 @@ func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
 	}
 	if detail.Occurrences[0].SourceLocation == "" {
 		t.Fatal("expected occurrence source location")
+	}
+}
+
+func TestPostgresStoreGetScanRunLoadsRedactedSnapshot(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	scanRunID, err := store.SaveScan(context.Background(), record)
+	if err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+
+	detail, err := store.GetScanRun(context.Background(), scanRunID)
+	if err != nil {
+		t.Fatalf("GetScanRun() error = %v", err)
+	}
+	if detail.ID != scanRunID {
+		t.Fatalf("detail.ID = %d", detail.ID)
+	}
+	if detail.Repository != "library/app" {
+		t.Fatalf("detail.Repository = %q", detail.Repository)
+	}
+	if detail.Status != ScanRunStatusCompleted {
+		t.Fatalf("detail.Status = %q", detail.Status)
+	}
+	if !json.Valid(detail.ResultJSON) {
+		t.Fatalf("result json is invalid: %q", string(detail.ResultJSON))
+	}
+	if strings.Contains(string(detail.ResultJSON), "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("result json leaked raw secret: %q", string(detail.ResultJSON))
 	}
 }
 
@@ -397,13 +530,49 @@ func assertCount(t *testing.T, db *sql.DB, query string, want int) {
 
 func integrationScanRecord(scannedAt time.Time) ScanRecord {
 	return ScanRecord{
-		Registry:           "docker.io",
-		Repository:         "library/app",
-		RequestedReference: "library/app:latest",
-		ResolvedReference:  "docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		RequestedDigest:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Mode:               "reference",
-		ScannedAt:          scannedAt.UTC(),
+		Registry:               "docker.io",
+		Repository:             "library/app",
+		RequestedReference:     "library/app:latest",
+		ResolvedReference:      "docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		RequestedDigest:        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Mode:                   "reference",
+		TagsEnumerated:         1,
+		TagsResolved:           1,
+		TargetCount:            1,
+		CompletedTargetCount:   1,
+		ManifestCount:          1,
+		CompletedManifestCount: 1,
+		TotalFindings:          1,
+		UniqueFingerprints:     1,
+		Status:                 ScanRunStatusCompleted,
+		ResultJSON: []byte(`{
+  "requested_reference":"library/app:latest",
+  "repository":"library/app",
+  "mode":"reference",
+  "resolved_reference":"docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "requested_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target_count":1,
+  "completed_target_count":1,
+  "manifest_count":1,
+  "completed_manifest_count":1,
+  "findings":[
+    {
+      "detector_name":"github_token",
+      "confidence":"high",
+      "disposition":"actionable",
+      "source_type":"env",
+      "manifest_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "key":"GH_TOKEN",
+      "redacted_value":"ghp********************************56",
+      "fingerprint":"fingerprint-one",
+      "context_snippet":"GH_TOKEN=ghp********************************56",
+      "present_in_final_image":true
+    }
+  ],
+  "total_findings":1,
+  "unique_fingerprints":1
+}`),
+		ScannedAt: scannedAt.UTC(),
 		Tags: []TagRecord{
 			{
 				Name:           "latest",

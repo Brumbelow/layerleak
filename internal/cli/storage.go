@@ -22,5 +22,9 @@ func newStore(cfg config.Config) (storage.Store, error) {
 }
 
 func buildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt time.Time) storage.ScanRecord {
-	return scanservice.BuildScanRecord(reference, result, scannedAt)
+	record, err := scanservice.BuildScanRecord(reference, result, scannedAt, nil)
+	if err != nil {
+		panic(err)
+	}
+	return record
 }

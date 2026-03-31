@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -38,6 +39,65 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate repository summaries: %w", err)
+	}
+
+	return items, nil
+}
+
+func (s *PostgresStore) ListRepositoryScans(ctx context.Context, repository string, limit, offset int) ([]ScanRunSummary, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store is not initialized")
+	}
+
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return nil, fmt.Errorf("repository is required")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			sr.id,
+			sr.requested_reference,
+			sr.resolved_reference,
+			sr.requested_digest,
+			sr.mode,
+			sr.status,
+			sr.error_message,
+			sr.scanned_at,
+			sr.tags_enumerated,
+			sr.tags_resolved,
+			sr.tags_failed,
+			sr.target_count,
+			sr.completed_target_count,
+			sr.failed_target_count,
+			sr.manifest_count,
+			sr.completed_manifest_count,
+			sr.failed_manifest_count,
+			sr.total_findings,
+			sr.unique_fingerprints,
+			sr.suppressed_findings_count,
+			sr.suppressed_unique_fingerprints
+		FROM scan_runs sr
+		JOIN repositories r ON r.id = sr.repository_id
+		WHERE r.registry = $1 AND r.repository = $2
+		ORDER BY sr.scanned_at DESC, sr.id DESC
+		LIMIT $3 OFFSET $4
+	`, manifest.DockerHubRegistry, repository, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list repository scans: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]ScanRunSummary, 0)
+	for rows.Next() {
+		item, err := scanScanRunSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repository scans: %w", err)
 	}
 
 	return items, nil
@@ -99,6 +159,82 @@ func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, repository s
 	}
 
 	return items, nil
+}
+
+func (s *PostgresStore) GetScanRun(ctx context.Context, id int64) (ScanRunDetail, error) {
+	if s == nil || s.db == nil {
+		return ScanRunDetail{}, fmt.Errorf("postgres store is not initialized")
+	}
+
+	row := s.db.QueryRowContext(ctx, `
+		SELECT
+			sr.id,
+			r.registry,
+			r.repository,
+			sr.requested_reference,
+			sr.resolved_reference,
+			sr.requested_digest,
+			sr.mode,
+			sr.status,
+			sr.error_message,
+			sr.scanned_at,
+			sr.tags_enumerated,
+			sr.tags_resolved,
+			sr.tags_failed,
+			sr.target_count,
+			sr.completed_target_count,
+			sr.failed_target_count,
+			sr.manifest_count,
+			sr.completed_manifest_count,
+			sr.failed_manifest_count,
+			sr.total_findings,
+			sr.unique_fingerprints,
+			sr.suppressed_findings_count,
+			sr.suppressed_unique_fingerprints,
+			sr.result_json
+		FROM scan_runs sr
+		JOIN repositories r ON r.id = sr.repository_id
+		WHERE sr.id = $1
+	`, id)
+
+	var item ScanRunDetail
+	var status string
+	var resultJSON []byte
+	if err := row.Scan(
+		&item.ID,
+		&item.Registry,
+		&item.Repository,
+		&item.RequestedReference,
+		&item.ResolvedReference,
+		&item.RequestedDigest,
+		&item.Mode,
+		&status,
+		&item.ErrorMessage,
+		&item.ScannedAt,
+		&item.TagsEnumerated,
+		&item.TagsResolved,
+		&item.TagsFailed,
+		&item.TargetCount,
+		&item.CompletedTargetCount,
+		&item.FailedTargetCount,
+		&item.ManifestCount,
+		&item.CompletedManifestCount,
+		&item.FailedManifestCount,
+		&item.TotalFindings,
+		&item.UniqueFingerprints,
+		&item.SuppressedFindingsCount,
+		&item.SuppressedUniqueFingerprints,
+		&resultJSON,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ScanRunDetail{}, ErrNotFound
+		}
+		return ScanRunDetail{}, fmt.Errorf("get scan run: %w", err)
+	}
+
+	item.Status = ScanRunStatus(status)
+	item.ResultJSON = json.RawMessage(resultJSON)
+	return item, nil
 }
 
 func (s *PostgresStore) GetFinding(ctx context.Context, id int64) (FindingDetail, error) {
@@ -208,6 +344,38 @@ func (s *PostgresStore) GetFinding(ctx context.Context, id int64) (FindingDetail
 
 type rowScanner interface {
 	Scan(dest ...any) error
+}
+
+func scanScanRunSummary(scanner rowScanner) (ScanRunSummary, error) {
+	var item ScanRunSummary
+	var status string
+	if err := scanner.Scan(
+		&item.ID,
+		&item.RequestedReference,
+		&item.ResolvedReference,
+		&item.RequestedDigest,
+		&item.Mode,
+		&status,
+		&item.ErrorMessage,
+		&item.ScannedAt,
+		&item.TagsEnumerated,
+		&item.TagsResolved,
+		&item.TagsFailed,
+		&item.TargetCount,
+		&item.CompletedTargetCount,
+		&item.FailedTargetCount,
+		&item.ManifestCount,
+		&item.CompletedManifestCount,
+		&item.FailedManifestCount,
+		&item.TotalFindings,
+		&item.UniqueFingerprints,
+		&item.SuppressedFindingsCount,
+		&item.SuppressedUniqueFingerprints,
+	); err != nil {
+		return ScanRunSummary{}, fmt.Errorf("scan scan run summary: %w", err)
+	}
+	item.Status = ScanRunStatus(status)
+	return item, nil
 }
 
 func scanFindingSummary(scanner rowScanner) (FindingSummary, error) {

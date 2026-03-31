@@ -20,24 +20,27 @@ import (
 
 func TestHandleScanSuccess(t *testing.T) {
 	scanner := &stubScanner{
-		result: jobs.Result{
-			RequestedReference: "library/app:latest",
-			Repository:         "library/app",
-			ResolvedReference:  "docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			Findings: []findings.Finding{
-				{
-					DetectorName:   "github_token",
-					Confidence:     "high",
-					Disposition:    findings.DispositionActionable,
-					SourceType:     findings.SourceTypeEnv,
-					ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-					RedactedValue:  "ghp********************************56",
-					Fingerprint:    "fingerprint",
-					ContextSnippet: "GH_TOKEN=ghp********************************56",
+		outcome: scanservice.Outcome{
+			ScanRunID: 17,
+			Result: jobs.Result{
+				RequestedReference: "library/app:latest",
+				Repository:         "library/app",
+				ResolvedReference:  "docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Findings: []findings.Finding{
+					{
+						DetectorName:   "github_token",
+						Confidence:     "high",
+						Disposition:    findings.DispositionActionable,
+						SourceType:     findings.SourceTypeEnv,
+						ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						RedactedValue:  "ghp********************************56",
+						Fingerprint:    "fingerprint",
+						ContextSnippet: "GH_TOKEN=ghp********************************56",
+					},
 				},
+				TotalFindings:      1,
+				UniqueFingerprints: 1,
 			},
-			TotalFindings:      1,
-			UniqueFingerprints: 1,
 		},
 	}
 
@@ -54,6 +57,9 @@ func TestHandleScanSuccess(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "ghp_123456789012345678901234567890123456") {
 		t.Fatalf("response leaked raw secret: %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"scan_run_id": 17`) {
+		t.Fatalf("body = %s", recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), `"requested_reference": "library/app:latest"`) {
 		t.Fatalf("body = %s", recorder.Body.String())
@@ -76,10 +82,13 @@ func TestHandleScanRejectsInvalidReference(t *testing.T) {
 
 func TestHandleScanReturnsPartialResultOnLimitError(t *testing.T) {
 	scanner := &stubScanner{
-		result: jobs.Result{
-			RequestedReference: "library/app:latest",
-			Repository:         "library/app",
-			TotalFindings:      1,
+		outcome: scanservice.Outcome{
+			ScanRunID: 42,
+			Result: jobs.Result{
+				RequestedReference: "library/app:latest",
+				Repository:         "library/app",
+				TotalFindings:      1,
+			},
 		},
 		err: &scanservice.Error{
 			Phase: scanservice.ErrorPhaseScan,
@@ -96,6 +105,9 @@ func TestHandleScanReturnsPartialResultOnLimitError(t *testing.T) {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), `"code": "scan_failed"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"scan_run_id": 42`) {
 		t.Fatalf("body = %s", recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), `"total_findings": 1`) {
@@ -171,6 +183,77 @@ func TestHandleListRepositoryFindingsSupportsDispositionFilter(t *testing.T) {
 	}
 }
 
+func TestHandleListRepositoryScansUsesPagination(t *testing.T) {
+	store := &stubReadStore{
+		scans: []storage.ScanRunSummary{
+			{
+				ID:                 8,
+				RequestedReference: "library/app:latest",
+				Mode:               "reference",
+				Status:             storage.ScanRunStatusPartial,
+				ErrorMessage:       "manifest scan incomplete",
+				ScannedAt:          time.Date(2026, time.March, 28, 15, 0, 0, 0, time.UTC),
+				TotalFindings:      1,
+			},
+		},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/library/app/scans?limit=500&offset=3", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, store).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.repository != "library/app" {
+		t.Fatalf("store.repository = %q", store.repository)
+	}
+	if store.limit != 200 || store.offset != 3 {
+		t.Fatalf("pagination = (%d,%d)", store.limit, store.offset)
+	}
+	if !strings.Contains(recorder.Body.String(), `"status": "partial"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
+func TestHandleGetScanReturnsDetail(t *testing.T) {
+	store := &stubReadStore{
+		scanDetail: storage.ScanRunDetail{
+			ScanRunSummary: storage.ScanRunSummary{
+				ID:                 11,
+				RequestedReference: "library/app:latest",
+				ResolvedReference:  "docker.io/library/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Mode:               "reference",
+				Status:             storage.ScanRunStatusCompleted,
+				ScannedAt:          time.Date(2026, time.March, 28, 15, 0, 0, 0, time.UTC),
+				TotalFindings:      1,
+			},
+			Registry:   "docker.io",
+			Repository: "library/app",
+			ResultJSON: json.RawMessage(`{"requested_reference":"library/app:latest","findings":[{"redacted_value":"ghp********************************56"}]}`),
+		},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/scans/11", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, store).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.scanID != 11 {
+		t.Fatalf("store.scanID = %d", store.scanID)
+	}
+	if !strings.Contains(recorder.Body.String(), `"repository": "library/app"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("response leaked raw secret: %s", recorder.Body.String())
+	}
+}
+
 func TestHandleGetFindingReturnsDetail(t *testing.T) {
 	store := &stubReadStore{
 		detail: storage.FindingDetail{
@@ -239,26 +322,30 @@ func TestHandleGetFindingReturnsNotFound(t *testing.T) {
 }
 
 type stubScanner struct {
-	result  jobs.Result
+	outcome scanservice.Outcome
 	err     error
 	request scanservice.Request
 }
 
-func (s *stubScanner) ScanAndSave(_ context.Context, request scanservice.Request) (jobs.Result, error) {
+func (s *stubScanner) ScanAndSave(_ context.Context, request scanservice.Request) (scanservice.Outcome, error) {
 	s.request = request
-	return s.result, s.err
+	return s.outcome, s.err
 }
 
 type stubReadStore struct {
-	repositories []storage.RepositorySummary
-	findings     []storage.FindingSummary
-	detail       storage.FindingDetail
-	detailErr    error
+	repositories  []storage.RepositorySummary
+	scans         []storage.ScanRunSummary
+	findings      []storage.FindingSummary
+	scanDetail    storage.ScanRunDetail
+	detail        storage.FindingDetail
+	scanDetailErr error
+	detailErr     error
 
 	limit       int
 	offset      int
 	repository  string
 	disposition storage.FindingDispositionFilter
+	scanID      int64
 	findingID   int64
 }
 
@@ -274,6 +361,21 @@ func (s *stubReadStore) ListRepositoryFindings(_ context.Context, repository str
 	s.limit = limit
 	s.offset = offset
 	return s.findings, nil
+}
+
+func (s *stubReadStore) ListRepositoryScans(_ context.Context, repository string, limit, offset int) ([]storage.ScanRunSummary, error) {
+	s.repository = repository
+	s.limit = limit
+	s.offset = offset
+	return s.scans, nil
+}
+
+func (s *stubReadStore) GetScanRun(_ context.Context, id int64) (storage.ScanRunDetail, error) {
+	s.scanID = id
+	if s.scanDetailErr != nil {
+		return storage.ScanRunDetail{}, s.scanDetailErr
+	}
+	return s.scanDetail, nil
 }
 
 func (s *stubReadStore) GetFinding(_ context.Context, id int64) (storage.FindingDetail, error) {

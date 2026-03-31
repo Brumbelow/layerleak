@@ -24,7 +24,7 @@ const (
 )
 
 type scanExecutor interface {
-	ScanAndSave(rctx context.Context, request scanservice.Request) (jobs.Result, error)
+	ScanAndSave(rctx context.Context, request scanservice.Request) (scanservice.Outcome, error)
 }
 
 type Handler struct {
@@ -43,14 +43,22 @@ type scanRequest struct {
 }
 
 type scanResponse struct {
-	Result *jobs.Result   `json:"result,omitempty"`
-	Error  *errorResponse `json:"error,omitempty"`
+	ScanRunID int64          `json:"scan_run_id,omitempty"`
+	Result    *jobs.Result   `json:"result,omitempty"`
+	Error     *errorResponse `json:"error,omitempty"`
 }
 
 type repositoriesResponse struct {
 	Repositories []repositoryItem `json:"repositories"`
 	Limit        int              `json:"limit"`
 	Offset       int              `json:"offset"`
+}
+
+type repositoryScansResponse struct {
+	Repository string            `json:"repository"`
+	Scans      []scanSummaryItem `json:"scans"`
+	Limit      int               `json:"limit"`
+	Offset     int               `json:"offset"`
 }
 
 type repositoryItem struct {
@@ -83,6 +91,41 @@ type findingSummaryItem struct {
 
 type findingDetailResponse struct {
 	Finding findingDetailItem `json:"finding"`
+}
+
+type scanSummaryItem struct {
+	ID                           int64  `json:"id"`
+	RequestedReference           string `json:"requested_reference"`
+	ResolvedReference            string `json:"resolved_reference,omitempty"`
+	RequestedDigest              string `json:"requested_digest,omitempty"`
+	Mode                         string `json:"mode"`
+	Status                       string `json:"status"`
+	ErrorMessage                 string `json:"error_message,omitempty"`
+	ScannedAt                    string `json:"scanned_at"`
+	TagsEnumerated               int    `json:"tags_enumerated"`
+	TagsResolved                 int    `json:"tags_resolved"`
+	TagsFailed                   int    `json:"tags_failed"`
+	TargetCount                  int    `json:"target_count"`
+	CompletedTargetCount         int    `json:"completed_target_count"`
+	FailedTargetCount            int    `json:"failed_target_count"`
+	ManifestCount                int    `json:"manifest_count"`
+	CompletedManifestCount       int    `json:"completed_manifest_count"`
+	FailedManifestCount          int    `json:"failed_manifest_count"`
+	TotalFindings                int    `json:"total_findings"`
+	UniqueFingerprints           int    `json:"unique_fingerprints"`
+	SuppressedFindingsCount      int    `json:"suppressed_findings_count"`
+	SuppressedUniqueFingerprints int    `json:"suppressed_unique_fingerprints"`
+}
+
+type scanDetailResponse struct {
+	Scan scanDetailItem `json:"scan"`
+}
+
+type scanDetailItem struct {
+	scanSummaryItem
+	Registry   string          `json:"registry"`
+	Repository string          `json:"repository"`
+	Result     json.RawMessage `json:"result"`
 }
 
 type findingDetailItem struct {
@@ -118,6 +161,7 @@ func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/scans", handler.handleScan)
+	mux.HandleFunc("GET /api/v1/scans/{id}", handler.handleGetScan)
 	mux.HandleFunc("GET /api/v1/repositories", handler.handleListRepositories)
 	mux.HandleFunc("GET /api/v1/repositories/", handler.handleRepositorySubtree)
 	mux.HandleFunc("GET /api/v1/findings/{id}", handler.handleGetFinding)
@@ -148,25 +192,29 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	result, err := h.scanner.ScanAndSave(request.Context(), scanservice.Request{
+	outcome, err := h.scanner.ScanAndSave(request.Context(), scanservice.Request{
 		Reference: reference,
 		Platform:  strings.TrimSpace(body.Platform),
 	})
 	if err != nil {
 		response := scanResponse{
+			ScanRunID: outcome.ScanRunID,
 			Error: &errorResponse{
 				Code:    scanErrorCode(err),
 				Message: err.Error(),
 			},
 		}
-		if hasResult(result) {
-			response.Result = &result
+		if hasResult(outcome.Result) {
+			response.Result = &outcome.Result
 		}
 		writeJSON(writer, http.StatusInternalServerError, response)
 		return
 	}
 
-	writeJSON(writer, http.StatusOK, scanResponse{Result: &result})
+	writeJSON(writer, http.StatusOK, scanResponse{
+		ScanRunID: outcome.ScanRunID,
+		Result:    &outcome.Result,
+	})
 }
 
 func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *http.Request) {
@@ -210,20 +258,59 @@ func (h *Handler) handleRepositorySubtree(writer http.ResponseWriter, request *h
 		return
 	}
 
-	prefix := "/api/v1/repositories/"
-	path := request.URL.Path
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/findings") {
+	switch {
+	case strings.HasSuffix(request.URL.Path, "/findings"):
+		h.handleListRepositoryFindings(writer, request)
+	case strings.HasSuffix(request.URL.Path, "/scans"):
+		h.handleListRepositoryScans(writer, request)
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request *http.Request) {
+	repository, ok, err := repositoryPathValue(request.URL.Path, "/scans")
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !ok {
 		http.NotFound(writer, request)
 		return
 	}
 
-	rawRepository := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/findings")
-	repository, err := url.PathUnescape(strings.Trim(rawRepository, "/"))
+	limit, offset, err := parsePagination(request.URL.Query())
 	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", "repository path is invalid")
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if strings.TrimSpace(repository) == "" {
+
+	items, err := h.store.ListRepositoryScans(request.Context(), repository, limit, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	response := repositoryScansResponse{
+		Repository: repository,
+		Scans:      make([]scanSummaryItem, 0, len(items)),
+		Limit:      limit,
+		Offset:     offset,
+	}
+	for _, item := range items {
+		response.Scans = append(response.Scans, mapScanRunSummary(item))
+	}
+
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, request *http.Request) {
+	repository, ok, err := repositoryPathValue(request.URL.Path, "/findings")
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !ok {
 		http.NotFound(writer, request)
 		return
 	}
@@ -257,6 +344,38 @@ func (h *Handler) handleRepositorySubtree(writer http.ResponseWriter, request *h
 	}
 
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (h *Handler) handleGetScan(writer http.ResponseWriter, request *http.Request) {
+	if h.store == nil {
+		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "read store is not configured")
+		return
+	}
+
+	id, err := strconv.ParseInt(strings.TrimSpace(request.PathValue("id")), 10, 64)
+	if err != nil || id <= 0 {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", "scan run id must be a positive integer")
+		return
+	}
+
+	item, err := h.store.GetScanRun(request.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeAPIError(writer, http.StatusNotFound, "not_found", "scan run not found")
+			return
+		}
+		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	writeJSON(writer, http.StatusOK, scanDetailResponse{
+		Scan: scanDetailItem{
+			scanSummaryItem: mapScanRunSummary(item.ScanRunSummary),
+			Registry:        item.Registry,
+			Repository:      item.Repository,
+			Result:          append(json.RawMessage(nil), item.ResultJSON...),
+		},
+	})
 }
 
 func (h *Handler) handleGetFinding(writer http.ResponseWriter, request *http.Request) {
@@ -312,6 +431,32 @@ func (h *Handler) handleGetFinding(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, response)
 }
 
+func mapScanRunSummary(item storage.ScanRunSummary) scanSummaryItem {
+	return scanSummaryItem{
+		ID:                           item.ID,
+		RequestedReference:           item.RequestedReference,
+		ResolvedReference:            item.ResolvedReference,
+		RequestedDigest:              item.RequestedDigest,
+		Mode:                         item.Mode,
+		Status:                       string(item.Status),
+		ErrorMessage:                 item.ErrorMessage,
+		ScannedAt:                    item.ScannedAt.UTC().Format(time.RFC3339),
+		TagsEnumerated:               item.TagsEnumerated,
+		TagsResolved:                 item.TagsResolved,
+		TagsFailed:                   item.TagsFailed,
+		TargetCount:                  item.TargetCount,
+		CompletedTargetCount:         item.CompletedTargetCount,
+		FailedTargetCount:            item.FailedTargetCount,
+		ManifestCount:                item.ManifestCount,
+		CompletedManifestCount:       item.CompletedManifestCount,
+		FailedManifestCount:          item.FailedManifestCount,
+		TotalFindings:                item.TotalFindings,
+		UniqueFingerprints:           item.UniqueFingerprints,
+		SuppressedFindingsCount:      item.SuppressedFindingsCount,
+		SuppressedUniqueFingerprints: item.SuppressedUniqueFingerprints,
+	}
+}
+
 func mapFindingSummary(item storage.FindingSummary) findingSummaryItem {
 	return findingSummaryItem{
 		ID:                        item.ID,
@@ -325,6 +470,24 @@ func mapFindingSummary(item storage.FindingSummary) findingSummaryItem {
 		SuppressedOccurrenceCount: item.SuppressedOccurrenceCount,
 		Detectors:                 append([]string{}, item.Detectors...),
 	}
+}
+
+func repositoryPathValue(path, suffix string) (string, bool, error) {
+	const prefix = "/api/v1/repositories/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false, nil
+	}
+
+	rawRepository := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	repository, err := url.PathUnescape(strings.Trim(rawRepository, "/"))
+	if err != nil {
+		return "", false, fmt.Errorf("repository path is invalid")
+	}
+	if strings.TrimSpace(repository) == "" {
+		return "", false, nil
+	}
+
+	return repository, true, nil
 }
 
 func parsePagination(values url.Values) (int, int, error) {

@@ -126,7 +126,7 @@ Run a scan against a public Docker Hub image:
 ./layerleak scan alpine:latest --platform linux/amd64
 ./layerleak scan mongo
 ```
-![cli pic](https://github.com/user-attachments/assets/bb184765-b4b6-411a-a7d7-b7e04f11dc6d)
+![cli pic](https://github.com/user-attachments/assets/9c24960e-4085-451d-a206-b92331d604ef)
 
 
 Every scan writes a JSON findings file to the findings output directory.

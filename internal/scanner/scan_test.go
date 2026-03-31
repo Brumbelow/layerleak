@@ -479,6 +479,87 @@ func TestScanReturnsEmptyPartialResultWhenConfigLimitExceededBeforeAnyManifestCo
 	}
 }
 
+func TestScanPreservesMetadataFindingsWhenLayerLimitExceeded(t *testing.T) {
+	manifestDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	configDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	layerDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	layer := gzipLayer(t, []tarEntry{
+		{name: "app/one.txt", body: "one"},
+		{name: "app/two.txt", body: "two"},
+	})
+
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return testResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return testResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch request.URL.Path {
+		case "/v2/library/app/manifests/latest":
+			return testResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configDigest+`","size":1},"layers":[{"mediaType":"`+manifest.MediaTypeDockerSchema2LayerGzip+`","digest":"`+layerDigest+`","size":1}]}`), map[string]string{
+				"Docker-Content-Digest": manifestDigest,
+			}), nil
+		case "/v2/library/app/blobs/" + configDigest:
+			return testResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`), nil), nil
+		case "/v2/library/app/blobs/" + layerDigest:
+			return testResponse(http.StatusOK, manifest.MediaTypeDockerSchema2LayerGzip, layer, nil), nil
+		default:
+			return testResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	ref, err := manifest.ParseReference("library/app:latest")
+	if err != nil {
+		t.Fatalf("ParseReference() error = %v", err)
+	}
+
+	result, err := Scan(context.Background(), Request{
+		Reference: ref,
+		Registry: registry.NewClient(registry.Options{
+			BaseURL: "https://registry.test",
+			HTTPClient: &http.Client{
+				Transport: transport,
+			},
+		}),
+		Detectors:       detectors.Default(),
+		MaxFileBytes:    1 << 20,
+		MaxLayerBytes:   1536,
+		MaxLayerEntries: 50000,
+	})
+	if err == nil {
+		t.Fatal("Scan() error = nil")
+	}
+	if !strings.Contains(err.Error(), "max layer bytes limit") {
+		t.Fatalf("err = %v", err)
+	}
+	if result.CompletedManifestCount != 0 {
+		t.Fatalf("result.CompletedManifestCount = %d", result.CompletedManifestCount)
+	}
+	if result.FailedManifestCount != 1 {
+		t.Fatalf("result.FailedManifestCount = %d", result.FailedManifestCount)
+	}
+	if result.TotalFindings == 0 {
+		t.Fatal("result.TotalFindings = 0")
+	}
+	if len(result.PlatformResults) != 1 {
+		t.Fatalf("len(result.PlatformResults) = %d", len(result.PlatformResults))
+	}
+	if result.PlatformResults[0].FindingsCount == 0 {
+		t.Fatalf("result.PlatformResults[0].FindingsCount = %d", result.PlatformResults[0].FindingsCount)
+	}
+	if !slices.ContainsFunc(result.Findings, func(item findings.Finding) bool {
+		return item.SourceType == findings.SourceTypeEnv
+	}) {
+		t.Fatalf("result.Findings = %#v", result.Findings)
+	}
+}
+
 type tarEntry struct {
 	name string
 	body string

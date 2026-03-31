@@ -12,6 +12,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_REGISTRY_AUTH_URL", "")
 	t.Setenv("LAYERLEAK_HTTP_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_MAX_FILE_BYTES", "")
+	t.Setenv("LAYERLEAK_MAX_LAYER_BYTES", "")
+	t.Setenv("LAYERLEAK_MAX_LAYER_ENTRIES", "")
 	t.Setenv("LAYERLEAK_MAX_MANIFEST_BYTES", "")
 	t.Setenv("LAYERLEAK_MAX_CONFIG_BYTES", "")
 	t.Setenv("LAYERLEAK_TAG_PAGE_SIZE", "")
@@ -47,6 +49,12 @@ func TestLoadDefaults(t *testing.T) {
 
 	if cfg.MaxFileBytes != 1<<20 {
 		t.Fatalf("cfg.MaxFileBytes = %d", cfg.MaxFileBytes)
+	}
+	if cfg.MaxLayerBytes != 512*(1<<20) {
+		t.Fatalf("cfg.MaxLayerBytes = %d", cfg.MaxLayerBytes)
+	}
+	if cfg.MaxLayerEntries != 50000 {
+		t.Fatalf("cfg.MaxLayerEntries = %d", cfg.MaxLayerEntries)
 	}
 	if cfg.MaxManifestBytes != 0 {
 		t.Fatalf("cfg.MaxManifestBytes = %d", cfg.MaxManifestBytes)
@@ -88,6 +96,22 @@ func TestLoadInvalidMaxFileBytes(t *testing.T) {
 	}
 }
 
+func TestLoadInvalidMaxLayerBytes(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_LAYER_BYTES", "-1")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil")
+	}
+}
+
+func TestLoadInvalidMaxLayerEntries(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_LAYER_ENTRIES", "-1")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil")
+	}
+}
+
 func TestLoadInvalidMaxManifestBytes(t *testing.T) {
 	t.Setenv("LAYERLEAK_MAX_MANIFEST_BYTES", "-1")
 
@@ -113,6 +137,8 @@ func TestLoadInvalidTagPageSize(t *testing.T) {
 }
 
 func TestLoadAllowsZeroRepositoryLimits(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_LAYER_BYTES", "0")
+	t.Setenv("LAYERLEAK_MAX_LAYER_ENTRIES", "0")
 	t.Setenv("LAYERLEAK_MAX_REPOSITORY_TAGS", "0")
 	t.Setenv("LAYERLEAK_MAX_REPOSITORY_TARGETS", "0")
 	t.Setenv("LAYERLEAK_MAX_MANIFEST_BYTES", "0")
@@ -122,7 +148,7 @@ func TestLoadAllowsZeroRepositoryLimits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.MaxRepositoryTags != 0 || cfg.MaxRepositoryTargets != 0 || cfg.MaxManifestBytes != 0 || cfg.MaxConfigBytes != 0 {
+	if cfg.MaxLayerBytes != 0 || cfg.MaxLayerEntries != 0 || cfg.MaxRepositoryTags != 0 || cfg.MaxRepositoryTargets != 0 || cfg.MaxManifestBytes != 0 || cfg.MaxConfigBytes != 0 {
 		t.Fatalf("cfg = %#v", cfg)
 	}
 }

@@ -17,14 +17,16 @@ import (
 )
 
 type Request struct {
-	Reference      manifest.Reference
-	Platform       string
-	Registry       *registry.Client
-	Detectors      detectors.Set
-	Logger         *slog.Logger
-	MaxFileBytes   int64
-	MaxConfigBytes int64
-	Progress       ProgressFunc
+	Reference       manifest.Reference
+	Platform        string
+	Registry        *registry.Client
+	Detectors       detectors.Set
+	Logger          *slog.Logger
+	MaxFileBytes    int64
+	MaxLayerBytes   int64
+	MaxLayerEntries int
+	MaxConfigBytes  int64
+	Progress        ProgressFunc
 }
 
 type ProgressPhase string
@@ -168,12 +170,18 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 		})
 
 		platformResult, platformFindings, platformSuppressedFindings, err := scanManifest(ctx, request, target.descriptor, target.manifest)
+		allDetailedFindings = append(allDetailedFindings, platformFindings...)
+		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, platformSuppressedFindings...)
+		findingsFound += len(platformFindings)
 		if err != nil {
-			result.PlatformResults = append(result.PlatformResults, PlatformResult{
-				Platform:       target.descriptor.Platform,
-				ManifestDigest: target.descriptor.Digest,
-				Error:          err.Error(),
-			})
+			if platformResult.ManifestDigest == "" {
+				platformResult.ManifestDigest = target.descriptor.Digest
+			}
+			if platformResult.Platform.OS == "" && platformResult.Platform.Architecture == "" && platformResult.Platform.Variant == "" {
+				platformResult.Platform = target.descriptor.Platform
+			}
+			platformResult.Error = err.Error()
+			result.PlatformResults = append(result.PlatformResults, platformResult)
 			result.FailedManifestCount++
 			emitProgress(request, ProgressUpdate{
 				Phase:                 ProgressPhaseManifestFailed,
@@ -196,9 +204,6 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 		result.PlatformResults = append(result.PlatformResults, platformResult)
 		result.CompletedManifestCount++
-		findingsFound += platformResult.FindingsCount
-		allDetailedFindings = append(allDetailedFindings, platformFindings...)
-		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, platformSuppressedFindings...)
 		emitProgress(request, ProgressUpdate{
 			Phase:                 ProgressPhaseManifestCompleted,
 			Repository:            request.Reference.Repository,
@@ -269,22 +274,31 @@ func scanManifest(ctx context.Context, request Request, descriptor manifest.Desc
 	}
 
 	metadataFindings := scanMetadata(request.Detectors, descriptor.Digest, platform, imageConfig)
-	layerResult, err := layers.Replay(ctx, imageManifest.Layers, request.MaxFileBytes, layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
+	layerResult, err := layers.Replay(ctx, imageManifest.Layers, layers.ReplayOptions{
+		MaxFileBytes:    request.MaxFileBytes,
+		MaxLayerBytes:   request.MaxLayerBytes,
+		MaxLayerEntries: request.MaxLayerEntries,
+	}, layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
 		response, err := request.Registry.OpenBlob(ctx, request.Reference.Repository, layerDescriptor.Digest)
 		if err != nil {
 			return nil, err
 		}
 		return response.Body, nil
 	}))
-	if err != nil {
-		return PlatformResult{}, nil, nil, err
-	}
 
 	fileFindings := scanArtifacts(request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileFinal, true, layerResult.FinalFiles)
 	fileFindings = append(fileFindings, scanArtifacts(request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileDeletedLayer, false, layerResult.DeletedArtifacts)...)
 
 	allFindings := append(metadataFindings, fileFindings...)
 	actionableFindings, suppressedFindings := splitDetailedFindings(allFindings)
+	platformResult := PlatformResult{
+		Platform:       platform,
+		ManifestDigest: descriptor.Digest,
+		FindingsCount:  len(actionableFindings),
+	}
+	if err != nil {
+		return platformResult, actionableFindings, suppressedFindings, err
+	}
 	if request.Logger != nil {
 		request.Logger.DebugContext(ctx, "scanned platform manifest",
 			"manifest_digest", descriptor.Digest,
@@ -294,11 +308,7 @@ func scanManifest(ctx context.Context, request Request, descriptor manifest.Desc
 		)
 	}
 
-	return PlatformResult{
-		Platform:       platform,
-		ManifestDigest: descriptor.Digest,
-		FindingsCount:  len(actionableFindings),
-	}, actionableFindings, suppressedFindings, nil
+	return platformResult, actionableFindings, suppressedFindings, nil
 }
 
 func resolveImageManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (manifest.ImageManifest, error) {

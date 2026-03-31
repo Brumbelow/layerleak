@@ -10,6 +10,19 @@ import (
 )
 
 func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
+	const wantLogo = `
+       ____                                              
+  _   / / /                                              
+ (_) / / /                                               
+  _ / / /                                                
+ (_)_/_/   _ __   _______ ____  _     _____    _    _  __
+ | |      / \\ \ / / ____|  _ \| |   | ____|  / \  | |/ /
+ | |     / _ \\ V /|  _| | |_) | |   |  _|   / _ \ | ' / 
+ | |___ / ___ \| | | |___|  _ <| |___| |___ / ___ \| . \ 
+ |_____/_/   \_\_| |_____|_| \_\_____|_____/_/   \_\_|\_\
+                                                         
+`
+
 	var buffer bytes.Buffer
 	renderer := newProgressRenderer(&buffer)
 
@@ -41,8 +54,11 @@ func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 	}
 
 	output := buffer.String()
+	if !strings.Contains(output, wantLogo) {
+		t.Fatalf("output missing logo %q: %q", wantLogo, output)
+	}
+
 	for _, pattern := range []string{
-		"://LAYERLEAK",
 		"Repository",
 		"Tags",
 		"Targets",

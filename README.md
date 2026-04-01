@@ -31,6 +31,7 @@ Build from source:
 git clone https://github.com/brumbelow/layerleak.git
 cd layerleak
 go build -o layerleak .
+./layerleak --help
 ```
 Optional environment configuration:
 

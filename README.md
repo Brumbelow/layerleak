@@ -19,7 +19,7 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for development and contribution guid
 - Scans image config metadata, env vars, labels, and history
 - Deduplicates findings by secret fingerprint and collapses repeated identical context snippets per manifest
 
-## How to install
+## To Install
 
 Prerequisites:
 

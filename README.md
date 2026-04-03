@@ -19,11 +19,28 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 - Scans image config metadata, env vars, labels, and history
 - Deduplicates findings by secret fingerprint and collapses repeated identical context snippets per manifest
 
-## To Install
+## Install
 
 Prerequisites:
 
 - Go 1.24+
+
+Install with Go:
+
+```bash
+go install github.com/brumbelow/layerleak@latest
+layerleak --help
+```
+
+The canonical install target is the module root.
+To pin a release explicitly:
+
+```bash
+go install github.com/brumbelow/layerleak@v1.0.0
+```
+
+Replace `v1.0.0` with the published `v1.x.y` tag you want.
+Make sure your `GOBIN` or `GOPATH/bin` directory is on `PATH`.
 
 Build from source:
 
@@ -113,8 +130,8 @@ Secret-safety note:
 Show the CLI help:
 
 ```bash
-./layerleak --help
-./layerleak scan --help
+layerleak --help
+layerleak scan --help
 ```
 ![help_output](https://github.com/user-attachments/assets/dbd87faa-d3bb-4bfa-941a-643e6bbd48f6)
 

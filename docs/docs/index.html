@@ -60,9 +60,8 @@
           <section class="doc-block" id="install" data-reveal>
             <h2>Install and build</h2>
             <p>layerleak currently targets Go 1.24+ and builds directly from source.</p>
-            <pre><code>git clone https://github.com/brumbelow/layerleak.git
-cd layerleak
-go build -o layerleak .</code></pre>
+            <pre><code>go install github.com/brumbelow/layerleak@latest
+layerleak --help</code></pre>
             <p>Optional local configuration still uses a plain environment file:</p>
             <pre><code>cp .env.example .env</code></pre>
           </section>

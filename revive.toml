@@ -1,0 +1,4 @@
+enableDefaultRules = true
+
+[rule.exported]
+Disabled = true

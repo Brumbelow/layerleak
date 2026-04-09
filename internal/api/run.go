@@ -22,7 +22,8 @@ func Run() error {
 	}
 
 	store, err := storage.NewPostgresStore(storage.PostgresConfig{
-		DatabaseURL: cfg.DatabaseURL,
+		DatabaseURL:       cfg.DatabaseURL,
+		PersistRawSecrets: cfg.PersistRawSecrets,
 	})
 	if err != nil {
 		return err

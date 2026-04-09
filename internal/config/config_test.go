@@ -11,11 +11,13 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "")
 	t.Setenv("LAYERLEAK_REGISTRY_AUTH_URL", "")
 	t.Setenv("LAYERLEAK_HTTP_TIMEOUT", "")
+	t.Setenv("LAYERLEAK_PERSIST_RAW_SECRETS", "")
 	t.Setenv("LAYERLEAK_MAX_FILE_BYTES", "")
 	t.Setenv("LAYERLEAK_MAX_LAYER_BYTES", "")
 	t.Setenv("LAYERLEAK_MAX_LAYER_ENTRIES", "")
 	t.Setenv("LAYERLEAK_MAX_MANIFEST_BYTES", "")
 	t.Setenv("LAYERLEAK_MAX_CONFIG_BYTES", "")
+	t.Setenv("LAYERLEAK_MAX_TAG_RESPONSE_BYTES", "")
 	t.Setenv("LAYERLEAK_TAG_PAGE_SIZE", "")
 	t.Setenv("LAYERLEAK_MAX_REPOSITORY_TAGS", "")
 	t.Setenv("LAYERLEAK_MAX_REPOSITORY_TARGETS", "")
@@ -46,6 +48,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPTimeout != 30*time.Second {
 		t.Fatalf("cfg.HTTPTimeout = %s", cfg.HTTPTimeout)
 	}
+	if cfg.PersistRawSecrets {
+		t.Fatal("cfg.PersistRawSecrets = true")
+	}
 
 	if cfg.MaxFileBytes != 1<<20 {
 		t.Fatalf("cfg.MaxFileBytes = %d", cfg.MaxFileBytes)
@@ -61,6 +66,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MaxConfigBytes != 0 {
 		t.Fatalf("cfg.MaxConfigBytes = %d", cfg.MaxConfigBytes)
+	}
+	if cfg.MaxTagResponseBytes != 8*(1<<20) {
+		t.Fatalf("cfg.MaxTagResponseBytes = %d", cfg.MaxTagResponseBytes)
 	}
 	if cfg.TagPageSize != 100 {
 		t.Fatalf("cfg.TagPageSize = %d", cfg.TagPageSize)
@@ -128,6 +136,34 @@ func TestLoadInvalidMaxConfigBytes(t *testing.T) {
 	}
 }
 
+func TestLoadAllowsPersistRawSecretsOptIn(t *testing.T) {
+	t.Setenv("LAYERLEAK_PERSIST_RAW_SECRETS", "1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.PersistRawSecrets {
+		t.Fatal("cfg.PersistRawSecrets = false")
+	}
+}
+
+func TestLoadInvalidPersistRawSecrets(t *testing.T) {
+	t.Setenv("LAYERLEAK_PERSIST_RAW_SECRETS", "maybe")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil")
+	}
+}
+
+func TestLoadInvalidMaxTagResponseBytes(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_TAG_RESPONSE_BYTES", "-1")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil")
+	}
+}
+
 func TestLoadInvalidTagPageSize(t *testing.T) {
 	t.Setenv("LAYERLEAK_TAG_PAGE_SIZE", "0")
 
@@ -143,12 +179,13 @@ func TestLoadAllowsZeroRepositoryLimits(t *testing.T) {
 	t.Setenv("LAYERLEAK_MAX_REPOSITORY_TARGETS", "0")
 	t.Setenv("LAYERLEAK_MAX_MANIFEST_BYTES", "0")
 	t.Setenv("LAYERLEAK_MAX_CONFIG_BYTES", "0")
+	t.Setenv("LAYERLEAK_MAX_TAG_RESPONSE_BYTES", "0")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.MaxLayerBytes != 0 || cfg.MaxLayerEntries != 0 || cfg.MaxRepositoryTags != 0 || cfg.MaxRepositoryTargets != 0 || cfg.MaxManifestBytes != 0 || cfg.MaxConfigBytes != 0 {
+	if cfg.MaxLayerBytes != 0 || cfg.MaxLayerEntries != 0 || cfg.MaxRepositoryTags != 0 || cfg.MaxRepositoryTargets != 0 || cfg.MaxManifestBytes != 0 || cfg.MaxConfigBytes != 0 || cfg.MaxTagResponseBytes != 0 {
 		t.Fatalf("cfg = %#v", cfg)
 	}
 }

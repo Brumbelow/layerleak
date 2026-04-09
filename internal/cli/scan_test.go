@@ -87,8 +87,11 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadFile() error = %v", readErr)
 	}
-	if !strings.Contains(string(body), "ghp_123456789012345678901234567890123456") {
-		t.Fatalf("findings file did not include raw secret: %q", string(body))
+	if strings.Contains(string(body), "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("findings file leaked raw secret: %q", string(body))
+	}
+	if !strings.Contains(string(body), `"redacted_value"`) {
+		t.Fatalf("findings file missing redacted value field: %q", string(body))
 	}
 }
 
@@ -250,8 +253,11 @@ func TestScanCommandWritesPartialResultsOnConfiguredLimitError(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadFile() error = %v", readErr)
 	}
-	if !strings.Contains(string(body), "ghp_123456789012345678901234567890123456") {
-		t.Fatalf("partial findings file missing raw secret: %q", string(body))
+	if strings.Contains(string(body), "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("partial findings file leaked raw secret: %q", string(body))
+	}
+	if !strings.Contains(string(body), `"redacted_value"`) {
+		t.Fatalf("partial findings file missing redacted value field: %q", string(body))
 	}
 }
 

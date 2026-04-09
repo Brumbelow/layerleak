@@ -66,7 +66,7 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	if err := db.QueryRow("SELECT value FROM findings").Scan(&value); err != nil {
 		t.Fatalf("QueryRow(value) error = %v", err)
 	}
-	if value != "ghp_123456789012345678901234567890123456" {
+	if value != "" {
 		t.Fatalf("value = %q", value)
 	}
 
@@ -74,7 +74,7 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	if err := db.QueryRow("SELECT raw_snippet FROM finding_occurrences ORDER BY source_location LIMIT 1").Scan(&rawSnippet); err != nil {
 		t.Fatalf("QueryRow(raw_snippet) error = %v", err)
 	}
-	if !strings.Contains(rawSnippet, "ghp_123456789012345678901234567890123456") {
+	if rawSnippet != "" {
 		t.Fatalf("rawSnippet = %q", rawSnippet)
 	}
 
@@ -91,6 +91,44 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	}
 	if lineNumber <= 0 {
 		t.Fatalf("lineNumber = %d", lineNumber)
+	}
+}
+
+func TestPostgresStoreSaveScanPersistsRawSecretsWhenEnabled(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{
+		DatabaseURL:       integrationDatabaseURL(t),
+		PersistRawSecrets: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	if _, err := store.SaveScan(context.Background(), record); err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+
+	var value string
+	if err := db.QueryRow("SELECT value FROM findings").Scan(&value); err != nil {
+		t.Fatalf("QueryRow(value) error = %v", err)
+	}
+	if value != "ghp_123456789012345678901234567890123456" {
+		t.Fatalf("value = %q", value)
+	}
+
+	var rawSnippet string
+	if err := db.QueryRow("SELECT raw_snippet FROM finding_occurrences ORDER BY source_location LIMIT 1").Scan(&rawSnippet); err != nil {
+		t.Fatalf("QueryRow(raw_snippet) error = %v", err)
+	}
+	if !strings.Contains(rawSnippet, "ghp_123456789012345678901234567890123456") {
+		t.Fatalf("rawSnippet = %q", rawSnippet)
 	}
 }
 

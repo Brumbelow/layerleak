@@ -178,7 +178,8 @@ var ErrNotFound = errors.New("storage record not found")
 type NoopStore struct{}
 
 type PostgresConfig struct {
-	DatabaseURL string
+	DatabaseURL       string
+	PersistRawSecrets bool
 }
 
 func NewNoopStore() NoopStore {

@@ -130,8 +130,9 @@ func (s *Service) registryClient() *registry.Client {
 	}
 
 	return registry.NewClient(registry.Options{
-		BaseURL: s.config.RegistryBaseURL,
-		AuthURL: s.config.RegistryAuthURL,
+		BaseURL:             s.config.RegistryBaseURL,
+		AuthURL:             s.config.RegistryAuthURL,
+		MaxTagResponseBytes: s.config.MaxTagResponseBytes,
 		HTTPClient: &http.Client{
 			Timeout: s.config.HTTPTimeout,
 		},

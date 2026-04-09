@@ -61,11 +61,13 @@ Result and database configuration:
 ```bash
 export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_API_ADDR=127.0.0.1:8080
+export LAYERLEAK_PERSIST_RAW_SECRETS=0
 export LAYERLEAK_TAG_PAGE_SIZE=100
 export LAYERLEAK_MAX_LAYER_BYTES=536870912
 export LAYERLEAK_MAX_LAYER_ENTRIES=50000
 export LAYERLEAK_MAX_MANIFEST_BYTES=0
 export LAYERLEAK_MAX_CONFIG_BYTES=0
+export LAYERLEAK_MAX_TAG_RESPONSE_BYTES=8388608
 export LAYERLEAK_MAX_REPOSITORY_TAGS=0
 export LAYERLEAK_MAX_REPOSITORY_TARGETS=0
 export LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
@@ -73,10 +75,12 @@ export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerl
 ```
 
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
-Saved findings files contain only detections, including unredacted finding values and unredacted context snippets.
+Saved findings files contain only detections and are redacted by default.
+Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding values and raw context snippets written to disk and Postgres.
 `LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
 `LAYERLEAK_MAX_LAYER_BYTES` defaults to `536870912` (512 MiB) of decompressed layer stream data per layer, and `LAYERLEAK_MAX_LAYER_ENTRIES` defaults to `50000` tar entries per layer.
-`LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
+`LAYERLEAK_MAX_TAG_RESPONSE_BYTES` defaults to `8388608` (8 MiB) per Docker Hub tag-list response page.
+`LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_TAG_RESPONSE_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
 `LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080`.
@@ -120,7 +124,8 @@ Operational defaults:
 
 Secret-safety note:
 
-- Postgres persistence stores raw finding values and raw snippets, not only redacted previews.
+- Postgres persistence stores redacted previews by default.
+- If `LAYERLEAK_PERSIST_RAW_SECRETS=1`, Postgres also stores raw finding values and raw snippets.
 - The `scan_runs.result_json` snapshot stays redacted.
 - Use a dedicated database or schema for layerleak.
 - For the safest purge path, drop the dedicated database or schema instead of trying to surgically delete individual rows.
@@ -150,8 +155,9 @@ Run a scan against a public Docker Hub image:
 Every scan writes a JSON findings file to the findings output directory.
 If `LAYERLEAK_FINDINGS_DIR` is not set, the default output directory is `findings/` under the repo root.
 
-Those saved findings files contain only finding records, including the exact match value, exact source location, unredacted snippet, disposition metadata, and line number for each finding.
-If Postgres persistence is enabled, the same raw finding material is stored in the `findings` and `finding_occurrences` tables.
+Those saved findings files contain finding records with `redacted_value`, redacted `context_snippet`, exact source location, disposition metadata, and line number for each finding.
+If `LAYERLEAK_PERSIST_RAW_SECRETS=1`, the saved findings files also include raw `value` and `raw_context_snippet`.
+If Postgres persistence is enabled, raw `findings.value` and `finding_occurrences.raw_snippet` stay empty unless `LAYERLEAK_PERSIST_RAW_SECRETS=1`.
 For multi-arch images, layerleak skips attestation and provenance manifests such as `application/vnd.in-toto+json` instead of counting them as failed platform scans.
 If you pass a bare repository name such as `mongo`, layerleak enumerates all public tags in that repository, resolves each tag to a digest, groups duplicate digests, and scans the distinct targets. If you want a single image only, pass an explicit tag or digest such as `mongo:latest` or `mongo@sha256:...`.
 

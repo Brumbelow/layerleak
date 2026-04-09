@@ -134,7 +134,7 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 
-			resultPath, err := writeResultFile(cfg.FindingsDir, result)
+			resultPath, err := writeResultFile(cfg.FindingsDir, cfg.PersistRawSecrets, result)
 			if err != nil {
 				_ = progress.Update(progressSnapshot{
 					repository:       ref.Repository,

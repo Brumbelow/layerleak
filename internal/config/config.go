@@ -14,11 +14,13 @@ type Config struct {
 	RegistryBaseURL         string
 	RegistryAuthURL         string
 	HTTPTimeout             time.Duration
+	PersistRawSecrets       bool
 	MaxFileBytes            int64
 	MaxLayerBytes           int64
 	MaxLayerEntries         int
 	MaxManifestBytes        int64
 	MaxConfigBytes          int64
+	MaxTagResponseBytes     int64
 	TagPageSize             int
 	MaxRepositoryTags       int
 	MaxRepositoryTargets    int
@@ -52,6 +54,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxTagResponseBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_TAG_RESPONSE_BYTES", 8*(1<<20))
+	if err != nil {
+		return Config{}, err
+	}
 	tagPageSize, err := intFromEnv("LAYERLEAK_TAG_PAGE_SIZE", 100)
 	if err != nil {
 		return Config{}, err
@@ -68,6 +74,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	persistRawSecrets, err := boolFromEnv("LAYERLEAK_PERSIST_RAW_SECRETS", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		LogLevel:                envOrDefault("LAYERLEAK_LOG_LEVEL", "info"),
@@ -75,11 +85,13 @@ func Load() (Config, error) {
 		RegistryBaseURL:         envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", "https://registry-1.docker.io"),
 		RegistryAuthURL:         envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", "https://auth.docker.io/token"),
 		HTTPTimeout:             timeout,
+		PersistRawSecrets:       persistRawSecrets,
 		MaxFileBytes:            maxFileBytes,
 		MaxLayerBytes:           maxLayerBytes,
 		MaxLayerEntries:         maxLayerEntries,
 		MaxManifestBytes:        maxManifestBytes,
 		MaxConfigBytes:          maxConfigBytes,
+		MaxTagResponseBytes:     maxTagResponseBytes,
 		TagPageSize:             tagPageSize,
 		MaxRepositoryTags:       maxRepositoryTags,
 		MaxRepositoryTargets:    maxRepositoryTargets,
@@ -107,6 +119,20 @@ func durationFromEnv(key string, fallback time.Duration) (time.Duration, error) 
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+
+	return parsed, nil
+}
+
+func boolFromEnv(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", key, err)
 	}
 
 	return parsed, nil

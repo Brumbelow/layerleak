@@ -26,9 +26,11 @@ type persistedFinding struct {
 	LayerDigest         string                     `json:"layer_digest,omitempty"`
 	Key                 string                     `json:"key,omitempty"`
 	LineNumber          int                        `json:"line_number,omitempty"`
-	Value               string                     `json:"value"`
+	RedactedValue       string                     `json:"redacted_value"`
+	Value               string                     `json:"value,omitempty"`
 	Fingerprint         string                     `json:"fingerprint"`
 	ContextSnippet      string                     `json:"context_snippet"`
+	RawContextSnippet   string                     `json:"raw_context_snippet,omitempty"`
 	SourceLocation      string                     `json:"source_location"`
 	MatchStart          int                        `json:"match_start"`
 	MatchEnd            int                        `json:"match_end"`
@@ -39,17 +41,17 @@ type persistedFinding struct {
 
 const persistedLowConfidenceGroupCap = 3
 
-func writeResultFile(configuredDir string, result jobs.Result) (string, error) {
+func writeResultFile(configuredDir string, persistRawSecrets bool, result jobs.Result) (string, error) {
 	findingsDir, err := resolveFindingsDir(configuredDir)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(findingsDir, 0o755); err != nil {
+	if err := os.MkdirAll(findingsDir, 0o700); err != nil {
 		return "", fmt.Errorf("create findings directory: %w", err)
 	}
 
 	filePath := filepath.Join(findingsDir, buildResultFileName(result))
-	file, err := os.Create(filePath)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create findings result file: %w", err)
 	}
@@ -57,20 +59,20 @@ func writeResultFile(configuredDir string, result jobs.Result) (string, error) {
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(buildPersistedFindings(result)); err != nil {
+	if err := encoder.Encode(buildPersistedFindings(result, persistRawSecrets)); err != nil {
 		return "", fmt.Errorf("write findings result file: %w", err)
 	}
 
 	return filePath, nil
 }
 
-func buildPersistedFindings(result jobs.Result) []persistedFinding {
+func buildPersistedFindings(result jobs.Result, persistRawSecrets bool) []persistedFinding {
 	allDetailedFindings := append([]findings.DetailedFinding{}, result.DetailedFindings...)
 	allDetailedFindings = append(allDetailedFindings, result.SuppressedDetailedFindings...)
 
 	items := make([]persistedFinding, 0, len(allDetailedFindings))
 	for _, item := range allDetailedFindings {
-		items = append(items, persistedFinding{
+		persisted := persistedFinding{
 			DetectorName:        item.DetectorName,
 			Confidence:          item.Confidence,
 			Disposition:         item.Disposition,
@@ -82,14 +84,19 @@ func buildPersistedFindings(result jobs.Result) []persistedFinding {
 			LayerDigest:         item.LayerDigest,
 			Key:                 item.Key,
 			LineNumber:          item.LineNumber,
-			Value:               item.Value,
+			RedactedValue:       item.RedactedValue,
 			Fingerprint:         item.Fingerprint,
-			ContextSnippet:      item.RawSnippet,
+			ContextSnippet:      item.ContextSnippet,
 			SourceLocation:      item.SourceLocation,
 			MatchStart:          item.MatchStart,
 			MatchEnd:            item.MatchEnd,
 			PresentInFinalImage: item.PresentInFinalImage,
-		})
+		}
+		if persistRawSecrets {
+			persisted.Value = item.Value
+			persisted.RawContextSnippet = item.RawSnippet
+		}
+		items = append(items, persisted)
 	}
 
 	return capPersistedLowConfidenceFindings(items)
@@ -141,7 +148,6 @@ func persistedFindingGroupKey(item persistedFinding) (string, bool) {
 		item.LayerDigest,
 		item.Key,
 		strconv.Itoa(item.LineNumber),
-		item.Value,
 		item.Fingerprint,
 		boolString(item.PresentInFinalImage),
 	}, "|"), true

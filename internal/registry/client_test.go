@@ -207,6 +207,85 @@ func TestListTagsReturnsPartialTagsWhenLimitExceeded(t *testing.T) {
 	}
 }
 
+func TestListTagsFailsWhenTagResponseExceedsConfiguredBytes(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest","2.0","1.0"]}`), nil), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL:             "https://registry.test",
+		MaxTagResponseBytes: 12,
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	tags, err := client.ListTags(context.Background(), "library/app", 100, 0)
+	if err == nil {
+		t.Fatal("ListTags() error = nil")
+	}
+	if !strings.Contains(err.Error(), "max tag response bytes limit") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(tags) != 0 {
+		t.Fatalf("len(tags) = %d", len(tags))
+	}
+}
+
+func TestListTagsReturnsPartialTagsWhenTagResponseLimitExceededMidPagination(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch request.URL.Query().Get("last") {
+		case "":
+			return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["2.0","1.0"]}`), map[string]string{
+				"Link": `</v2/library/app/tags/list?n=2&last=2.0>; rel="next"`,
+			}), nil
+		case "2.0":
+			return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["really-long-tag-name","3.0"]}`), nil), nil
+		default:
+			return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	client := NewClient(Options{
+		BaseURL:             "https://registry.test",
+		MaxTagResponseBytes: 48,
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	tags, err := client.ListTags(context.Background(), "library/app", 2, 0)
+	if err == nil {
+		t.Fatal("ListTags() error = nil")
+	}
+	if !strings.Contains(err.Error(), "max tag response bytes limit") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Join(tags, ",") != "1.0,2.0" {
+		t.Fatalf("tags = %q", strings.Join(tags, ","))
+	}
+}
+
 func TestFetchManifestRefreshesExpiredCachedToken(t *testing.T) {
 	tokenRequests := 0
 	authorizedRequests := 0

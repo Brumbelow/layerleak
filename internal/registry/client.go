@@ -19,21 +19,23 @@ import (
 )
 
 type Options struct {
-	BaseURL          string
-	AuthURL          string
-	HTTPClient       *http.Client
-	RequestAttempts  int
-	MaxManifestBytes int64
+	BaseURL             string
+	AuthURL             string
+	HTTPClient          *http.Client
+	RequestAttempts     int
+	MaxManifestBytes    int64
+	MaxTagResponseBytes int64
 }
 
 type Client struct {
-	baseURL          *url.URL
-	authURL          *url.URL
-	httpClient       *http.Client
-	requestAttempts  int
-	maxManifestBytes int64
-	tokenCache       map[string]string
-	tokenCacheMu     sync.Mutex
+	baseURL             *url.URL
+	authURL             *url.URL
+	httpClient          *http.Client
+	requestAttempts     int
+	maxManifestBytes    int64
+	maxTagResponseBytes int64
+	tokenCache          map[string]string
+	tokenCacheMu        sync.Mutex
 }
 
 type ManifestResponse struct {
@@ -73,12 +75,13 @@ func NewClient(options Options) *Client {
 	}
 
 	return &Client{
-		baseURL:          baseURL,
-		authURL:          authURL,
-		httpClient:       httpClient,
-		requestAttempts:  requestAttempts,
-		maxManifestBytes: options.MaxManifestBytes,
-		tokenCache:       make(map[string]string),
+		baseURL:             baseURL,
+		authURL:             authURL,
+		httpClient:          httpClient,
+		requestAttempts:     requestAttempts,
+		maxManifestBytes:    options.MaxManifestBytes,
+		maxTagResponseBytes: options.MaxTagResponseBytes,
+		tokenCache:          make(map[string]string),
 	}
 }
 
@@ -201,10 +204,14 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 			Name string   `json:"name"`
 			Tags []string `json:"tags"`
 		}
-		decodeErr := json.NewDecoder(response.Body).Decode(&payload)
 		linkHeader := response.Header.Get("Link")
+		body, readErr := readTagResponseBody(response.Body, c.maxTagResponseBytes, repository)
 		response.Body.Close()
-		if decodeErr != nil {
+		if readErr != nil {
+			sort.Strings(tags)
+			return tags, readErr
+		}
+		if decodeErr := json.Unmarshal(body, &payload); decodeErr != nil {
 			return nil, fmt.Errorf("decode tags response: %w", decodeErr)
 		}
 
@@ -538,6 +545,27 @@ func readManifestBody(reader io.Reader, maxBytes int64, identifier string) ([]by
 	}
 	if int64(len(body)) > maxBytes {
 		return nil, limits.NewExceeded(limits.KindManifestBytes, maxBytes, "manifest "+strings.TrimSpace(identifier))
+	}
+
+	return body, nil
+}
+
+func readTagResponseBody(reader io.Reader, maxBytes int64, repository string) ([]byte, error) {
+	if maxBytes <= 0 {
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read tags response: %w", err)
+		}
+		return body, nil
+	}
+
+	limited := io.LimitReader(reader, maxBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read tags response: %w", err)
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, limits.NewExceeded(limits.KindTagResponseBytes, maxBytes, "tag response for repository "+strings.TrimSpace(repository))
 	}
 
 	return body, nil

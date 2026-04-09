@@ -13,6 +13,7 @@ const (
 	KindLayerEntries      Kind = "layer_entries"
 	KindManifestBytes     Kind = "manifest_bytes"
 	KindConfigBytes       Kind = "config_bytes"
+	KindTagResponseBytes  Kind = "tag_response_bytes"
 	KindRepositoryTags    Kind = "repository_tags"
 	KindRepositoryTargets Kind = "repository_targets"
 )
@@ -38,6 +39,8 @@ func (e *ExceededError) Error() string {
 		return fmt.Sprintf("%s exceeded max manifest bytes limit of %d", subject, e.Limit)
 	case KindConfigBytes:
 		return fmt.Sprintf("%s exceeded max config bytes limit of %d", subject, e.Limit)
+	case KindTagResponseBytes:
+		return fmt.Sprintf("%s exceeded max tag response bytes limit of %d", subject, e.Limit)
 	case KindRepositoryTags:
 		return fmt.Sprintf("%s exceeded max repository tags limit of %d", subject, e.Limit)
 	case KindRepositoryTargets:

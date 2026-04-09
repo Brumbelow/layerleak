@@ -17,7 +17,8 @@ func newStore(cfg config.Config) (storage.Store, error) {
 	}
 
 	return storage.NewPostgresStore(storage.PostgresConfig{
-		DatabaseURL: cfg.DatabaseURL,
+		DatabaseURL:       cfg.DatabaseURL,
+		PersistRawSecrets: cfg.PersistRawSecrets,
 	})
 }
 

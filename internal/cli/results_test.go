@@ -13,9 +13,9 @@ import (
 )
 
 func TestWriteResultFileUsesConfiguredDirectory(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir := filepath.Join(t.TempDir(), "nested", "findings")
 
-	filePath, err := writeResultFile(tempDir, jobs.Result{
+	filePath, err := writeResultFile(tempDir, false, jobs.Result{
 		RequestedDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		TotalFindings:   3,
 		DetailedFindings: []findings.DetailedFinding{
@@ -27,7 +27,9 @@ func TestWriteResultFileUsesConfiguredDirectory(t *testing.T) {
 					ManifestDigest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 					Platform:            manifest.Platform{OS: "linux", Architecture: "amd64"},
 					Key:                 "TOKEN",
+					RedactedValue:       "ghp********************************56",
 					Fingerprint:         "fingerprint",
+					ContextSnippet:      "TOKEN=ghp********************************56",
 					PresentInFinalImage: true,
 				},
 				Value:          "ghp_123456789012345678901234567890123456",
@@ -59,11 +61,36 @@ func TestWriteResultFileUsesConfiguredDirectory(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d", len(result))
 	}
-	if result[0].Value != "ghp_123456789012345678901234567890123456" {
+	if result[0].Value != "" {
 		t.Fatalf("result[0].Value = %q", result[0].Value)
+	}
+	if result[0].RawContextSnippet != "" {
+		t.Fatalf("result[0].RawContextSnippet = %q", result[0].RawContextSnippet)
+	}
+	if result[0].RedactedValue != "ghp********************************56" {
+		t.Fatalf("result[0].RedactedValue = %q", result[0].RedactedValue)
+	}
+	if result[0].ContextSnippet != "TOKEN=ghp********************************56" {
+		t.Fatalf("result[0].ContextSnippet = %q", result[0].ContextSnippet)
 	}
 	if result[0].SourceLocation != "env:TOKEN" {
 		t.Fatalf("result[0].SourceLocation = %q", result[0].SourceLocation)
+	}
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat(filePath) error = %v", err)
+	}
+	if fileInfo.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("file permissions = %o", fileInfo.Mode().Perm())
+	}
+
+	dirInfo, err := os.Stat(tempDir)
+	if err != nil {
+		t.Fatalf("Stat(tempDir) error = %v", err)
+	}
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("directory permissions = %o", dirInfo.Mode().Perm())
 	}
 }
 
@@ -80,7 +107,7 @@ func TestBuildPersistedFindingsIncludesSuppressedExampleFindings(t *testing.T) {
 				return item
 			}(),
 		},
-	})
+	}, false)
 
 	if len(result) != 2 {
 		t.Fatalf("len(result) = %d", len(result))
@@ -90,6 +117,24 @@ func TestBuildPersistedFindingsIncludesSuppressedExampleFindings(t *testing.T) {
 	}
 	if result[1].DispositionReason != findings.DispositionReasonTestPath {
 		t.Fatalf("result[1].DispositionReason = %q", result[1].DispositionReason)
+	}
+}
+
+func TestBuildPersistedFindingsIncludesRawFieldsWhenEnabled(t *testing.T) {
+	result := buildPersistedFindings(jobs.Result{
+		DetailedFindings: []findings.DetailedFinding{
+			testDetailedFinding("line one", "file:1"),
+		},
+	}, true)
+
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d", len(result))
+	}
+	if result[0].Value != "base-passwd/user-change-gecos" {
+		t.Fatalf("result[0].Value = %q", result[0].Value)
+	}
+	if result[0].RawContextSnippet != "line one" {
+		t.Fatalf("result[0].RawContextSnippet = %q", result[0].RawContextSnippet)
 	}
 }
 
@@ -114,7 +159,7 @@ func TestBuildPersistedFindingsCapsRepeatedLowConfidenceFileFindings(t *testing.
 			testDetailedFinding("line four", "file:4"),
 			testDetailedFinding("line five", "file:5"),
 		},
-	})
+	}, false)
 
 	if len(result) != persistedLowConfidenceGroupCap {
 		t.Fatalf("len(result) = %d", len(result))
@@ -141,7 +186,9 @@ func testDetailedFinding(snippet, location string) findings.DetailedFinding {
 			Platform:            manifest.Platform{OS: "linux", Architecture: "amd64"},
 			FilePath:            "usr/share/doc/base-passwd/README",
 			LayerDigest:         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			RedactedValue:       "bas***********************os",
 			Fingerprint:         "fingerprint",
+			ContextSnippet:      "base-passwd/user-change-gecos",
 			PresentInFinalImage: true,
 		},
 		Value:          "base-passwd/user-change-gecos",

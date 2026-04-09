@@ -14,7 +14,8 @@ import (
 )
 
 type PostgresStore struct {
-	db *sql.DB
+	db                *sql.DB
+	persistRawSecrets bool
 }
 
 func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
@@ -34,7 +35,10 @@ func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	return &PostgresStore{db: db}, nil
+	return &PostgresStore{
+		db:                db,
+		persistRawSecrets: config.PersistRawSecrets,
+	}, nil
 }
 
 func (s *PostgresStore) Close() error {
@@ -84,11 +88,11 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64,
 	}
 
 	for _, item := range findings.DeduplicateDetailed(record.DetailedFindings) {
-		findingID, err := upsertFinding(ctx, tx, item, scannedAt)
+		findingID, err := upsertFinding(ctx, tx, item, scannedAt, s.persistRawSecrets)
 		if err != nil {
 			return 0, err
 		}
-		if err := upsertFindingOccurrence(ctx, tx, findingID, item, scannedAt); err != nil {
+		if err := upsertFindingOccurrence(ctx, tx, findingID, item, scannedAt, s.persistRawSecrets); err != nil {
 			return 0, err
 		}
 	}
@@ -219,7 +223,7 @@ func replaceTagMappings(ctx context.Context, tx *sql.Tx, repositoryID int64, ite
 	return nil
 }
 
-func upsertFinding(ctx context.Context, tx *sql.Tx, item findings.DetailedFinding, scannedAt time.Time) (int64, error) {
+func upsertFinding(ctx context.Context, tx *sql.Tx, item findings.DetailedFinding, scannedAt time.Time, persistRawSecrets bool) (int64, error) {
 	var findingID int64
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO findings (
@@ -237,14 +241,14 @@ func upsertFinding(ctx context.Context, tx *sql.Tx, item findings.DetailedFindin
 			value = EXCLUDED.value,
 			last_seen_at = EXCLUDED.last_seen_at
 		RETURNING id
-	`, strings.TrimSpace(item.ManifestDigest), strings.TrimSpace(item.Fingerprint), item.RedactedValue, item.Value, scannedAt).Scan(&findingID); err != nil {
+	`, strings.TrimSpace(item.ManifestDigest), strings.TrimSpace(item.Fingerprint), item.RedactedValue, persistedValue(item, persistRawSecrets), scannedAt).Scan(&findingID); err != nil {
 		return 0, fmt.Errorf("upsert finding %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
 	}
 
 	return findingID, nil
 }
 
-func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, item findings.DetailedFinding, scannedAt time.Time) error {
+func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, item findings.DetailedFinding, scannedAt time.Time, persistRawSecrets bool) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO finding_occurrences (
 			finding_id,
@@ -293,11 +297,27 @@ func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, i
 			disposition_reason = EXCLUDED.disposition_reason,
 			line_number = EXCLUDED.line_number,
 			last_seen_at = EXCLUDED.last_seen_at
-	`, findingID, item.DetectorName, item.Confidence, string(item.Disposition), string(item.DispositionReason), string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.LineNumber, item.ContextSnippet, item.RawSnippet, item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt); err != nil {
+	`, findingID, item.DetectorName, item.Confidence, string(item.Disposition), string(item.DispositionReason), string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.LineNumber, item.ContextSnippet, persistedRawSnippet(item, persistRawSecrets), item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt); err != nil {
 		return fmt.Errorf("upsert finding occurrence %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
 	}
 
 	return nil
+}
+
+func persistedValue(item findings.DetailedFinding, persistRawSecrets bool) string {
+	if !persistRawSecrets {
+		return ""
+	}
+
+	return item.Value
+}
+
+func persistedRawSnippet(item findings.DetailedFinding, persistRawSecrets bool) string {
+	if !persistRawSecrets {
+		return ""
+	}
+
+	return item.RawSnippet
 }
 
 func insertScanRun(ctx context.Context, tx *sql.Tx, repositoryID int64, record ScanRecord, scannedAt time.Time) (int64, error) {

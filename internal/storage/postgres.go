@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,11 @@ type PostgresStore struct {
 	db                *sql.DB
 	persistRawSecrets bool
 }
+
+const (
+	minPostgresServerVersionNum   = 160013
+	minPostgresServerVersionLabel = "16.13"
+)
 
 func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 	if err := config.Validate(); err != nil {
@@ -34,11 +40,62 @@ func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
+	if err := ensureMinimumPostgresServerVersion(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	return &PostgresStore{
 		db:                db,
 		persistRawSecrets: config.PersistRawSecrets,
 	}, nil
+}
+
+func ensureMinimumPostgresServerVersion(ctx context.Context, db *sql.DB) error {
+	var rawVersionNum string
+	if err := db.QueryRowContext(ctx, "SHOW server_version_num").Scan(&rawVersionNum); err != nil {
+		return fmt.Errorf("query postgres server version: %w", err)
+	}
+
+	versionNum, err := parsePostgresServerVersionNum(rawVersionNum)
+	if err != nil {
+		return fmt.Errorf("parse postgres server version: %w", err)
+	}
+	if err := validateMinimumPostgresServerVersionNum(versionNum); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func parsePostgresServerVersionNum(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, fmt.Errorf("server version is empty")
+	}
+
+	versionNum, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse server version %q: %w", value, err)
+	}
+	if versionNum < 0 {
+		return 0, fmt.Errorf("server version must be non-negative")
+	}
+
+	return versionNum, nil
+}
+
+func validateMinimumPostgresServerVersionNum(versionNum int) error {
+	if versionNum < minPostgresServerVersionNum {
+		return fmt.Errorf(
+			"postgres server version must be >= %s (server_version_num >= %d, got %d)",
+			minPostgresServerVersionLabel,
+			minPostgresServerVersionNum,
+			versionNum,
+		)
+	}
+
+	return nil
 }
 
 func (s *PostgresStore) Close() error {

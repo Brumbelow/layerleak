@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:16.13-alpine
     environment:
       POSTGRES_DB: ${LAYERLEAK_DB_NAME:-layerleak}
       POSTGRES_USER: ${LAYERLEAK_DB_USER:-layerleak}

@@ -68,8 +68,7 @@ apply_migration() {
 	psql "$LAYERLEAK_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration_file"
 }
 
-table_set_0001="repositories manifests repository_manifests tags findings finding_occurrences"
-set -- $table_set_0001
+set -- "repositories" "manifests" "repository_manifests" "tags" "findings" "finding_occurrences"
 existing_0001="$(count_existing_tables "$@")"
 total_0001="$#"
 
@@ -87,8 +86,7 @@ if ! table_exists "finding_occurrences"; then
 	exit 1
 fi
 
-columns_0002="disposition disposition_reason line_number"
-set -- $columns_0002
+set -- "disposition" "disposition_reason" "line_number"
 existing_0002="$(count_existing_columns "finding_occurrences" "$@")"
 total_0002="$#"
 

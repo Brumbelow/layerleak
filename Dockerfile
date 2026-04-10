@@ -30,6 +30,10 @@ RUN apt-get update \
 	&& client_version="$(dpkg-query --showformat='${Version}' --show postgresql-client-16)" \
 	&& case "$client_version" in *.pgdg24.04+*) ;; *) echo "unexpected postgresql-client-16 lineage: $client_version" >&2; exit 1 ;; esac \
 	&& dpkg --compare-versions "$client_version" ge "$MIN_PGDG_CLIENT_VERSION" \
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+	&& apt-get install --yes --no-install-recommends ca-certificates postgresql-client \
 	&& rm -rf /var/lib/apt/lists/*
 
 RUN useradd --uid 10001 --home-dir /app --shell /usr/sbin/nologin --create-home layerleak

@@ -111,6 +111,7 @@ Result behavior:
 
 Layerleak ships versioned SQL migrations under `migrations/`.
 Migrations are manual on purpose. The scanner does not auto-create or auto-upgrade the schema.
+Layerleak requires PostgreSQL server `>= 16.13` for DB-backed API and scanner persistence.
 
 Apply the migrations with `psql` in order:
 
@@ -131,6 +132,8 @@ docker run --rm \
 
 `layerleak-migrate-up` is safe to rerun when migrations are already applied.
 If it detects a partial migration state, it exits non-zero and asks for manual intervention.
+The helper also enforces server version `>= 16.13` and validates that the bundled `postgresql-client-16`
+uses Ubuntu PGDG `24.04` packaging (`.pgdg24.04+`) at version `>= 16.13-1.pgdg24.04+1`.
 
 Rollback the migrations in reverse order:
 
@@ -234,6 +237,8 @@ For org deployments, keep it on a private network and front it with your own aut
 ## Docker Compose deployment (Dockge / Komodo)
 
 This repo ships a Compose stack in `docker-compose.yml` with `db`, `migrate`, and `api` services.
+The `db` service baseline is pinned to `postgres:16.13-alpine`.
+If you use a different Postgres image, keep the server version at `16.13` or newer.
 
 Set deployment variables (export in shell or place in a `.env` file next to `docker-compose.yml`):
 

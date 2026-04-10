@@ -44,6 +44,84 @@ func TestPostgresConfigValidate(t *testing.T) {
 	}
 }
 
+func TestParsePostgresServerVersionNum(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{
+			name: "valid",
+			raw:  "160013",
+			want: 160013,
+		},
+		{
+			name: "trim whitespace",
+			raw:  " 170001 ",
+			want: 170001,
+		},
+		{
+			name:    "missing",
+			raw:     "",
+			wantErr: true,
+		},
+		{
+			name:    "invalid text",
+			raw:     "sixteen",
+			wantErr: true,
+		},
+		{
+			name:    "negative",
+			raw:     "-1",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parsePostgresServerVersionNum(tt.raw)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parsePostgresServerVersionNum() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("parsePostgresServerVersionNum() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateMinimumPostgresServerVersionNum(t *testing.T) {
+	tests := []struct {
+		name       string
+		versionNum int
+		wantErr    bool
+	}{
+		{
+			name:       "minimum",
+			versionNum: 160013,
+		},
+		{
+			name:       "greater than minimum",
+			versionNum: 170002,
+		},
+		{
+			name:       "below minimum",
+			versionNum: 160012,
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMinimumPostgresServerVersionNum(tt.versionNum)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateMinimumPostgresServerVersionNum() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateScanRecord(t *testing.T) {
 	validRecord := func() ScanRecord {
 		return ScanRecord{

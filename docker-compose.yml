@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${LAYERLEAK_DB_NAME:-layerleak}
+      POSTGRES_USER: ${LAYERLEAK_DB_USER:-layerleak}
+      POSTGRES_PASSWORD: ${LAYERLEAK_DB_PASSWORD:-layerleak}
+    volumes:
+      - layerleak_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  api:
+    image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
+    environment:
+      LAYERLEAK_API_ADDR: 0.0.0.0:8080
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${LAYERLEAK_API_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  migrate:
+    image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
+    environment:
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["layerleak-migrate-up"]
+    profiles:
+      - manual
+    restart: "no"
+
+volumes:
+  layerleak_postgres_data:

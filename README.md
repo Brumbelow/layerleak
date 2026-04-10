@@ -50,6 +50,19 @@ cd layerleak
 go build -o layerleak .
 ./layerleak --help
 ```
+
+Run the API with a container image:
+
+```bash
+docker pull ghcr.io/brumbelow/layerleak:latest
+docker run --rm \
+  -p 8080:8080 \
+  -e LAYERLEAK_DATABASE_URL='postgres://<user>:<password>@<host>:5432/layerleak?sslmode=disable' \
+  ghcr.io/brumbelow/layerleak:latest
+```
+
+The container image runs the API by default and sets `LAYERLEAK_API_ADDR=0.0.0.0:8080`.
+
 Optional environment configuration:
 
 ```bash
@@ -83,7 +96,8 @@ Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding va
 `LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_TAG_RESPONSE_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
-`LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080`.
+`LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080` in local binaries.
+The container image overrides this to `0.0.0.0:8080`.
 If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
 
 Result behavior:
@@ -105,6 +119,18 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.up.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.up.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql
 ```
+
+Or apply migrations using the container helper command:
+
+```bash
+docker run --rm \
+  -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
+  ghcr.io/brumbelow/layerleak:latest \
+  layerleak-migrate-up
+```
+
+`layerleak-migrate-up` is safe to rerun when migrations are already applied.
+If it detects a partial migration state, it exits non-zero and asks for manual intervention.
 
 Rollback the migrations in reverse order:
 
@@ -179,6 +205,15 @@ Start it with:
 go run ./cmd/api
 ```
 
+Or run the API container:
+
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -e LAYERLEAK_DATABASE_URL='postgres://<user>:<password>@<host>:5432/layerleak?sslmode=disable' \
+  ghcr.io/brumbelow/layerleak:latest
+```
+
 Current endpoints:
 
 - `POST /api/v1/scans`
@@ -192,6 +227,37 @@ Current endpoints:
 API scan responses reuse the same redacted result schema as the CLI JSON output.
 `GET /api/v1/scans/{id}` returns the persisted run metadata plus the stored redacted result snapshot.
 Repository and finding endpoints also stay redacted: they return `redacted_value` and redacted `context_snippet`, never raw secret values or raw snippets from Postgres.
+
+The API does not include authentication.
+For org deployments, keep it on a private network and front it with your own authn/authz gateway or reverse proxy policy.
+
+## Docker Compose deployment (Dockge / Komodo)
+
+This repo ships a Compose stack in `docker-compose.yml` with `db`, `migrate`, and `api` services.
+
+Set deployment variables (export in shell or place in a `.env` file next to `docker-compose.yml`):
+
+```bash
+export LAYERLEAK_IMAGE=ghcr.io/brumbelow/layerleak:latest
+export LAYERLEAK_DB_NAME=layerleak
+export LAYERLEAK_DB_USER=layerleak
+export LAYERLEAK_DB_PASSWORD=replace-me
+export LAYERLEAK_API_PORT=8080
+```
+
+Run migrations once before starting the API:
+
+```bash
+docker compose --profile manual run --rm migrate
+```
+
+Start the API service:
+
+```bash
+docker compose up -d api
+```
+
+In Dockge or Komodo, import the same Compose file and run the `migrate` service once before enabling the long-running `api` service.
 
 ## Support this project
 

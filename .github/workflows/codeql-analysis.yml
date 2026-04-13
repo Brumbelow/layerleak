@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  security-events: read
+  security-events: write
 jobs:
   analyze:
     name: Analyze

@@ -1,11 +1,15 @@
 name: "CodeQL"
 
 on:
+  push:
+    branches: [ "main", "Default" ]
   pull_request:
-  schedule:
-    # run weekly new vulnerability was added to the database
-    - cron: '0 0 * * 0'
+    # The branches below must be a subset of the branches above
+    branches: [ "main" ]
 
+
+permissions:
+  contents: read
 jobs:
   analyze:
     name: Analyze

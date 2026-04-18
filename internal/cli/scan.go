@@ -21,7 +21,7 @@ func newScanCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
-		Short: "Scan a public Docker Hub image reference",
+		Short: "Scan a public OCI image reference from any supported registry",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()

@@ -82,8 +82,8 @@ func Load() (Config, error) {
 	return Config{
 		LogLevel:                envOrDefault("LAYERLEAK_LOG_LEVEL", "info"),
 		APIAddr:                 envOrDefault("LAYERLEAK_API_ADDR", "127.0.0.1:8080"),
-		RegistryBaseURL:         envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", "https://registry-1.docker.io"),
-		RegistryAuthURL:         envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", "https://auth.docker.io/token"),
+		RegistryBaseURL:         envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", ""),
+		RegistryAuthURL:         envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", ""),
 		HTTPTimeout:             timeout,
 		PersistRawSecrets:       persistRawSecrets,
 		MaxFileBytes:            maxFileBytes,

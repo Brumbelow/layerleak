@@ -62,6 +62,16 @@ type bearerChallenge struct {
 	Scope   string
 }
 
+// BaseURLForRegistry returns the HTTPS base URL for a parsed registry host.
+// Docker Hub canonicalizes to registry-1.docker.io; any other host passes through as https://{host}.
+func BaseURLForRegistry(registry string) string {
+	value := strings.TrimSpace(registry)
+	if value == "" || value == manifest.DockerHubRegistry {
+		return "https://registry-1.docker.io"
+	}
+	return "https://" + value
+}
+
 func NewClient(options Options) *Client {
 	baseURL, _ := url.Parse(defaultString(options.BaseURL, "https://registry-1.docker.io"))
 	authURL, _ := url.Parse(defaultString(options.AuthURL, "https://auth.docker.io/token"))

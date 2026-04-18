@@ -441,6 +441,79 @@ func TestFetchManifestFailsWhenManifestBodyExceedsLimit(t *testing.T) {
 	}
 }
 
+func TestBaseURLForRegistry(t *testing.T) {
+	tests := []struct {
+		name     string
+		registry string
+		want     string
+	}{
+		{name: "empty defaults to docker hub", registry: "", want: "https://registry-1.docker.io"},
+		{name: "docker.io canonicalizes", registry: "docker.io", want: "https://registry-1.docker.io"},
+		{name: "ghcr.io", registry: "ghcr.io", want: "https://ghcr.io"},
+		{name: "quay.io", registry: "quay.io", want: "https://quay.io"},
+		{name: "gcr.io", registry: "gcr.io", want: "https://gcr.io"},
+		{name: "public.ecr.aws", registry: "public.ecr.aws", want: "https://public.ecr.aws"},
+		{name: "mcr.microsoft.com", registry: "mcr.microsoft.com", want: "https://mcr.microsoft.com"},
+		{name: "localhost with port", registry: "localhost:5000", want: "https://localhost:5000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BaseURLForRegistry(tt.registry); got != tt.want {
+				t.Fatalf("BaseURLForRegistry(%q) = %q, want %q", tt.registry, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFetchManifestDiscoversAuthRealmForNonDockerHubRegistry(t *testing.T) {
+	tokenRequests := 0
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "ghcr.test" && request.URL.Path == "/token" {
+			tokenRequests++
+			if got := request.URL.Query().Get("service"); got != "ghcr.io" {
+				t.Fatalf("token request service = %q", got)
+			}
+			if got := request.URL.Query().Get("scope"); got != "repository:org/image:pull" {
+				t.Fatalf("token request scope = %q", got)
+			}
+			body, _ := json.Marshal(map[string]string{"token": "ghcr-token"})
+			return jsonResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.Header.Get("Authorization") != "Bearer ghcr-token" {
+			return jsonResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://ghcr.test/token",service="ghcr.io",scope="repository:org/image:pull"`,
+			}), nil
+		}
+
+		if request.URL.Path == "/v2/org/image/manifests/latest" {
+			return jsonResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"sha256:config","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": "sha256:manifest",
+			}), nil
+		}
+		return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+	})
+
+	client := NewClient(Options{
+		BaseURL: "https://ghcr.test",
+		HTTPClient: &http.Client{
+			Transport: transport,
+		},
+	})
+
+	response, err := client.FetchManifest(context.Background(), "org/image", "latest")
+	if err != nil {
+		t.Fatalf("FetchManifest() error = %v", err)
+	}
+	if response.Digest != "sha256:manifest" {
+		t.Fatalf("response.Digest = %q", response.Digest)
+	}
+	if tokenRequests == 0 {
+		t.Fatal("expected token endpoint on ghcr.test to be called")
+	}
+}
+
 type roundTripFunc func(request *http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

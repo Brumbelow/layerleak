@@ -1,8 +1,8 @@
-# layerleak the Docker Hub Secret Scanner
+# layerleak the OCI Image Secret Scanner
 
 Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 
-- Docker Hub / OCI image secret scanner that analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
+- OCI image secret scanner that works against any public OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted). It analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
 - Traditional secret scanners often treat a container image as a flat blob or depend on a local Docker daemon. This project is designed around OCI image internals
 
 ## Docs Page
@@ -10,7 +10,7 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 
 ## Current Capabilities:
 
-- Public Docker Hub images only
+- Public images from any OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted)
 - Read-only scanning
 - No secret verification
 - No Docker daemon dependency required
@@ -90,9 +90,10 @@ export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerl
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
 Saved findings files contain only detections and are redacted by default.
 Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding values and raw context snippets written to disk and Postgres.
-`LAYERLEAK_TAG_PAGE_SIZE` controls Docker Hub tag-list pagination for repository-wide scans.
+`LAYERLEAK_TAG_PAGE_SIZE` controls registry tag-list pagination for repository-wide scans.
 `LAYERLEAK_MAX_LAYER_BYTES` defaults to `536870912` (512 MiB) of decompressed layer stream data per layer, and `LAYERLEAK_MAX_LAYER_ENTRIES` defaults to `50000` tar entries per layer.
-`LAYERLEAK_MAX_TAG_RESPONSE_BYTES` defaults to `8388608` (8 MiB) per Docker Hub tag-list response page.
+`LAYERLEAK_MAX_TAG_RESPONSE_BYTES` defaults to `8388608` (8 MiB) per registry tag-list response page.
+`LAYERLEAK_REGISTRY_BASE_URL` and `LAYERLEAK_REGISTRY_AUTH_URL` are optional overrides. Leave them unset for normal use — layerleak derives the registry base URL from each image reference and discovers the auth realm from the registry's `Www-Authenticate` challenge. Set them only to force scans through a proxy or alternate endpoint.
 `LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_TAG_RESPONSE_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
@@ -170,13 +171,18 @@ layerleak scan --help
 ![help_output](https://github.com/user-attachments/assets/dbd87faa-d3bb-4bfa-941a-643e6bbd48f6)
 
 
-Run a scan against a public Docker Hub image:
+Run a scan against a public OCI image on any supported registry:
 
 ```bash
 ./layerleak scan ubuntu
 ./layerleak scan library/nginx:latest --format json
 ./layerleak scan alpine:latest --platform linux/amd64
 ./layerleak scan mongo
+./layerleak scan ghcr.io/homebrew/core/hello:latest
+./layerleak scan quay.io/prometheus/busybox:latest
+./layerleak scan gcr.io/distroless/static:nonroot
+./layerleak scan public.ecr.aws/docker/library/alpine:3.20
+./layerleak scan mcr.microsoft.com/hello-world:latest
 ```
 ![cli pic](https://github.com/user-attachments/assets/9c24960e-4085-451d-a206-b92331d604ef)
 

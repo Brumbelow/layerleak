@@ -86,7 +86,7 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	result, scanErr := jobs.Scan(ctx, jobs.Request{
 		Reference:            request.Reference,
 		Platform:             request.Platform,
-		Registry:             s.registryClient(),
+		Registry:             s.registryClient(request.Reference),
 		Detectors:            s.detectors,
 		Logger:               request.Logger,
 		MaxFileBytes:         s.config.MaxFileBytes,
@@ -124,13 +124,18 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	return outcome, wrapScanError(scanErr)
 }
 
-func (s *Service) registryClient() *registry.Client {
+func (s *Service) registryClient(ref manifest.Reference) *registry.Client {
 	if s.newRegistryClient != nil {
 		return s.newRegistryClient()
 	}
 
+	baseURL := s.config.RegistryBaseURL
+	if baseURL == "" {
+		baseURL = registry.BaseURLForRegistry(ref.Registry)
+	}
+
 	return registry.NewClient(registry.Options{
-		BaseURL:             s.config.RegistryBaseURL,
+		BaseURL:             baseURL,
 		AuthURL:             s.config.RegistryAuthURL,
 		MaxTagResponseBytes: s.config.MaxTagResponseBytes,
 		HTTPClient: &http.Client{

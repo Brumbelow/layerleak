@@ -37,23 +37,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
       - name: Run Codacy Analysis CLI
         uses: codacy/codacy-analysis-cli-action@d840f886c4bd4edc059706d09c6a1586111c540b
         with:
-         project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-         verbose: true
-         output: results.sarif
-         format: sarif
-         gh-code-scanning-compat: true
-         max-allowed-issues: 2147483647
-    # Add this to disable problematic tools
-         tools: "staticanalysis"  # Only run static analysis, exclude trivy/checkov
+          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          verbose: true
+          output: results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}.sarif
+          format: sarif
+          gh-code-scanning-compat: true
+          max-allowed-issues: 2147483647
 
       - name: Upload SARIF results file
         uses: github/codeql-action/upload-sarif@v4
-        if: hashFiles('results.sarif') != ''
+        if: hashFiles(format('results-{0}-{1}-{2}.sarif', github.run_id, github.run_attempt, matrix.os)) != ''
         with:
-         sarif_file: results.sarif
-         wait-for-processing: true
-         category: "Codacy"  # Explicitly set category to avoid duplicates
+          sarif_file: results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}.sarif
+          category: codacy-${{ matrix.os }}
+          wait-for-processing: true

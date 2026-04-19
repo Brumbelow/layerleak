@@ -46,6 +46,73 @@ func TestParseReference(t *testing.T) {
 				TagExplicit: true,
 			},
 		},
+		{
+			name:  "ghcr.io with namespace and tag",
+			input: "ghcr.io/homebrew/core/hello:latest",
+			want: Reference{
+				Registry:    "ghcr.io",
+				Repository:  "homebrew/core/hello",
+				Tag:         "latest",
+				TagExplicit: true,
+			},
+		},
+		{
+			name:  "quay.io with tag",
+			input: "quay.io/prometheus/busybox:latest",
+			want: Reference{
+				Registry:    "quay.io",
+				Repository:  "prometheus/busybox",
+				Tag:         "latest",
+				TagExplicit: true,
+			},
+		},
+		{
+			name:  "gcr.io distroless",
+			input: "gcr.io/distroless/static:nonroot",
+			want: Reference{
+				Registry:    "gcr.io",
+				Repository:  "distroless/static",
+				Tag:         "nonroot",
+				TagExplicit: true,
+			},
+		},
+		{
+			name:  "public.ecr.aws with deep path",
+			input: "public.ecr.aws/docker/library/alpine:3.20",
+			want: Reference{
+				Registry:    "public.ecr.aws",
+				Repository:  "docker/library/alpine",
+				Tag:         "3.20",
+				TagExplicit: true,
+			},
+		},
+		{
+			name:  "mcr.microsoft.com single segment repo does not get library prefix",
+			input: "mcr.microsoft.com/hello-world",
+			want: Reference{
+				Registry:   "mcr.microsoft.com",
+				Repository: "hello-world",
+			},
+		},
+		{
+			name:  "ghcr.io with digest",
+			input: "ghcr.io/org/sub/path/image@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			want: Reference{
+				Registry:   "ghcr.io",
+				Repository: "org/sub/path/image",
+				Digest:     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			},
+		},
+		{
+			name:  "localhost registry with port",
+			input: "localhost:5000/foo:dev",
+			want: Reference{
+				Registry:    "localhost:5000",
+				Repository:  "foo",
+				Tag:         "dev",
+				TagExplicit: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -74,8 +141,8 @@ func TestParseReference(t *testing.T) {
 	}
 }
 
-func TestParseReferenceRejectsNonDockerHub(t *testing.T) {
-	if _, err := ParseReference("ghcr.io/example/app:latest"); err == nil {
+func TestParseReferenceRejectsRegistryWithoutRepository(t *testing.T) {
+	if _, err := ParseReference("ghcr.io/"); err == nil {
 		t.Fatal("ParseReference() error = nil")
 	}
 }

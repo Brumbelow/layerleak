@@ -57,9 +57,6 @@ func ParseReference(raw string) (Reference, error) {
 
 	if isRegistrySegment(segments[0]) {
 		registry = normalizeRegistry(segments[0])
-		if !isDockerHubRegistry(registry) {
-			return Reference{}, fmt.Errorf("only public Docker Hub references are supported: %s", segments[0])
-		}
 		repositorySegments = segments[1:]
 	}
 
@@ -67,7 +64,7 @@ func ParseReference(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("repository is required")
 	}
 
-	if len(repositorySegments) == 1 {
+	if registry == DockerHubRegistry && len(repositorySegments) == 1 {
 		repositorySegments = []string{"library", repositorySegments[0]}
 	}
 
@@ -165,8 +162,4 @@ func normalizeRegistry(value string) string {
 	default:
 		return strings.ToLower(value)
 	}
-}
-
-func isDockerHubRegistry(value string) bool {
-	return value == DockerHubRegistry
 }

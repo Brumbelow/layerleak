@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This project is a Docker Hub / OCI image secret scanner.
+This project is an OCI image secret scanner for public images on any OCI-compliant registry.
 
 Contributions should keep the scanner:
 

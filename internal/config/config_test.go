@@ -37,11 +37,11 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("cfg.APIAddr = %q", cfg.APIAddr)
 	}
 
-	if cfg.RegistryBaseURL != "https://registry-1.docker.io" {
+	if cfg.RegistryBaseURL != "" {
 		t.Fatalf("cfg.RegistryBaseURL = %q", cfg.RegistryBaseURL)
 	}
 
-	if cfg.RegistryAuthURL != "https://auth.docker.io/token" {
+	if cfg.RegistryAuthURL != "" {
 		t.Fatalf("cfg.RegistryAuthURL = %q", cfg.RegistryAuthURL)
 	}
 

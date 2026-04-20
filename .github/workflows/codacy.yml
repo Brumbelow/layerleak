@@ -15,9 +15,8 @@ name: Codacy Security Scan
 
 on:
   push:
-    branches: [ "main", "Default" ]
+    branches: [ "main" ]
   pull_request:
-    # The branches below must be a subset of the branches above
     branches: [ "main" ]
 
 
@@ -42,15 +41,41 @@ jobs:
         with:
           project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
           verbose: true
-          output: results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}.sarif
+          output: results.sarif
           format: sarif
           gh-code-scanning-compat: true
           max-allowed-issues: 2147483647
 
+      # Post-process SARIF so each of Codacy's per-tool runs gets a unique
+      # automationDetails.id — required since github/codeql-action@v4 enforces
+      # "one run per category" (GitHub Code Scanning policy, 2025-07-21).
+      # See https://github.com/codacy/codacy-analysis-cli-action/issues/142
+      - name: Combine SARIF runs by tool name
+        if: hashFiles('results.sarif') != ''
+        run: |
+          jq '.runs |= (
+            group_by(.tool.driver.name) |
+            map(
+              . as $group |
+              .[0] as $first |
+              $first + {
+                "automationDetails": (($first.automationDetails // {}) + { "id": ("Codacy/" + $first.tool.driver.name) }),
+                "results": ([$group[].results[]] | unique),
+                "artifacts": ([$group[].artifacts // [] | .[]] | unique),
+                "invocations": [
+                  (
+                    reduce $group[].invocations[] as $item ({}; . + $item) |
+                    . + { "executionSuccessful": ([$group[].invocations[].executionSuccessful] | all) }
+                  )
+                ]
+              }
+            )
+          )' results.sarif > results-combined.sarif
+
       - name: Upload SARIF results file
         uses: github/codeql-action/upload-sarif@v4
-        if: hashFiles(format('results-{0}-{1}-{2}.sarif', github.run_id, github.run_attempt, matrix.os)) != ''
+        if: hashFiles('results-combined.sarif') != ''
         with:
-          sarif_file: results-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}.sarif
-          category: codacy-${{ matrix.os }}
+          sarif_file: results-combined.sarif
+          category: Codacy
           wait-for-processing: true

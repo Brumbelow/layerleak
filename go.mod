@@ -15,7 +15,7 @@ require (
 	cloud.google.com/go/iam v1.8.0 // indirect
 	cloud.google.com/go/secretmanager v1.18.0 // indirect
 	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/Azure/go-ntlmssp v0.1.0 // indirect
+	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/BobuSumisu/aho-corasick v1.0.3 // indirect
 	github.com/TheZeroSlave/zapsentry v1.23.0 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.5 // indirect

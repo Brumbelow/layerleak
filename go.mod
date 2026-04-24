@@ -71,7 +71,6 @@ require (
 	github.com/lestrrat-go/httprc/v3 v3.0.5 // indirect
 	github.com/lestrrat-go/jwx/v3 v3.0.13 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
-	github.com/mariduv/ldap-verify v0.0.2 // indirect
 	github.com/marusama/semaphore/v2 v2.5.0 // indirect
 	github.com/microsoft/go-mssqldb v1.9.8 // indirect
 	github.com/montanaflynn/stats v0.9.0 // indirect
@@ -119,7 +118,7 @@ require (
 
 require (
 	github.com/klauspost/compress v1.18.5
-	github.com/trufflesecurity/trufflehog/v3 v3.94.3
+	github.com/trufflesecurity/trufflehog/v3 v3.95.2
 )
 
 require (
@@ -127,6 +126,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
+	github.com/trufflesecurity/ldap-verify v0.0.0-20260401205135-1cad02b26426 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 )

@@ -25,7 +25,7 @@ The published site is built from `web/` on `main` by `.github/workflows/pages.ym
 
 Prerequisites:
 
-- Go 1.24+
+- Go 1.25.7+
 
 Install with Go:
 
@@ -91,13 +91,13 @@ export LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
 export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable
 ```
 
-If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
+If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the nearest parent directory containing `go.mod` (typically the repo root). If no repo root can be discovered, it falls back to the current working directory.
 Saved findings files contain only detections and are redacted by default.
 Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding values and raw context snippets written to disk and Postgres.
 `LAYERLEAK_TAG_PAGE_SIZE` controls registry tag-list pagination for repository-wide scans.
 `LAYERLEAK_MAX_LAYER_BYTES` defaults to `536870912` (512 MiB) of decompressed layer stream data per layer, and `LAYERLEAK_MAX_LAYER_ENTRIES` defaults to `50000` tar entries per layer.
 `LAYERLEAK_MAX_TAG_RESPONSE_BYTES` defaults to `8388608` (8 MiB) per registry tag-list response page.
-`LAYERLEAK_REGISTRY_BASE_URL` and `LAYERLEAK_REGISTRY_AUTH_URL` are optional overrides. Leave them unset for normal use — layerleak derives the registry base URL from each image reference and discovers the auth realm from the registry's `Www-Authenticate` challenge. Set them only to force scans through a proxy or alternate endpoint.
+`LAYERLEAK_REGISTRY_BASE_URL` and `LAYERLEAK_REGISTRY_AUTH_URL` are optional overrides. Leave them unset for normal use — layerleak derives the registry base URL from each image reference and discovers the auth realm from the registry's `WWW-Authenticate` challenge. Set them only to force scans through a proxy or alternate endpoint.
 `LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_TAG_RESPONSE_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
@@ -194,7 +194,7 @@ Run a scan against a public OCI image on any supported registry:
 
 
 Every scan writes a JSON findings file to the findings output directory.
-If `LAYERLEAK_FINDINGS_DIR` is not set, the default output directory is `findings/` under the repo root.
+If `LAYERLEAK_FINDINGS_DIR` is not set, the default output directory is `findings/` under the nearest parent directory containing `go.mod` (typically the repo root), with a fallback to the current working directory when no repo root is found.
 
 Those saved findings files contain finding records with `redacted_value`, redacted `context_snippet`, exact source location, disposition metadata, and line number for each finding.
 If `LAYERLEAK_PERSIST_RAW_SECRETS=1`, the saved findings files also include raw `value` and `raw_context_snippet`.

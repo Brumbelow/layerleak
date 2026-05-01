@@ -75,8 +75,8 @@ type Store interface {
 
 type ReadStore interface {
 	ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error)
-	ListRepositoryScans(ctx context.Context, repository string, limit, offset int) ([]ScanRunSummary, error)
-	ListRepositoryFindings(ctx context.Context, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error)
+	ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int) ([]ScanRunSummary, error)
+	ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error)
 	GetScanRun(ctx context.Context, id int64) (ScanRunDetail, error)
 	GetFinding(ctx context.Context, id int64) (FindingDetail, error)
 }
@@ -129,6 +129,12 @@ type ScanRunDetail struct {
 
 type FindingDispositionFilter string
 
+// FindingDispositionFilter values are the user-facing filter names exposed by
+// the HTTP API. Note that "suppressed" maps to occurrences whose stored
+// disposition is the literal string "example" (DispositionExample); the two
+// names are intentionally aligned: the API speaks in terms of "actionable" vs
+// "suppressed", while persistence speaks in terms of "actionable" vs "example"
+// to preserve schema compatibility.
 const (
 	FindingDispositionAll        FindingDispositionFilter = "all"
 	FindingDispositionActionable FindingDispositionFilter = "actionable"

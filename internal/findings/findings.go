@@ -27,8 +27,16 @@ const (
 	SourceTypeHistory          SourceType = "history"
 	SourceTypeConfig           SourceType = "config"
 
+	// DispositionActionable marks findings that count toward total_findings and
+	// drive the non-zero scan exit status.
 	DispositionActionable Disposition = "actionable"
-	DispositionExample    Disposition = "example"
+	// DispositionExample marks placeholder/test/demo detections that are
+	// emitted as suppressed findings. The HTTP API exposes these through the
+	// `?disposition=suppressed` filter and the `suppressed_findings` JSON
+	// payload; the on-disk and DB value remains the literal string "example"
+	// to preserve schema compatibility with existing scan_runs and
+	// finding_occurrences rows.
+	DispositionExample Disposition = "example"
 
 	DispositionReasonNone              DispositionReason = ""
 	DispositionReasonTestPath          DispositionReason = "test_path"

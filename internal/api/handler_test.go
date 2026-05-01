@@ -217,6 +217,44 @@ func TestHandleListRepositoryScansUsesPagination(t *testing.T) {
 	}
 }
 
+func TestHandleListRepositoryScansForwardsRegistryQuery(t *testing.T) {
+	store := &stubReadStore{}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/brumbelow/layerleak/scans?registry=ghcr.io", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, store).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.registry != "ghcr.io" {
+		t.Fatalf("store.registry = %q", store.registry)
+	}
+	if store.repository != "brumbelow/layerleak" {
+		t.Fatalf("store.repository = %q", store.repository)
+	}
+}
+
+func TestHandleListRepositoryFindingsForwardsRegistryQuery(t *testing.T) {
+	store := &stubReadStore{}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/prometheus/busybox/findings?registry=quay.io", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, store).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.registry != "quay.io" {
+		t.Fatalf("store.registry = %q", store.registry)
+	}
+	if store.repository != "prometheus/busybox" {
+		t.Fatalf("store.repository = %q", store.repository)
+	}
+}
+
 func TestHandleGetScanReturnsDetail(t *testing.T) {
 	store := &stubReadStore{
 		scanDetail: storage.ScanRunDetail{
@@ -343,6 +381,7 @@ type stubReadStore struct {
 
 	limit       int
 	offset      int
+	registry    string
 	repository  string
 	disposition storage.FindingDispositionFilter
 	scanID      int64
@@ -355,7 +394,8 @@ func (s *stubReadStore) ListRepositories(_ context.Context, limit, offset int) (
 	return s.repositories, nil
 }
 
-func (s *stubReadStore) ListRepositoryFindings(_ context.Context, repository string, disposition storage.FindingDispositionFilter, limit, offset int) ([]storage.FindingSummary, error) {
+func (s *stubReadStore) ListRepositoryFindings(_ context.Context, registry, repository string, disposition storage.FindingDispositionFilter, limit, offset int) ([]storage.FindingSummary, error) {
+	s.registry = registry
 	s.repository = repository
 	s.disposition = disposition
 	s.limit = limit
@@ -363,7 +403,8 @@ func (s *stubReadStore) ListRepositoryFindings(_ context.Context, repository str
 	return s.findings, nil
 }
 
-func (s *stubReadStore) ListRepositoryScans(_ context.Context, repository string, limit, offset int) ([]storage.ScanRunSummary, error) {
+func (s *stubReadStore) ListRepositoryScans(_ context.Context, registry, repository string, limit, offset int) ([]storage.ScanRunSummary, error) {
+	s.registry = registry
 	s.repository = repository
 	s.limit = limit
 	s.offset = offset

@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "command": "layerleak scan vulnerableHost:latest --platform linux/amd64",
+  "run_result": {
+    "requested_reference": "vulnerableHost:latest",
+    "repository": "library/vulnerableHost",
+    "resolved_reference": "docker.io/library/vulnerableHost@sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+    "requested_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+    "platform": "linux/amd64",
+    "total_findings": 6,
+    "unique_fingerprints": 6,
+    "suppressed_example_findings": 1,
+    "output_file": "findings/20260328T182355Z-vulnerableHost.json",
+    "runtime": "6.4s"
+  },
+  "stats": [
+    {
+      "label": "Repository",
+      "value": "library/vulnerableHost"
+    },
+    {
+      "label": "Platform",
+      "value": "linux/amd64"
+    },
+    {
+      "label": "Actionable findings",
+      "value": "6"
+    },
+    {
+      "label": "Output file",
+      "value": "findings/20260328T182355Z-vulnerableHost.json"
+    }
+  ],
+  "frames": [
+    {
+      "delay_ms": 750,
+      "status": "starting scan",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       waiting for tag enumeration\nTargets:    waiting for target selection\nPhase:      Starting\nStatus:     Preparing scan\nProgress:   [--------------------------------] 0/1\nFindings:   0 detected\nCurrent:    waiting"
+    },
+    {
+      "delay_ms": 900,
+      "status": "listing repository tags",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       0/1 complete\nTargets:    waiting for target selection\nPhase:      Listing Tags\nStatus:     Listing repository tags\nProgress:   [--------------------------------] 0/1\nFindings:   0 detected\nCurrent:    waiting"
+    },
+    {
+      "delay_ms": 950,
+      "status": "resolving latest to a digest",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    0/1 complete\nPhase:      Resolving Tags\nStatus:     Resolving tag digest\nProgress:   [############--------------------] 0/1\nFindings:   0 detected\nCurrent:    latest"
+    },
+    {
+      "delay_ms": 1100,
+      "status": "scanning linux/amd64 manifest",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    0/1 complete\nPhase:      Scanning\nStatus:     Scanning linux/amd64 manifest [sha256:8dbedc1c4a77...]\nProgress:   [####################------------] 0/1\nFindings:   2 detected\nCurrent:    latest linux/amd64 [sha256:8dbedc1c4a77...]"
+    },
+    {
+      "delay_ms": 1000,
+      "status": "finishing manifest analysis",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    1/1 complete\nPhase:      Target Complete\nStatus:     Scan complete\nProgress:   [################################] 1/1\nFindings:   6 detected\nCurrent:    latest linux/amd64 [sha256:8dbedc1c4a77...]"
+    },
+    {
+      "delay_ms": 950,
+      "status": "writing findings file and local database rows",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    1/1 complete\nPhase:      Saved\nStatus:     Saved results to findings/20260328T182355Z-vulnerableHost.json\nProgress:   [################################] 1/1\nFindings:   6 detected\nCurrent:    latest linux/amd64 [sha256:8dbedc1c4a77...]\n\nSaved: findings/20260328T182355Z-vulnerableHost.json"
+    },
+    {
+      "delay_ms": 1200,
+      "status": "showing final summary",
+      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRequested Reference:           vulnerableHost:latest\nRepository:                    library/vulnerableHost\nResolved Reference:            docker.io/library/vulnerableHost@sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf\nRequested Digest:              sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf\nTargets Selected:              1\nTargets Completed:             1\nTargets Failed:                0\nManifests Selected:            1\nManifests Completed:           1\nManifests Failed:              0\nTotal Findings:                6\nUnique Fingerprints:           6\nSuppressed Example Findings:   1\n\nPlatform             Manifest Digest                                                     Findings  Status\nlinux/amd64          sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401...  6         ok\n\nSaved: findings/20260328T182355Z-vulnerableHost.json"
+    }
+  ],
+  "table_order": [
+    "repositories",
+    "tags",
+    "manifests",
+    "findings",
+    "finding_occurrences"
+  ],
+  "tables": {
+    "repositories": {
+      "description": "Repository row touched by the replayed scan",
+      "columns": [
+        "id",
+        "registry",
+        "repository",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "id": 41,
+          "registry": "docker.io",
+          "repository": "library/vulnerableHost",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        }
+      ]
+    },
+    "tags": {
+      "description": "Tag mapping written for the latest linux/amd64 run",
+      "columns": [
+        "repository_id",
+        "tag",
+        "manifest_digest",
+        "root_digest",
+        "platform_os",
+        "platform_architecture",
+        "platform_variant",
+        "status",
+        "error",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "repository_id": 41,
+          "tag": "latest",
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "root_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "status": "scanned",
+          "error": "",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        }
+      ]
+    },
+    "manifests": {
+      "description": "Manifest row and last scan status for the replayed target",
+      "columns": [
+        "digest",
+        "platform_os",
+        "platform_architecture",
+        "platform_variant",
+        "first_seen_at",
+        "last_seen_at",
+        "last_scan_status",
+        "last_scan_error"
+      ],
+      "rows": [
+        {
+          "digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z",
+          "last_scan_status": "scanned",
+          "last_scan_error": ""
+        }
+      ]
+    },
+    "findings": {
+      "description": "Fake findings rows as they would look in a local Postgres-backed run",
+      "columns": [
+        "id",
+        "manifest_digest",
+        "fingerprint",
+        "redacted_value",
+        "value",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "id": 201,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "redacted_value": "ghp********************************9K",
+          "value": "ghp_demo_q7M2n4X6p8R1s3T5v7W9y2Z4c6E8g0H9Jk",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 202,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "redacted_value": "AKI***************78",
+          "value": "AKIADEMOONLY12345678",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 203,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "redacted_value": "SG.*******************************ure",
+          "value": "SG.demoMailboxKey.demoSyntheticSignature",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 204,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
+          "redacted_value": "htt*******************************************************************it",
+          "value": "https://ops-bot:demoOnlyPassword987@registry.demo.internal/release.git",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 205,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+          "redacted_value": "htt************************************************************************321",
+          "value": "https://hooks.slack.com/services/TDEMO1234/BDEMO5678/demoWebhookToken987654321",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 206,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
+          "redacted_value": "AIza*****************************mn",
+          "value": "AIzaDEMOFAKE1234567890abcDEFghiJKlmn",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 207,
+          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
+          "fingerprint": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+          "redacted_value": "npm********************************56",
+          "value": "npm_demo_abcdefghijklmnopqrstuvwxyz123456",
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        }
+      ]
+    },
+    "finding_occurrences": {
+      "description": "Occurrence-level provenance, including one suppressed example row",
+      "columns": [
+        "id",
+        "finding_id",
+        "detector_name",
+        "confidence",
+        "disposition",
+        "disposition_reason",
+        "source_type",
+        "platform_os",
+        "platform_architecture",
+        "platform_variant",
+        "file_path",
+        "layer_digest",
+        "source_key",
+        "line_number",
+        "context_snippet",
+        "raw_snippet",
+        "source_location",
+        "match_start",
+        "match_end",
+        "present_in_final_image",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "id": 301,
+          "finding_id": 201,
+          "detector_name": "github_token",
+          "confidence": "high",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "source_type": "env",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "",
+          "layer_digest": "",
+          "source_key": "GH_TOKEN",
+          "line_number": 1,
+          "context_snippet": "GH_TOKEN=ghp********************************9K",
+          "raw_snippet": "GH_TOKEN=ghp_demo_q7M2n4X6p8R1s3T5v7W9y2Z4c6E8g0H9Jk",
+          "source_location": "env:GH_TOKEN",
+          "match_start": 9,
+          "match_end": 56,
+          "present_in_final_image": true,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 302,
+          "finding_id": 202,
+          "detector_name": "aws_access_key_id",
+          "confidence": "high",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "source_type": "file_final",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "/root/.aws/credentials",
+          "layer_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "source_key": "aws_access_key_id",
+          "line_number": 3,
+          "context_snippet": "aws_access_key_id = AKI***************78",
+          "raw_snippet": "aws_access_key_id = AKIADEMOONLY12345678",
+          "source_location": "file:/root/.aws/credentials",
+          "match_start": 22,
+          "match_end": 42,
+          "present_in_final_image": true,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 303,
+          "finding_id": 203,
+          "detector_name": "sendgrid_api_key",
+          "confidence": "high",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "source_type": "file_deleted_layer",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "/srv/app/.env.bak",
+          "layer_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_key": "",
+          "line_number": 11,
+          "context_snippet": "SENDGRID_API_KEY=SG.*******************************ure",
+          "raw_snippet": "SENDGRID_API_KEY=SG.demoMailboxKey.demoSyntheticSignature",
+          "source_location": "file:/srv/app/.env.bak",
+          "match_start": 18,
+          "match_end": 58,
+          "present_in_final_image": false,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 304,
+          "finding_id": 204,
+          "detector_name": "basic_auth_url",
+          "confidence": "high",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "source_type": "history",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "",
+          "layer_digest": "",
+          "source_key": "created_by",
+          "line_number": 1,
+          "context_snippet": "RUN git clone htt*******************************************************************it",
+          "raw_snippet": "RUN git clone https://ops-bot:demoOnlyPassword987@registry.demo.internal/release.git /src",
+          "source_location": "history:created_by",
+          "match_start": 14,
+          "match_end": 84,
+          "present_in_final_image": true,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 305,
+          "finding_id": 205,
+          "detector_name": "slack_webhook",
+          "confidence": "high",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "source_type": "label",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "",
+          "layer_digest": "",
+          "source_key": "com.demo.slack-hook",
+          "line_number": 1,
+          "context_snippet": "com.demo.slack-hook=htt************************************************************************321",
+          "raw_snippet": "com.demo.slack-hook=https://hooks.slack.com/services/TDEMO1234/BDEMO5678/demoWebhookToken987654321",
+          "source_location": "label:com.demo.slack-hook",
+          "match_start": 21,
+          "match_end": 105,
+          "present_in_final_image": true,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 306,
+          "finding_id": 206,
+          "detector_name": "google_api_key",
+          "confidence": "high",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "source_type": "config",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "",
+          "layer_digest": "",
+          "source_key": "WorkingDir",
+          "line_number": 1,
+          "context_snippet": "WorkingDir=/workspace?key=AIza*****************************mn",
+          "raw_snippet": "WorkingDir=/workspace?key=AIzaDEMOFAKE1234567890abcDEFghiJKlmn",
+          "source_location": "config:WorkingDir",
+          "match_start": 25,
+          "match_end": 63,
+          "present_in_final_image": true,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        },
+        {
+          "id": 307,
+          "finding_id": 207,
+          "detector_name": "npm_token",
+          "confidence": "high",
+          "disposition": "example",
+          "disposition_reason": "example_path",
+          "source_type": "file_final",
+          "platform_os": "linux",
+          "platform_architecture": "amd64",
+          "platform_variant": "",
+          "file_path": "/workspace/examples/demo.env",
+          "layer_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "source_key": "",
+          "line_number": 5,
+          "context_snippet": "NPM_TOKEN=npm********************************56",
+          "raw_snippet": "NPM_TOKEN=npm_demo_abcdefghijklmnopqrstuvwxyz123456",
+          "source_location": "file:/workspace/examples/demo.env",
+          "match_start": 10,
+          "match_end": 50,
+          "present_in_final_image": true,
+          "first_seen_at": "2026-03-28T18:23:55Z",
+          "last_seen_at": "2026-03-28T18:23:55Z"
+        }
+      ]
+    }
+  }
+}

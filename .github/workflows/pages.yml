@@ -1,0 +1,55 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+
+      - name: Validate repo
+        run: go test ./...
+
+      - name: Verify Pages artifact
+        run: |
+          test -f web/index.html
+          test -f web/docs/index.html
+          test -f web/docs/demo/index.html
+          test -f web/demo/index.html
+          test -f web/assets/styles.css
+          test -f web/assets/site.js
+          test -f web/assets/demo.js
+          test -f web/assets/demo-data.json
+          test -f web/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

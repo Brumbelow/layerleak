@@ -9,7 +9,18 @@ import (
 	"github.com/brumbelow/layerleak/internal/jobs"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/scanner"
+	"github.com/brumbelow/layerleak/internal/scanservice"
+	"github.com/brumbelow/layerleak/internal/storage"
 )
+
+func buildScanRecord(t *testing.T, reference manifest.Reference, result jobs.Result, scannedAt time.Time) storage.ScanRecord {
+	t.Helper()
+	record, err := scanservice.BuildScanRecord(reference, result, scannedAt, nil)
+	if err != nil {
+		t.Fatalf("BuildScanRecord() error = %v", err)
+	}
+	return record
+}
 
 func TestNewStoreUsesNoopWithoutDatabaseURL(t *testing.T) {
 	store, err := newStore(config.Config{})
@@ -35,7 +46,7 @@ func TestBuildScanRecordMapsMultiArchTagToPlatformManifests(t *testing.T) {
 	amd64Digest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	arm64Digest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
-	record := buildScanRecord(manifest.Reference{
+	record := buildScanRecord(t, manifest.Reference{
 		Registry:    "docker.io",
 		Repository:  "library/app",
 		Original:    "library/app:latest",
@@ -97,7 +108,7 @@ func TestBuildScanRecordMapsRepositoryTagGroups(t *testing.T) {
 	digestOne := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	digestTwo := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 
-	record := buildScanRecord(manifest.Reference{
+	record := buildScanRecord(t, manifest.Reference{
 		Registry:   "docker.io",
 		Repository: "library/app",
 		Original:   "library/app",
@@ -151,7 +162,7 @@ func TestBuildScanRecordMapsRepositoryTagGroups(t *testing.T) {
 
 func TestBuildScanRecordCreatesFailedManifestForFailedTarget(t *testing.T) {
 	digest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	record := buildScanRecord(manifest.Reference{
+	record := buildScanRecord(t, manifest.Reference{
 		Registry:   "docker.io",
 		Repository: "library/app",
 		Original:   "library/app",
@@ -192,7 +203,7 @@ func TestBuildScanRecordCreatesFailedManifestForFailedTarget(t *testing.T) {
 }
 
 func TestBuildScanRecordPreservesDistinctSourceLocations(t *testing.T) {
-	record := buildScanRecord(manifest.Reference{
+	record := buildScanRecord(t, manifest.Reference{
 		Registry:   "docker.io",
 		Repository: "library/app",
 		Original:   "library/app:latest",

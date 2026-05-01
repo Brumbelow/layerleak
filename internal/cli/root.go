@@ -1,15 +1,21 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
 
 func Run() int {
-	if err := newRootCmd().Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		var coded interface {
 			ExitCode() int
 		}
@@ -29,7 +35,7 @@ func Run() int {
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "layerleak",
-		Short:         "Scan public Docker Hub images for likely secrets",
+		Short:         "Scan public OCI images for likely secrets",
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>layerleak Browser Demo</title>
+    <meta
+      name="description"
+      content="Redirecting to the layerleak browser demo under /docs/demo."
+    />
+    <meta http-equiv="refresh" content="0; url=../docs/demo/" />
+    <link rel="canonical" href="../docs/demo/" />
+    <script>
+      const nextPath = window.location.pathname.replace(/\/demo\/?$/, "/docs/demo/");
+      window.location.replace(window.location.origin + nextPath);
+    </script>
+  </head>
+  <body>
+    <main>
+      <p>
+        Redirecting to the simulated browser demo at
+        <a href="../docs/demo/">../docs/demo/</a>.
+      </p>
+    </main>
+  </body>
+</html>

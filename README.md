@@ -5,6 +5,11 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 - OCI image secret scanner that works against any public OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted). It analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
 - Traditional secret scanners often treat a container image as a flat blob or depend on a local Docker daemon. This project is designed around OCI image internals
 
+## Docs Page
+- https://brumbelow.github.io/layerleak/docs
+
+The published site is built from `web/` on `main` by `.github/workflows/pages.yml`. The docs source and the simulated browser demo both live under that directory.
+
 ## Current Capabilities:
 
 - Public images from any OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted)

@@ -21,7 +21,8 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
+          cache: true
 
       - name: Validate repo
         run: go test ./...

@@ -258,10 +258,12 @@ func (h *Handler) handleRepositorySubtree(writer http.ResponseWriter, request *h
 		return
 	}
 
+	path := strings.TrimSuffix(request.URL.Path, "/")
+
 	switch {
-	case strings.HasSuffix(request.URL.Path, "/findings"):
+	case strings.HasSuffix(path, "/findings"):
 		h.handleListRepositoryFindings(writer, request)
-	case strings.HasSuffix(request.URL.Path, "/scans"):
+	case strings.HasSuffix(path, "/scans"):
 		h.handleListRepositoryScans(writer, request)
 	default:
 		http.NotFound(writer, request)
@@ -285,7 +287,7 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry := strings.TrimSpace(request.URL.Query().Get("registry"))
 	items, err := h.store.ListRepositoryScans(request.Context(), registry, repository, limit, offset)
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
@@ -327,7 +329,7 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry := strings.TrimSpace(request.URL.Query().Get("registry"))
 	items, err := h.store.ListRepositoryFindings(request.Context(), registry, repository, disposition, limit, offset)
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
@@ -480,7 +482,8 @@ func repositoryPathValue(path, suffix string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	rawRepository := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	normalizedPath := strings.TrimSuffix(path, "/")
+	rawRepository := strings.TrimSuffix(strings.TrimPrefix(normalizedPath, prefix), suffix)
 	repository, err := url.PathUnescape(strings.Trim(rawRepository, "/"))
 	if err != nil {
 		return "", false, fmt.Errorf("repository path is invalid")

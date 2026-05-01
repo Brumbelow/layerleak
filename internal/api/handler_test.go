@@ -255,6 +255,43 @@ func TestHandleListRepositoryFindingsForwardsRegistryQuery(t *testing.T) {
 	}
 }
 
+func TestHandleListRepositoryScansAllowsTrailingSlash(t *testing.T) {
+	store := &stubReadStore{}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/library/app/scans/?registry=%20docker.io%20", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, store).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.registry != "docker.io" {
+		t.Fatalf("store.registry = %q", store.registry)
+	}
+	if store.repository != "library/app" {
+		t.Fatalf("store.repository = %q", store.repository)
+	}
+}
+
+func TestHandleListRepositoryFindingsAllowsTrailingSlash(t *testing.T) {
+	store := &stubReadStore{}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/prometheus/busybox/findings/?registry=%20quay.io%20", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, store).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if store.registry != "quay.io" {
+		t.Fatalf("store.registry = %q", store.registry)
+	}
+	if store.repository != "prometheus/busybox" {
+		t.Fatalf("store.repository = %q", store.repository)
+	}
+}
 func TestHandleGetScanReturnsDetail(t *testing.T) {
 	store := &stubReadStore{
 		scanDetail: storage.ScanRunDetail{

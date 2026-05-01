@@ -238,6 +238,11 @@ Current endpoints:
 - `GET /api/v1/repositories/{repository}/findings`
 - `GET /api/v1/findings/{id}`
 
+Notes:
+- `{repository}` is the repository path segment (for example `library/nginx`) and should be URL-encoded when called from raw HTTP clients.
+- If the same repository name exists on multiple registries, pass `?registry=<host>` (for example `registry=ghcr.io`) to scope scan and finding list responses.
+- Trailing slashes are accepted for the repository list endpoints (for example `/api/v1/repositories/library/nginx/scans/`).
+
 `POST /api/v1/scans` stays synchronous and now returns `scan_run_id` whenever Postgres persistence is enabled.
 API scan responses reuse the same redacted result schema as the CLI JSON output.
 `GET /api/v1/scans/{id}` returns the persisted run metadata plus the stored redacted result snapshot.

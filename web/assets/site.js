@@ -1,4 +1,4 @@
-(function () {
+(() => {
   const currentYear = document.querySelector("[data-current-year]");
   if (currentYear) {
     currentYear.textContent = new Date().getFullYear();
@@ -15,7 +15,9 @@
 
   const reveals = document.querySelectorAll("[data-reveal]");
   if (!("IntersectionObserver" in window)) {
-    reveals.forEach((element) => element.classList.add("is-visible"));
+    reveals.forEach((element) => {
+      element.classList.add("is-visible");
+    });
     return;
   }
 
@@ -31,5 +33,7 @@
     { threshold: 0.18 }
   );
 
-  reveals.forEach((element) => observer.observe(element));
+  reveals.forEach((element) => {
+    observer.observe(element);
+  });
 })();

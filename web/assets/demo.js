@@ -1,4 +1,4 @@
-(function () {
+(() => {
   const commandEl = document.getElementById("demo-command");
   const startButton = document.getElementById("demo-start");
   const replayButton = document.getElementById("demo-replay");
@@ -195,7 +195,7 @@
       return;
     }
 
-    tableMetaEl.textContent = table.description + " · " + table.rows.length + (table.rows.length === 1 ? " row" : " rows");
+    tableMetaEl.textContent = `${table.description} · ${table.rows.length}${table.rows.length === 1 ? " row" : " rows"}`;
 
     const tableEl = document.createElement("table");
     const thead = document.createElement("thead");
@@ -245,7 +245,9 @@
   }
 
   function clearTimers() {
-    state.timers.forEach((timer) => window.clearTimeout(timer));
+    state.timers.forEach((timer) => {
+      window.clearTimeout(timer);
+    });
     state.timers = [];
   }
 })();

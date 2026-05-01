@@ -5,9 +5,6 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 - OCI image secret scanner that works against any public OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted). It analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
 - Traditional secret scanners often treat a container image as a flat blob or depend on a local Docker daemon. This project is designed around OCI image internals
 
-## Docs Page
-- https://brumbelow.github.io/layerleak/docs
-
 ## Current Capabilities:
 
 - Public images from any OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted)
@@ -76,6 +73,8 @@ export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_API_ADDR=127.0.0.1:8080
 export LAYERLEAK_PERSIST_RAW_SECRETS=0
 export LAYERLEAK_TAG_PAGE_SIZE=100
+export LAYERLEAK_HTTP_TIMEOUT=30s
+export LAYERLEAK_MAX_FILE_BYTES=1048576
 export LAYERLEAK_MAX_LAYER_BYTES=536870912
 export LAYERLEAK_MAX_LAYER_ENTRIES=50000
 export LAYERLEAK_MAX_MANIFEST_BYTES=0
@@ -97,6 +96,8 @@ Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding va
 `LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_TAG_RESPONSE_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
 If enabled, those limits fail the scan with a clear error instead of silently truncating work.
 `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
+`LAYERLEAK_HTTP_TIMEOUT` is the per-request timeout applied to the HTTP client used for every registry call (manifest fetches, blob downloads, tag list pages, auth token requests). Accepts any Go duration value (`30s`, `2m`, `1h`); defaults to `30s`.
+`LAYERLEAK_MAX_FILE_BYTES` is the maximum decompressed bytes layerleak buffers per file inside a layer; files larger than this are classified as oversize and skipped. Defaults to `1048576` (1 MiB) and must be greater than zero.
 `LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080` in local binaries.
 The container image overrides this to `0.0.0.0:8080`.
 If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
@@ -236,6 +237,8 @@ Current endpoints:
 API scan responses reuse the same redacted result schema as the CLI JSON output.
 `GET /api/v1/scans/{id}` returns the persisted run metadata plus the stored redacted result snapshot.
 Repository and finding endpoints also stay redacted: they return `redacted_value` and redacted `context_snippet`, never raw secret values or raw snippets from Postgres.
+
+`GET /api/v1/repositories/{repository}/scans` and `GET /api/v1/repositories/{repository}/findings` accept an optional `registry` query parameter (for example `?registry=ghcr.io`). When omitted, the registry defaults to `docker.io` for backward compatibility. Use this to fetch scans of repositories on GHCR, Quay, GCR, MCR, Amazon ECR Public, or any self-hosted registry.
 
 The API does not include authentication.
 For org deployments, keep it on a private network and front it with your own authn/authz gateway or reverse proxy policy.

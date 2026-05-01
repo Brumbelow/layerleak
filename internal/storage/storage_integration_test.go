@@ -462,6 +462,10 @@ func TestPostgresStoreGetScanRunLoadsRedactedSnapshot(t *testing.T) {
 func openIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
 
+	if testing.Short() {
+		t.Skip("integration test skipped in -short mode")
+	}
+
 	db, err := sql.Open("postgres", integrationDatabaseURL(t))
 	if err != nil {
 		t.Fatalf("sql.Open() error = %v", err)

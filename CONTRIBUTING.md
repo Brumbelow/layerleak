@@ -31,6 +31,12 @@ Run the test suite:
 go test ./...
 ```
 
+For a fast local pass that skips Postgres integration coverage, run:
+
+```bash
+go test -short ./...
+```
+
 Run the scanner against a single tag:
 
 ```bash

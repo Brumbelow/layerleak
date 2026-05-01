@@ -91,7 +91,7 @@ export LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
 export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable
 ```
 
-If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the repo root.
+If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the nearest parent directory containing `go.mod` (typically the repo root). If no repo root can be discovered, it falls back to the current working directory.
 Saved findings files contain only detections and are redacted by default.
 Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding values and raw context snippets written to disk and Postgres.
 `LAYERLEAK_TAG_PAGE_SIZE` controls registry tag-list pagination for repository-wide scans.
@@ -194,7 +194,7 @@ Run a scan against a public OCI image on any supported registry:
 
 
 Every scan writes a JSON findings file to the findings output directory.
-If `LAYERLEAK_FINDINGS_DIR` is not set, the default output directory is `findings/` under the repo root.
+If `LAYERLEAK_FINDINGS_DIR` is not set, the default output directory is `findings/` under the nearest parent directory containing `go.mod` (typically the repo root), with a fallback to the current working directory when no repo root is found.
 
 Those saved findings files contain finding records with `redacted_value`, redacted `context_snippet`, exact source location, disposition metadata, and line number for each finding.
 If `LAYERLEAK_PERSIST_RAW_SECRETS=1`, the saved findings files also include raw `value` and `raw_context_snippet`.

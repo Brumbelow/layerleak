@@ -13,6 +13,19 @@ import (
 	"github.com/lib/pq"
 )
 
+func normalizeRegistryFilter(registry string) string {
+	value := strings.TrimSpace(registry)
+	if value == "" {
+		return manifest.DockerHubRegistry
+	}
+	switch strings.ToLower(value) {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return manifest.DockerHubRegistry
+	default:
+		return strings.ToLower(value)
+	}
+}
+
 func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
@@ -44,11 +57,12 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int)
 	return items, nil
 }
 
-func (s *PostgresStore) ListRepositoryScans(ctx context.Context, repository string, limit, offset int) ([]ScanRunSummary, error) {
+func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int) ([]ScanRunSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
 	}
 
+	registry = normalizeRegistryFilter(registry)
 	repository = strings.TrimSpace(repository)
 	if repository == "" {
 		return nil, fmt.Errorf("repository is required")
@@ -82,7 +96,7 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, repository stri
 		WHERE r.registry = $1 AND r.repository = $2
 		ORDER BY sr.scanned_at DESC, sr.id DESC
 		LIMIT $3 OFFSET $4
-	`, manifest.DockerHubRegistry, repository, limit, offset)
+	`, registry, repository, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list repository scans: %w", err)
 	}
@@ -103,12 +117,13 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, repository stri
 	return items, nil
 }
 
-func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error) {
+func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
 	}
 
 	disposition = normalizeFindingDispositionFilter(disposition)
+	registry = normalizeRegistryFilter(registry)
 	repository = strings.TrimSpace(repository)
 	if repository == "" {
 		return nil, fmt.Errorf("repository is required")
@@ -140,7 +155,7 @@ func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, repository s
 			END
 		ORDER BY f.last_seen_at DESC, f.id DESC
 		LIMIT $6 OFFSET $7
-	`, manifest.DockerHubRegistry, repository, string(findings.DispositionActionable), string(findings.DispositionExample), string(disposition), limit, offset)
+	`, registry, repository, string(findings.DispositionActionable), string(findings.DispositionExample), string(disposition), limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list repository findings: %w", err)
 	}

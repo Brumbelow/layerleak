@@ -285,7 +285,8 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		return
 	}
 
-	items, err := h.store.ListRepositoryScans(request.Context(), repository, limit, offset)
+	registry := request.URL.Query().Get("registry")
+	items, err := h.store.ListRepositoryScans(request.Context(), registry, repository, limit, offset)
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -326,7 +327,8 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 
-	items, err := h.store.ListRepositoryFindings(request.Context(), repository, disposition, limit, offset)
+	registry := request.URL.Query().Get("registry")
+	items, err := h.store.ListRepositoryFindings(request.Context(), registry, repository, disposition, limit, offset)
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
 		return

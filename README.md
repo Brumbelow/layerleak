@@ -1,4 +1,5 @@
 # layerleak the OCI Image Secret Scanner
+[![made-with-Go](https://img.shields.io/badge/Made%20with-Go-1f425f.svg)](https://go.dev/)
 
 Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 

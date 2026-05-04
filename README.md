@@ -6,6 +6,17 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 - OCI image secret scanner that works against any public OCI-compliant registry (Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, self-hosted). It analyzes image layers, config metadata, and image history, then stores deduplicated findings by manifest digest.
 - Traditional secret scanners often treat a container image as a flat blob or depend on a local Docker daemon. This project is designed around OCI image internals
 
+## Contents
+
+- [Docs Page](#docs-page)
+- [Current Capabilities](#current-capabilities)
+- [Install](#install)
+- [Postgres persistence](#postgres-persistence)
+- [How to start](#how-to-start)
+- [HTTP API](#http-api)
+- [Docker Compose deployment (Dockge / Komodo)](#docker-compose-deployment-dockge--komodo)
+- [Support this project](#support-this-project)
+
 ## Docs Page
 - https://brumbelow.github.io/layerleak/docs
 
@@ -75,6 +86,7 @@ cp .env.example .env
 Result and database configuration:
 
 ```bash
+export LAYERLEAK_LOG_LEVEL=info
 export LAYERLEAK_FINDINGS_DIR=findings
 export LAYERLEAK_API_ADDR=127.0.0.1:8080
 export LAYERLEAK_PERSIST_RAW_SECRETS=0
@@ -89,8 +101,14 @@ export LAYERLEAK_MAX_TAG_RESPONSE_BYTES=8388608
 export LAYERLEAK_MAX_REPOSITORY_TAGS=0
 export LAYERLEAK_MAX_REPOSITORY_TARGETS=0
 export LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
+# Optional registry overrides; usually leave unset.
+export LAYERLEAK_REGISTRY_BASE_URL=
+export LAYERLEAK_REGISTRY_AUTH_URL=
 export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable
 ```
+
+The full set of supported variables and their defaults also lives in [`.env.example`](./.env.example).
+`LAYERLEAK_LOG_LEVEL` accepts `debug`, `info`, `warn`, or `error` and defaults to `info`.
 
 If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the nearest parent directory containing `go.mod` (typically the repo root). If no repo root can be discovered, it falls back to the current working directory.
 Saved findings files contain only detections and are redacted by default.

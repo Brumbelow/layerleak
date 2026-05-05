@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -153,6 +154,8 @@ type findingOccurrenceItem struct {
 	LastSeen            string            `json:"last_seen_at"`
 }
 
+// NewHandler returns the JSON HTTP API mux. The scanner runs synchronous scans for
+// POST /api/v1/scans; the store backs all read endpoints. Both must be non-nil.
 func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
 	handler := &Handler{
 		scanner: scanner,
@@ -587,5 +590,7 @@ func writeJSON(writer http.ResponseWriter, statusCode int, payload any) {
 	writer.WriteHeader(statusCode)
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(payload)
+	if err := encoder.Encode(payload); err != nil {
+		slog.Error("encode api response", "err", err, "status", statusCode)
+	}
 }

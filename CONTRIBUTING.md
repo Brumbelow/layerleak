@@ -13,7 +13,7 @@ Contributions should keep the scanner:
 
 ## Before You Start
 
-- Use Go 1.24 or newer.
+- Use Go 1.25.7 or newer.
 - Read [README.md](./README.md).
 - Ensure you tag any AI assisted commit or PR as such. AI assisted commits not tagged will be rejected.
 

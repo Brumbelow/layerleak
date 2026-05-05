@@ -15,6 +15,7 @@ Check [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
 - [How to start](#how-to-start)
 - [HTTP API](#http-api)
 - [Docker Compose deployment (Dockge / Komodo)](#docker-compose-deployment-dockge--komodo)
+- [License](#license)
 - [Support this project](#support-this-project)
 
 ## Docs Page
@@ -296,6 +297,10 @@ docker compose up -d api
 ```
 
 In Dockge or Komodo, import the same Compose file and run the `migrate` service once before enabling the long-running `api` service.
+
+## License
+
+Released under the MIT License — see [LICENSE](./LICENSE).
 
 ## Support this project
 

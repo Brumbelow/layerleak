@@ -2,3 +2,7 @@ enableDefaultRules = true
 
 [rule.exported]
 Disabled = true
+
+[rule.early-return]
+
+[rule.bool-literal-in-expr]

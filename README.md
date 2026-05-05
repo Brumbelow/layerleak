@@ -108,24 +108,30 @@ export LAYERLEAK_REGISTRY_AUTH_URL=
 export LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable
 ```
 
-The full set of supported variables and their defaults also lives in [`.env.example`](./.env.example).
-`LAYERLEAK_LOG_LEVEL` accepts `debug`, `info`, `warn`, or `error` and defaults to `info`.
+The same variables and their defaults live in [`.env.example`](./.env.example), which is the source of truth for default values.
 
-If `LAYERLEAK_FINDINGS_DIR` is not set, layerleak writes JSON findings files to `findings/` under the nearest parent directory containing `go.mod` (typically the repo root). If no repo root can be discovered, it falls back to the current working directory.
-Saved findings files contain only detections and are redacted by default.
-Set `LAYERLEAK_PERSIST_RAW_SECRETS=1` only if you explicitly want raw finding values and raw context snippets written to disk and Postgres.
-`LAYERLEAK_TAG_PAGE_SIZE` controls registry tag-list pagination for repository-wide scans.
-`LAYERLEAK_MAX_LAYER_BYTES` defaults to `536870912` (512 MiB) of decompressed layer stream data per layer, and `LAYERLEAK_MAX_LAYER_ENTRIES` defaults to `50000` tar entries per layer.
-`LAYERLEAK_MAX_TAG_RESPONSE_BYTES` defaults to `8388608` (8 MiB) per registry tag-list response page.
-`LAYERLEAK_REGISTRY_BASE_URL` and `LAYERLEAK_REGISTRY_AUTH_URL` are optional overrides. Leave them unset for normal use — layerleak derives the registry base URL from each image reference and discovers the auth realm from the registry's `WWW-Authenticate` challenge. Set them only to force scans through a proxy or alternate endpoint.
-`LAYERLEAK_MAX_LAYER_BYTES`, `LAYERLEAK_MAX_LAYER_ENTRIES`, `LAYERLEAK_MAX_MANIFEST_BYTES`, `LAYERLEAK_MAX_CONFIG_BYTES`, `LAYERLEAK_MAX_TAG_RESPONSE_BYTES`, `LAYERLEAK_MAX_REPOSITORY_TAGS`, and `LAYERLEAK_MAX_REPOSITORY_TARGETS` are disabled when set to `0`.
-If enabled, those limits fail the scan with a clear error instead of silently truncating work.
-`LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` controls registry request retries and defaults to `2`.
-`LAYERLEAK_HTTP_TIMEOUT` is the per-request timeout applied to the HTTP client used for every registry call (manifest fetches, blob downloads, tag list pages, auth token requests). Accepts any Go duration value (`30s`, `2m`, `1h`); defaults to `30s`.
-`LAYERLEAK_MAX_FILE_BYTES` is the maximum decompressed bytes layerleak buffers per file inside a layer; files larger than this are classified as oversize and skipped. Defaults to `1048576` (1 MiB) and must be greater than zero.
-`LAYERLEAK_API_ADDR` controls the bind address for the API server and defaults to `127.0.0.1:8080` in local binaries.
-The container image overrides this to `0.0.0.0:8080`.
-If `LAYERLEAK_DATABASE_URL` is set, the scanner also writes the scan to Postgres and fails the command if Postgres is unavailable or the save does not succeed.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LAYERLEAK_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, or `error`. |
+| `LAYERLEAK_FINDINGS_DIR` | _unset_ | Where to write JSON findings files. If unset, defaults to `findings/` under the nearest parent containing `go.mod`, falling back to the current working directory. |
+| `LAYERLEAK_API_ADDR` | `127.0.0.1:8080` | Bind address for the API server. The container image overrides this to `0.0.0.0:8080`. |
+| `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Set to `1` to write raw secret values and raw context snippets to disk and Postgres. Findings stay redacted by default. |
+| `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Per-request timeout for every registry call (manifests, blobs, tag pages, auth tokens). Accepts any Go duration (`30s`, `2m`, `1h`). |
+| `LAYERLEAK_MAX_FILE_BYTES` | `1048576` (1 MiB) | Max decompressed bytes buffered per file inside a layer. Files larger than this are skipped as oversize. Must be greater than zero. |
+| `LAYERLEAK_MAX_LAYER_BYTES` | `536870912` (512 MiB) | Max decompressed layer stream bytes per layer. `0` disables the limit. |
+| `LAYERLEAK_MAX_LAYER_ENTRIES` | `50000` | Max tar entries per layer. `0` disables the limit. |
+| `LAYERLEAK_MAX_MANIFEST_BYTES` | `0` | Max manifest body bytes. `0` disables the limit. |
+| `LAYERLEAK_MAX_CONFIG_BYTES` | `0` | Max image config body bytes. `0` disables the limit. |
+| `LAYERLEAK_MAX_TAG_RESPONSE_BYTES` | `8388608` (8 MiB) | Max bytes per registry tag-list response page. `0` disables the limit. |
+| `LAYERLEAK_TAG_PAGE_SIZE` | `100` | Registry tag-list page size for repository-wide scans. |
+| `LAYERLEAK_MAX_REPOSITORY_TAGS` | `0` | Max tags enumerated per repository scan. `0` disables the limit. |
+| `LAYERLEAK_MAX_REPOSITORY_TARGETS` | `0` | Max distinct targets resolved per repository scan. `0` disables the limit. |
+| `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` | `2` | Number of attempts (including the first) for each registry request. |
+| `LAYERLEAK_REGISTRY_BASE_URL` | _unset_ | Optional override. Normally layerleak derives this from each image reference; set only to force scans through a proxy or alternate endpoint. |
+| `LAYERLEAK_REGISTRY_AUTH_URL` | _unset_ | Optional override. Normally discovered from the registry's `WWW-Authenticate` challenge. |
+| `LAYERLEAK_DATABASE_URL` | _unset_ | If set, layerleak writes scans to Postgres and fails the command if persistence does not succeed. |
+
+When any of the `MAX_*` limits is set to a positive value, exceeding it fails the scan with a clear error instead of silently truncating work.
 
 Result behavior:
 

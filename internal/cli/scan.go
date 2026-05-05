@@ -56,11 +56,13 @@ func newScanCmd() *cobra.Command {
 
 			store, err := newStore(cfg)
 			if err != nil {
-				_ = progress.Update(progressSnapshot{
+				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
 					message:    err.Error(),
-				})
+				}); updateErr != nil {
+					logger.Debug("progress update failed", "error", updateErr)
+				}
 				return err
 			}
 			if closer, ok := store.(interface{ Close() error }); ok {
@@ -73,7 +75,9 @@ func newScanCmd() *cobra.Command {
 				Platform:  platform,
 				Logger:    logger,
 				Progress: func(update jobs.ProgressUpdate) {
-					_ = progress.UpdateFromJob(update)
+					if err := progress.UpdateFromJob(update); err != nil {
+						logger.Debug("progress update failed", "error", err)
+					}
 				},
 				BeforeSave: func(result jobs.Result) error {
 					if store.Name() == "noop" {
@@ -97,15 +101,17 @@ func newScanCmd() *cobra.Command {
 			scanErr := err
 			limitExceeded := limits.IsExceeded(scanErr)
 			if scanErr != nil && !limitExceeded {
-				_ = progress.Update(progressSnapshot{
+				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
 					message:    scanErr.Error(),
-				})
+				}); updateErr != nil {
+					logger.Debug("progress update failed", "error", updateErr)
+				}
 				return scanErr
 			}
 			if scanErr != nil {
-				_ = progress.Update(progressSnapshot{
+				if updateErr := progress.Update(progressSnapshot{
 					repository:       ref.Repository,
 					tagsCompleted:    result.TagsResolved,
 					tagsFailed:       result.TagsFailed,
@@ -116,7 +122,9 @@ func newScanCmd() *cobra.Command {
 					findingsFound:    result.TotalFindings,
 					phase:            "Error",
 					message:          scanErr.Error(),
-				})
+				}); updateErr != nil {
+					logger.Debug("progress update failed", "error", updateErr)
+				}
 			}
 
 			if err := progress.Update(progressSnapshot{
@@ -136,7 +144,7 @@ func newScanCmd() *cobra.Command {
 
 			resultPath, err := writeResultFile(cfg.FindingsDir, cfg.PersistRawSecrets, result)
 			if err != nil {
-				_ = progress.Update(progressSnapshot{
+				if updateErr := progress.Update(progressSnapshot{
 					repository:       ref.Repository,
 					tagsCompleted:    result.TagsResolved,
 					tagsFailed:       result.TagsFailed,
@@ -147,7 +155,9 @@ func newScanCmd() *cobra.Command {
 					findingsFound:    result.TotalFindings,
 					phase:            "Error",
 					message:          err.Error(),
-				})
+				}); updateErr != nil {
+					logger.Debug("progress update failed", "error", updateErr)
+				}
 				return err
 			}
 

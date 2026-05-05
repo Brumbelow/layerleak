@@ -213,3 +213,43 @@ func TestLoadInvalidRegistryRequestAttempts(t *testing.T) {
 		t.Fatal("Load() error = nil")
 	}
 }
+
+func TestLoadRejectsNonNumericMaxFileBytes(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_FILE_BYTES", "abc")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil")
+	}
+}
+
+func TestLoadTrimsFindingsDirAndDatabaseURL(t *testing.T) {
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", "  /tmp/findings  ")
+	t.Setenv("LAYERLEAK_DATABASE_URL", "  postgres://localhost/db  ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.FindingsDir != "/tmp/findings" {
+		t.Fatalf("cfg.FindingsDir = %q", cfg.FindingsDir)
+	}
+	if cfg.DatabaseURL != "postgres://localhost/db" {
+		t.Fatalf("cfg.DatabaseURL = %q", cfg.DatabaseURL)
+	}
+}
+
+func TestLoadOverridesLogLevelAndAPIAddr(t *testing.T) {
+	t.Setenv("LAYERLEAK_LOG_LEVEL", "debug")
+	t.Setenv("LAYERLEAK_API_ADDR", "0.0.0.0:9090")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("cfg.LogLevel = %q", cfg.LogLevel)
+	}
+	if cfg.APIAddr != "0.0.0.0:9090" {
+		t.Fatalf("cfg.APIAddr = %q", cfg.APIAddr)
+	}
+}

@@ -24,6 +24,9 @@ const (
 	minPostgresServerVersionLabel = "16.13"
 )
 
+// NewPostgresStore opens a Postgres connection, verifies it with a ping, and enforces
+// that the server is at least PostgreSQL 16.13. Migrations are not applied here; run them
+// out-of-band via psql or layerleak-migrate-up.
 func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err

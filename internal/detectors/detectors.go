@@ -84,6 +84,12 @@ func Default() Set {
 			newPathRegexDetector("netrc_password", regexp.MustCompile(`(^|/)\.netrc$`), regexp.MustCompile(`(?im)\bpassword\s+([^\s#]+)`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
 			newPathRegexDetector("pypirc_password", regexp.MustCompile(`(^|/)\.pypirc$`), regexp.MustCompile(`(?im)^\s*password\s*=\s*([^\s#;]+)\s*$`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
 			newRegexDetector("basic_auth_url", regexp.MustCompile(`https?://[^/\s:@]+:[^/\s@]+@[^/\s]+`), 0, ConfidenceHigh, looksLikeBasicAuthURL),
+			newRegexDetector("huggingface_token", regexp.MustCompile(`\bhf_[A-Za-z0-9]{34,}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("digitalocean_pat", regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("mailchimp_api_key", regexp.MustCompile(`\b[0-9a-f]{32}-us[0-9]{1,2}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("hashicorp_vault_token", regexp.MustCompile(`\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}\b`), 0, ConfidenceHigh, nil),
+			newPathRegexDetector("kubeconfig_token", regexp.MustCompile(`(^|/)\.kube/config$`), regexp.MustCompile(`(?im)^\s+token:\s+([^\s#]+)\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
+			newPathRegexDetector("vault_token_file", regexp.MustCompile(`(^|/)\.vault-token$`), regexp.MustCompile(`((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}|s\.[A-Za-z0-9]{24,})`), 0, ConfidenceHigh, hasMinPrintableLength(24)),
 			contextEntropyDetector{},
 		},
 	}
@@ -221,7 +227,9 @@ func (d pathRegexDetector) Scan(input ScanInput) []Match {
 		d.name == "npmrc_auth_token" ||
 		d.name == "npmrc_auth" ||
 		d.name == "netrc_password" ||
-		d.name == "pypirc_password" {
+		d.name == "pypirc_password" ||
+		d.name == "kubeconfig_token" ||
+		d.name == "vault_token_file" {
 		priority = priorityStructured
 	}
 	return scanRegexMatches(d.name, d.expression, d.group, d.base, priority, d.validator, input)

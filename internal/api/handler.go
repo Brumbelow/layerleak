@@ -163,12 +163,17 @@ func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", handler.handleHealth)
 	mux.HandleFunc("POST /api/v1/scans", handler.handleScan)
 	mux.HandleFunc("GET /api/v1/scans/{id}", handler.handleGetScan)
 	mux.HandleFunc("GET /api/v1/repositories", handler.handleListRepositories)
 	mux.HandleFunc("GET /api/v1/repositories/", handler.handleRepositorySubtree)
 	mux.HandleFunc("GET /api/v1/findings/{id}", handler.handleGetFinding)
 	return mux
+}
+
+func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {

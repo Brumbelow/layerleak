@@ -18,6 +18,20 @@ import (
 	"github.com/brumbelow/layerleak/internal/storage"
 )
 
+func TestHandleHealthReturnsOK(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"status": "ok"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
 func TestHandleScanSuccess(t *testing.T) {
 	scanner := &stubScanner{
 		outcome: scanservice.Outcome{

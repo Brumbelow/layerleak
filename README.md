@@ -257,12 +257,16 @@ docker run --rm \
 
 Current endpoints:
 
+- `GET /health`
 - `POST /api/v1/scans`
 - `GET /api/v1/scans/{id}`
 - `GET /api/v1/repositories`
 - `GET /api/v1/repositories/{repository}/scans`
 - `GET /api/v1/repositories/{repository}/findings`
 - `GET /api/v1/findings/{id}`
+
+`GET /health` returns `{"status":"ok"}` and does not require a configured store or scanner.
+It is suitable for Kubernetes readiness probes and Docker Compose `healthcheck` targets.
 
 `POST /api/v1/scans` stays synchronous and now returns `scan_run_id` whenever Postgres persistence is enabled.
 API scan responses reuse the same redacted result schema as the CLI JSON output.

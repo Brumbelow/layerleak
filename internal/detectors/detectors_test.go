@@ -108,6 +108,50 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "basic_auth_url",
 		},
+		{
+			name: "huggingface token",
+			input: ScanInput{
+				Content: "HF_TOKEN=hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+			wantDetector: "huggingface_token",
+		},
+		{
+			name: "digitalocean pat",
+			input: ScanInput{
+				Content: "DO_TOKEN=dop_v1_" + strings.Repeat("0", 64),
+			},
+			wantDetector: "digitalocean_pat",
+		},
+		{
+			name: "mailchimp api key",
+			input: ScanInput{
+				Content: "MC_API_KEY=" + strings.Repeat("0", 32) + "-us1",
+			},
+			wantDetector: "mailchimp_api_key",
+		},
+		{
+			name: "hashicorp vault service token",
+			input: ScanInput{
+				Content: "VAULT_TOKEN=hvs." + strings.Repeat("a", 24),
+			},
+			wantDetector: "hashicorp_vault_token",
+		},
+		{
+			name: "kubeconfig token",
+			input: ScanInput{
+				Path:    "/root/.kube/config",
+				Content: "    token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.signaturetoken",
+			},
+			wantDetector: "kubeconfig_token",
+		},
+		{
+			name: "vault token file hvs",
+			input: ScanInput{
+				Path:    "/root/.vault-token",
+				Content: "hvs." + strings.Repeat("a", 24),
+			},
+			wantDetector: "vault_token_file",
+		},
 	}
 
 	set := Default()
@@ -235,6 +279,22 @@ func TestFileSpecificDetectorsRequireExpectedPath(t *testing.T) {
 				Content: "machine example.com login deploy password supersecretvalue",
 			},
 			wantDetector: "netrc_password",
+		},
+		{
+			name: "kubeconfig token on wrong path",
+			input: ScanInput{
+				Path:    "/tmp/config.txt",
+				Content: "    token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.signaturetoken",
+			},
+			wantDetector: "kubeconfig_token",
+		},
+		{
+			name: "vault token file on wrong path",
+			input: ScanInput{
+				Path:    "/tmp/token.txt",
+				Content: "hvs." + strings.Repeat("a", 24),
+			},
+			wantDetector: "vault_token_file",
 		},
 	}
 

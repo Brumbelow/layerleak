@@ -352,7 +352,7 @@ func TestDefaultSetDiscardsPlaceholderNetrcPassword(t *testing.T) {
 	}
 }
 
-func TestDefaultSetIncludesTrufflehogAnthropicDetector(t *testing.T) {
+func TestDefaultSetIncludesAnthropicDetector(t *testing.T) {
 	set := Default()
 	matches := set.Scan(ScanInput{
 		Content: `
@@ -363,12 +363,15 @@ API Key: sk-ant-api03-abc123xyz-456def789ghij-klmnopqrstuvwx-3456yza789bcde-1234
 `,
 	})
 
-	match, ok := findDetectorMatch(matches, "anthropic")
+	match, ok := findDetectorMatch(matches, "anthropic_api_key")
 	if !ok {
-		t.Fatalf("expected anthropic detector in %#v", matches)
+		t.Fatalf("expected anthropic_api_key detector in %#v", matches)
 	}
 	if !strings.Contains(match.Value, "sk-ant-api03-") {
 		t.Fatalf("match.Value = %q", match.Value)
+	}
+	if match.Confidence != ConfidenceHigh {
+		t.Fatalf("match.Confidence = %q", match.Confidence)
 	}
 }
 
@@ -483,16 +486,14 @@ func TestDefaultSetUsesMediumBaseConfidenceForTrufflehogMatches(t *testing.T) {
 	set := Default()
 	matches := set.Scan(ScanInput{
 		Content: `
-System Log - Authentication Token Issued
-Date: 2025-02-04 14:32:10 UTC
-Service: Anthropic API Gateway
-API Key: sk-ant-api03-abc123xyz-456def789ghij-klmnopqrstuvwx-3456yza789bcde-1234fghijklmnopby56aaaogaopaaaabc123xyzAA
+secret: "dapib8a799e452bf722cb28874cee50a7abf"
+domain: "nonprod-test.cloud.databricks.com"
 `,
 	})
 
-	match, ok := findDetectorMatch(matches, "anthropic")
+	match, ok := findDetectorMatch(matches, "databricks_token")
 	if !ok {
-		t.Fatalf("expected anthropic detector in %#v", matches)
+		t.Fatalf("expected databricks_token detector in %#v", matches)
 	}
 	if match.Confidence != ConfidenceMedium {
 		t.Fatalf("match.Confidence = %q", match.Confidence)

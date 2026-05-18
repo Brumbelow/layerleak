@@ -161,6 +161,12 @@ func hasPlaceholderMarkerSignal(values ...string) bool {
 			"your-token-here",
 			"your_secret_here",
 			"your-secret-here",
+			"your_api_key_here",
+			"your-api-key-here",
+			"your_api_key",
+			"api_key_here",
+			"insert_token",
+			"token_goes_here",
 			"example token",
 			"sample token",
 		} {
@@ -182,6 +188,9 @@ func hasKnownDummyValueSignal(value string) bool {
 	lower := strings.ToLower(trimmed)
 	upper := strings.ToUpper(trimmed)
 	if strings.Contains(upper, "EXAMPLE") {
+		return true
+	}
+	if strings.Contains(upper, "PLACEHOLDER") {
 		return true
 	}
 

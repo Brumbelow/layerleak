@@ -285,11 +285,17 @@ func trufflehogDetectorIdentity(detector thdetectors.Detector) string {
 }
 
 var trufflehogNameOverrides = map[string]string{
+	"Anthropic":    "anthropic_api_key",
+	"AnthropicAi":  "anthropic_api_key",
 	"AWS":          "aws",
 	"Github":       "github_token",
 	"Gitlab":       "gitlab_token",
 	"GoogleApiKey": "google_api_key",
 	"NpmToken":     "npm_token",
+	"OpenAI":       "openai_api_key",
+	"OpenAi":       "openai_api_key",
+	"Pypi":         "pypi_api_token",
+	"PyPI":         "pypi_api_token",
 	"SendGrid":     "sendgrid_api_key",
 	"Shopify":      "shopify_access_token",
 	"Slack":        "slack_token",

@@ -358,6 +358,8 @@ func TestHasKnownDummyValueSignal(t *testing.T) {
 		{name: "real-looking", value: "sk_live_abcdef", want: false},
 		{name: "your_token_here", value: "your_token_here", want: true},
 		{name: "your_secret_here", value: "your_secret_here", want: true},
+		{name: "PLACEHOLDER substring", value: "sk-ant-api03-PLACEHOLDERPLACEHOLDER1234", want: true},
+		{name: "placeholder mixed case", value: "ghp_PlaceholderValueForDocumentation", want: true},
 	}
 
 	for _, tt := range tests {
@@ -378,6 +380,15 @@ func TestHasPlaceholderMarkerSignal(t *testing.T) {
 	}
 	if !hasPlaceholderMarkerSignal("REPLACE_ME") {
 		t.Fatal("expected 'replace_me' to trigger")
+	}
+	if !hasPlaceholderMarkerSignal("your_api_key_here") {
+		t.Fatal("expected 'your_api_key_here' to trigger")
+	}
+	if !hasPlaceholderMarkerSignal("insert_token") {
+		t.Fatal("expected 'insert_token' to trigger")
+	}
+	if !hasPlaceholderMarkerSignal("token_goes_here") {
+		t.Fatal("expected 'token_goes_here' to trigger")
 	}
 	if hasPlaceholderMarkerSignal("ordinary text") {
 		t.Fatal("did not expect ordinary text to trigger")

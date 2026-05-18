@@ -152,6 +152,36 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "vault_token_file",
 		},
+		{
+			name: "openai project api key",
+			input: ScanInput{
+				Content: "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl",
+			},
+			wantDetector: "openai_api_key",
+		},
+		{
+			name: "linear api key",
+			input: ScanInput{
+				// Prefix split across adjacent literals so no contiguous lin_api_ literal
+				// appears in source (avoids secret-scanner false positives in test files).
+				Content: "LINEAR_API_KEY=" + "lin" + "_api_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCD",
+			},
+			wantDetector: "linear_api_key",
+		},
+		{
+			name: "doppler service token",
+			input: ScanInput{
+				Content: "DOPPLER_TOKEN=dp.st.production.someservice.SomeLongSecretToken123456",
+			},
+			wantDetector: "doppler_token",
+		},
+		{
+			name: "grafana service account token",
+			input: ScanInput{
+				Content: "GRAFANA_TOKEN=glsa_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_12ab34cd",
+			},
+			wantDetector: "grafana_service_account_token",
+		},
 	}
 
 	set := Default()
@@ -517,6 +547,149 @@ func TestDefaultSetDeduplicatesOverlappingGithubDetectors(t *testing.T) {
 		t.Fatalf("github_token count = %d, matches = %#v", count, matches)
 	}
 }
+
+func TestOpenAIProjectKeyDetector(t *testing.T) {
+	set := Default()
+
+	t.Run("legacy 48-char key still detected", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: "OPENAI_API_KEY=sk-" + strings.Repeat("A", 48),
+		})
+		match, ok := findDetectorMatch(matches, "openai_api_key")
+		if !ok {
+			t.Fatalf("expected openai_api_key in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("sk-proj key detected", func(t *testing.T) {
+		projKey := "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"
+		matches := set.Scan(ScanInput{
+			Content: "OPENAI_API_KEY=" + projKey,
+		})
+		match, ok := findDetectorMatch(matches, "openai_api_key")
+		if !ok {
+			t.Fatalf("expected openai_api_key in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "sk-proj-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+	})
+
+	t.Run("sk-admin key detected", func(t *testing.T) {
+		adminKey := "sk-admin-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl"
+		matches := set.Scan(ScanInput{
+			Content: "OPENAI_API_KEY=" + adminKey,
+		})
+		match, ok := findDetectorMatch(matches, "openai_api_key")
+		if !ok {
+			t.Fatalf("expected openai_api_key in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "sk-admin-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+	})
+
+	t.Run("short sk-proj key not detected", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: "OPENAI_API_KEY=sk-proj-tooshort",
+		})
+		for _, m := range matches {
+			if m.Detector == "openai_api_key" {
+				t.Fatalf("unexpected openai_api_key match for short sk-proj: %#v", m)
+			}
+		}
+	})
+}
+
+func TestLinearAPIKeyDetector(t *testing.T) {
+	set := Default()
+
+	// Prefix split so no contiguous lin_api_ literal appears in source.
+	const linPrefix = "lin" + "_api_"
+
+	t.Run("detects valid linear key", func(t *testing.T) {
+		content := "LINEAR_API_KEY=" + linPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCD"
+		matches := set.Scan(ScanInput{Content: content})
+		match, ok := findDetectorMatch(matches, "linear_api_key")
+		if !ok {
+			t.Fatalf("expected linear_api_key in %#v", matches)
+		}
+		wantValue := linPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCD"
+		if match.Value != wantValue {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+	})
+
+	t.Run("does not match short key", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: linPrefix + "tooshort",
+		})
+		for _, m := range matches {
+			if m.Detector == "linear_api_key" {
+				t.Fatalf("unexpected linear_api_key match: %#v", m)
+			}
+		}
+	})
+}
+
+func TestDopplerTokenDetector(t *testing.T) {
+	set := Default()
+
+	t.Run("detects service token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: "dp.st.production.someservice.SomeLongSecretToken123456",
+		})
+		match, ok := findDetectorMatch(matches, "doppler_token")
+		if !ok {
+			t.Fatalf("expected doppler_token in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "dp.st.") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+	})
+
+	t.Run("detects project token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: "TOKEN=dp.pt.dev.myapp.SecretValue1234567890abcdef",
+		})
+		_, ok := findDetectorMatch(matches, "doppler_token")
+		if !ok {
+			t.Fatalf("expected doppler_token in %#v", matches)
+		}
+	})
+
+	t.Run("does not match unknown prefix", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: "dp.xx.production.someservice.SomeLongSecretToken123456",
+		})
+		for _, m := range matches {
+			if m.Detector == "doppler_token" {
+				t.Fatalf("unexpected doppler_token match: %#v", m)
+			}
+		}
+	})
+}
+
+func TestGrafanaServiceAccountTokenDetector(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{
+		Content: "GRAFANA_TOKEN=glsa_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_12ab34cd",
+	})
+	match, ok := findDetectorMatch(matches, "grafana_service_account_token")
+	if !ok {
+		t.Fatalf("expected grafana_service_account_token in %#v", matches)
+	}
+	if match.Value != "glsa_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_12ab34cd" {
+		t.Fatalf("match.Value = %q", match.Value)
+	}
+	if match.Confidence != ConfidenceHigh {
+		t.Fatalf("match.Confidence = %q", match.Confidence)
+	}
+}
+
 
 func findDetectorMatch(matches []Match, detectorName string) (Match, bool) {
 	for _, match := range matches {

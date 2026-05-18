@@ -1,0 +1,11 @@
+{
+  "name": "env_openai_proj_key_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "OPENAI_API_KEY",
+  "content": "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijkl",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["keyword_entropy", "openai_api_key"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

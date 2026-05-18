@@ -1,0 +1,11 @@
+{
+  "name": "env_grafana_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "GRAFANA_TOKEN",
+  "content": "GRAFANA_TOKEN=glsa_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_12ab34cd",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["grafana_service_account_token", "keyword_entropy"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

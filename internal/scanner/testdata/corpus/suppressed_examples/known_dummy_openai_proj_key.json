@@ -1,0 +1,11 @@
+{
+  "name": "suppressed_known_dummy_openai_proj_key",
+  "source_type": "env",
+  "path": "",
+  "key": "OPENAI_API_KEY",
+  "content": "OPENAI_API_KEY=sk-proj-EXAMPLEKEYabcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01",
+  "expected_outcome": "suppressed",
+  "expected_detectors": ["keyword_entropy", "openai_api_key"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": "known_dummy_value"
+}

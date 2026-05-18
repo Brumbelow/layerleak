@@ -1,0 +1,11 @@
+{
+  "name": "env_doppler_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "DOPPLER_TOKEN",
+  "content": "DOPPLER_TOKEN=dp.st.production.someservice.SomeLongSecretToken123456",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["doppler_token"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

@@ -33,6 +33,8 @@ The published site is built from `web/` on `main` by `.github/workflows/pages.ym
 - Scans final filesystem and deleted-layer artifacts
 - Scans image config metadata, env vars, labels, and history
 - Deduplicates findings by secret fingerprint and collapses repeated identical context snippets per manifest
+- Native detectors for 35+ secret types plus TruffleHog defaults as a fallback layer
+- Suppresses test/fixture/spec path findings to reduce false positives in development images
 
 ## Install
 

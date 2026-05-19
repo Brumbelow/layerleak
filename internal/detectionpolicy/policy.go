@@ -81,7 +81,7 @@ func ExampleReason(filePath, key, line, value string) string {
 func TestPathReason(filePath string) string {
 	for _, part := range normalizedPathParts(filePath) {
 		switch part {
-		case "test", "tests", "__tests__", "fixture", "fixtures", "mock", "mocks":
+		case "test", "tests", "__tests__", "testdata", "fixture", "fixtures", "mock", "mocks", "__mocks__", "spec", "specs":
 			return ReasonTestPath
 		}
 	}

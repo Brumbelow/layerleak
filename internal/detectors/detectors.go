@@ -96,6 +96,13 @@ func Default() Set {
 			newRegexDetector("grafana_service_account_token", regexp.MustCompile(`\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
 			newPathRegexDetector("kubeconfig_token", regexp.MustCompile(`(^|/)\.kube/config$`), regexp.MustCompile(`(?im)^\s+token:\s+([^\s#]+)\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
 			newPathRegexDetector("vault_token_file", regexp.MustCompile(`(^|/)\.vault-token$`), regexp.MustCompile(`((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}|s\.[A-Za-z0-9]{24,})`), 0, ConfidenceHigh, hasMinPrintableLength(24)),
+			newRegexDetector("twilio_account_sid", regexp.MustCompile(`\bAC[a-f0-9]{32}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("databricks_token", regexp.MustCompile(`\bdapi[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("azure_storage_account_key", regexp.MustCompile(`(?i)AccountKey=([A-Za-z0-9+/]{86}==)`), 1, ConfidenceHigh, nil),
+			newKeyValueDetector("datadog_api_key",
+				regexp.MustCompile(`(?i)(?:dd[_-]?api[_-]?key|datadog[_-]?api[_-]?key)`),
+				regexp.MustCompile(`\b[a-f0-9]{32}\b`),
+				ConfidenceHigh, nil),
 			contextEntropyDetector{},
 		},
 	}

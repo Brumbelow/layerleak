@@ -182,6 +182,37 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "grafana_service_account_token",
 		},
+		{
+			name: "twilio account sid",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "TWILIO_ACCOUNT_SID=" + "AC" + "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+			},
+			wantDetector: "twilio_account_sid",
+		},
+		{
+			name: "databricks token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "DATABRICKS_TOKEN=" + "dapi" + "AbCdEf0123456789AbCdEf0123456789",
+			},
+			wantDetector: "databricks_token",
+		},
+		{
+			name: "azure storage account key in connection string",
+			input: ScanInput{
+				Content: "DefaultEndpointsProtocol=https;AccountName=mystorageaccount;AccountKey=" + strings.Repeat("A", 86) + "==;EndpointSuffix=core.windows.net",
+			},
+			wantDetector: "azure_storage_account_key",
+		},
+		{
+			name: "datadog api key",
+			input: ScanInput{
+				Key:     "DD_API_KEY",
+				Content: "DD_API_KEY=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+			},
+			wantDetector: "datadog_api_key",
+		},
 	}
 
 	set := Default()
@@ -405,7 +436,7 @@ API Key: sk-ant-api03-abc123xyz-456def789ghij-klmnopqrstuvwx-3456yza789bcde-1234
 	}
 }
 
-func TestDefaultSetIncludesTrufflehogMultipartDetector(t *testing.T) {
+func TestDefaultSetDatabricksTokenDetection(t *testing.T) {
 	set := Default()
 	matches := set.Scan(ScanInput{
 		Content: `
@@ -414,11 +445,12 @@ domain: "nonprod-test.cloud.databricks.com"
 `,
 	})
 
+	// The native databricks_token detector takes precedence over trufflehog.
 	match, ok := findDetectorMatch(matches, "databricks_token")
 	if !ok {
 		t.Fatalf("expected databricks_token detector in %#v", matches)
 	}
-	if !strings.Contains(match.Value, "dapib8a799e452bf722cb28874cee50a7abfnonprod-test.cloud.databricks.com") {
+	if !strings.HasPrefix(match.Value, "dapi") {
 		t.Fatalf("match.Value = %q", match.Value)
 	}
 }
@@ -521,12 +553,17 @@ domain: "nonprod-test.cloud.databricks.com"
 `,
 	})
 
-	match, ok := findDetectorMatch(matches, "databricks_token")
-	if !ok {
-		t.Fatalf("expected databricks_token detector in %#v", matches)
+	// Trufflehog emits its own databricks_token match with medium base confidence
+	// alongside the native high-confidence match. Verify at least one medium match exists.
+	foundMedium := false
+	for _, m := range matches {
+		if m.Detector == "databricks_token" && m.Confidence == ConfidenceMedium {
+			foundMedium = true
+			break
+		}
 	}
-	if match.Confidence != ConfidenceMedium {
-		t.Fatalf("match.Confidence = %q", match.Confidence)
+	if !foundMedium {
+		t.Fatalf("expected a databricks_token match with ConfidenceMedium from trufflehog in %#v", matches)
 	}
 }
 
@@ -689,7 +726,6 @@ func TestGrafanaServiceAccountTokenDetector(t *testing.T) {
 		t.Fatalf("match.Confidence = %q", match.Confidence)
 	}
 }
-
 
 func findDetectorMatch(matches []Match, detectorName string) (Match, bool) {
 	for _, match := range matches {

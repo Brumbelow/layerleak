@@ -727,7 +727,6 @@ func TestGrafanaServiceAccountTokenDetector(t *testing.T) {
 	}
 }
 
-
 func findDetectorMatch(matches []Match, detectorName string) (Match, bool) {
 	for _, match := range matches {
 		if match.Detector == detectorName {

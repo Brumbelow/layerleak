@@ -81,7 +81,8 @@ func ExampleReason(filePath, key, line, value string) string {
 func TestPathReason(filePath string) string {
 	for _, part := range normalizedPathParts(filePath) {
 		switch part {
-		case "test", "tests", "__tests__", "testdata", "fixture", "fixtures", "mock", "mocks", "__mocks__", "spec", "specs":
+		case "test", "tests", "__tests__", "testdata", "fixture", "fixtures", "mock", "mocks", "__mocks__", "spec", "specs",
+			"e2e", "acceptance", "stubs":
 			return ReasonTestPath
 		}
 	}
@@ -258,6 +259,11 @@ func containsDiscardPlaceholder(value string) bool {
 		"user@example.com",
 		"admin@example.com",
 		"test@example.com",
+		"admin:admin",
+		"admin:password",
+		"root:password",
+		"test:test",
+		"user:user",
 	} {
 		if strings.Contains(lower, marker) {
 			return true

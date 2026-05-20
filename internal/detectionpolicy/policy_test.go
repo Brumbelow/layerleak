@@ -66,6 +66,21 @@ func TestDiscardReason(t *testing.T) {
 			value: "https://user:foo:bar@example.com/x",
 			want:  ReasonDiscardPlaceholder,
 		},
+		{
+			name:  "admin:admin credentials in url",
+			value: "https://admin:admin@db.internal/",
+			want:  ReasonDiscardPlaceholder,
+		},
+		{
+			name:  "admin:password credentials in url",
+			value: "https://admin:password@db.internal/",
+			want:  ReasonDiscardPlaceholder,
+		},
+		{
+			name:  "root:password credentials in url",
+			value: "https://root:password@db.internal/",
+			want:  ReasonDiscardPlaceholder,
+		},
 	}
 
 	for _, tt := range tests {
@@ -210,6 +225,9 @@ func TestTestPathReason(t *testing.T) {
 		{name: "windows-style backslash path", filePath: "src\\tests\\config.yaml", want: ReasonTestPath},
 		{name: "case-insensitive", filePath: "src/TESTS/config.yaml", want: ReasonTestPath},
 		{name: "test substring not whole segment", filePath: "src/contest/config.yaml", want: ReasonNone},
+		{name: "e2e segment", filePath: "src/e2e/config.yaml", want: ReasonTestPath},
+		{name: "acceptance segment", filePath: "src/acceptance/config.yaml", want: ReasonTestPath},
+		{name: "stubs segment", filePath: "src/stubs/server.go", want: ReasonTestPath},
 	}
 
 	for _, tt := range tests {

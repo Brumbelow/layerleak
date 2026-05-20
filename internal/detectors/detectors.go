@@ -103,6 +103,11 @@ func Default() Set {
 				regexp.MustCompile(`(?i)(?:dd[_-]?api[_-]?key|datadog[_-]?api[_-]?key)`),
 				regexp.MustCompile(`\b[a-f0-9]{32}\b`),
 				ConfidenceHigh, nil),
+			newRegexDetector("notion_integration_token", regexp.MustCompile(`\bsecret_[A-Za-z0-9]{40,60}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("pulumi_access_token", regexp.MustCompile(`\bpul-[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("age_secret_key", regexp.MustCompile(`\bAGE-SECRET-KEY-1[a-z0-9]{58}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("render_api_key", regexp.MustCompile(`\brnd_[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("twilio_auth_token", regexp.MustCompile(`(?i)twilio[_-]?auth[_-]?token\s*(?:=|:)\s*["']?([a-f0-9]{32})`), 1, ConfidenceHigh, nil),
 			contextEntropyDetector{},
 		},
 	}

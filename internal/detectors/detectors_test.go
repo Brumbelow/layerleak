@@ -213,6 +213,47 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "datadog_api_key",
 		},
+		{
+			name: "notion integration token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "NOTION_TOKEN=" + "secr" + "et_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop",
+			},
+			wantDetector: "notion_integration_token",
+		},
+		{
+			name: "pulumi access token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "PULUMI_ACCESS_TOKEN=" + "pu" + "l-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn",
+			},
+			wantDetector: "pulumi_access_token",
+		},
+		{
+			name: "age secret key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				// 58 lowercase alphanumeric chars after the bech32 separator '1'.
+				Content: "AGE-" + "SECRET-KEY-1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce",
+			},
+			wantDetector: "age_secret_key",
+		},
+		{
+			name: "render api key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				// 32 alphanumeric chars after 'rnd_'.
+				Content: "RENDER_API_KEY=" + "rn" + "d_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef",
+			},
+			wantDetector: "render_api_key",
+		},
+		{
+			name: "twilio auth token",
+			input: ScanInput{
+				Content: "TWILIO_AUTH_TOKEN=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+			},
+			wantDetector: "twilio_auth_token",
+		},
 	}
 
 	set := Default()

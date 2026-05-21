@@ -254,6 +254,54 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "twilio_auth_token",
 		},
+		{
+			name: "new relic user api key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "NEW_RELIC_API_KEY=" + "NR" + "AK-ABCDEFGHIJKLMNOPQRSTUVWXYZ1",
+			},
+			wantDetector: "new_relic_user_api_key",
+		},
+		{
+			name: "okta api token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "Authorization: " + "SS" + "WS ABCDEFGHIJKLMNOPQRSTUVWXYZ01",
+			},
+			wantDetector: "okta_api_token",
+		},
+		{
+			name: "square application secret",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "SQUARE_APP_SECRET=" + "sq0c" + "sp-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+			},
+			wantDetector: "square_application_secret",
+		},
+		{
+			name: "square oauth token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "SQUARE_ACCESS_TOKEN=" + "sq0a" + "tp-ABCDEFGHIJKLMNOPQRSTUV",
+			},
+			wantDetector: "square_oauth_token",
+		},
+		{
+			name: "gitlab deploy token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "CI_DEPLOY_PASSWORD=" + "gl" + "dt-ABCDEFGHIJKLMNOPQRSTUVWXYZ01",
+			},
+			wantDetector: "gitlab_deploy_token",
+		},
+		{
+			name: "gitlab runner token",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "RUNNER_TOKEN=" + "gl" + "rt-ABCDEFGHIJKLMNOPQRSTUVWXYZ01",
+			},
+			wantDetector: "gitlab_runner_token",
+		},
 	}
 
 	set := Default()
@@ -766,6 +814,188 @@ func TestGrafanaServiceAccountTokenDetector(t *testing.T) {
 	if match.Confidence != ConfidenceHigh {
 		t.Fatalf("match.Confidence = %q", match.Confidence)
 	}
+}
+
+func TestNewRelicUserAPIKeyDetector(t *testing.T) {
+	set := Default()
+
+	// Prefix split to avoid triggering secret-scanner false positives in test files.
+	const nrPrefix = "NR" + "AK-"
+
+	t.Run("detects valid key", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "NEW_RELIC_API_KEY=" + nrPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZ1"})
+		match, ok := findDetectorMatch(matches, "new_relic_user_api_key")
+		if !ok {
+			t.Fatalf("expected new_relic_user_api_key in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "NRAK-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match wrong length", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: nrPrefix + "TOOSHORT"})
+		for _, m := range matches {
+			if m.Detector == "new_relic_user_api_key" {
+				t.Fatalf("unexpected new_relic_user_api_key match: %#v", m)
+			}
+		}
+	})
+
+	t.Run("does not match lowercase body", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: nrPrefix + "abcdefghijklmnopqrstuvwxyz1"})
+		for _, m := range matches {
+			if m.Detector == "new_relic_user_api_key" {
+				t.Fatalf("unexpected new_relic_user_api_key match: %#v", m)
+			}
+		}
+	})
+}
+
+func TestOktaAPITokenDetector(t *testing.T) {
+	set := Default()
+
+	// Prefix split to avoid triggering secret-scanner false positives in test files.
+	const ssPrefix = "SS" + "WS "
+
+	t.Run("detects token in authorization header", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "Authorization: " + ssPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZ01"})
+		match, ok := findDetectorMatch(matches, "okta_api_token")
+		if !ok {
+			t.Fatalf("expected okta_api_token in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("detects token in config assignment", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "OKTA_API_TOKEN=" + ssPrefix + "Abcdefghijklmnopqrstuvwxyz0123"})
+		_, ok := findDetectorMatch(matches, "okta_api_token")
+		if !ok {
+			t.Fatalf("expected okta_api_token in %#v", matches)
+		}
+	})
+
+	t.Run("does not match short token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: ssPrefix + "tooshort"})
+		for _, m := range matches {
+			if m.Detector == "okta_api_token" {
+				t.Fatalf("unexpected okta_api_token match: %#v", m)
+			}
+		}
+	})
+}
+
+func TestSquareCredentialDetectors(t *testing.T) {
+	set := Default()
+
+	// Prefixes split to avoid triggering secret-scanner false positives in test files.
+	const appSecretPrefix = "sq0c" + "sp-"
+	const oauthTokenPrefix = "sq0a" + "tp-"
+
+	t.Run("detects application secret", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "SQUARE_APP_SECRET=" + appSecretPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq"})
+		match, ok := findDetectorMatch(matches, "square_application_secret")
+		if !ok {
+			t.Fatalf("expected square_application_secret in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "sq0csp-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match short application secret", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: appSecretPrefix + "tooshort"})
+		for _, m := range matches {
+			if m.Detector == "square_application_secret" {
+				t.Fatalf("unexpected square_application_secret match: %#v", m)
+			}
+		}
+	})
+
+	t.Run("detects oauth token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "SQUARE_ACCESS_TOKEN=" + oauthTokenPrefix + "ABCDEFGHIJKLMNOPQRSTUV"})
+		match, ok := findDetectorMatch(matches, "square_oauth_token")
+		if !ok {
+			t.Fatalf("expected square_oauth_token in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "sq0atp-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match wrong-length oauth token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: oauthTokenPrefix + "TOOSHORT"})
+		for _, m := range matches {
+			if m.Detector == "square_oauth_token" {
+				t.Fatalf("unexpected square_oauth_token match: %#v", m)
+			}
+		}
+	})
+}
+
+func TestGitLabExtendedTokenDetectors(t *testing.T) {
+	set := Default()
+
+	// Prefixes split to avoid triggering secret-scanner false positives in test files.
+	const deployPrefix = "gl" + "dt-"
+	const runnerPrefix = "gl" + "rt-"
+
+	t.Run("detects deploy token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "CI_DEPLOY_PASSWORD=" + deployPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZ01"})
+		match, ok := findDetectorMatch(matches, "gitlab_deploy_token")
+		if !ok {
+			t.Fatalf("expected gitlab_deploy_token in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "gldt-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match short deploy token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: deployPrefix + "tooshort"})
+		for _, m := range matches {
+			if m.Detector == "gitlab_deploy_token" {
+				t.Fatalf("unexpected gitlab_deploy_token match: %#v", m)
+			}
+		}
+	})
+
+	t.Run("detects runner auth token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "RUNNER_TOKEN=" + runnerPrefix + "ABCDEFGHIJKLMNOPQRSTUVWXYZ01"})
+		match, ok := findDetectorMatch(matches, "gitlab_runner_token")
+		if !ok {
+			t.Fatalf("expected gitlab_runner_token in %#v", matches)
+		}
+		if !strings.HasPrefix(match.Value, "glrt-") {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match short runner token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: runnerPrefix + "tooshort"})
+		for _, m := range matches {
+			if m.Detector == "gitlab_runner_token" {
+				t.Fatalf("unexpected gitlab_runner_token match: %#v", m)
+			}
+		}
+	})
 }
 
 func findDetectorMatch(matches []Match, detectorName string) (Match, bool) {

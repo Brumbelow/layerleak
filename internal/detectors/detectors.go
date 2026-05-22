@@ -114,7 +114,7 @@ func Default() Set {
 			newRegexDetector("square_oauth_token", regexp.MustCompile(`\bsq0atp-[0-9A-Za-z_-]{22}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("gitlab_deploy_token", regexp.MustCompile(`\bgldt-[A-Za-z0-9_-]{20,}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("gitlab_runner_token", regexp.MustCompile(`\bglrt-[A-Za-z0-9_-]{20,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("discord_webhook", regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{68}`), 0, ConfidenceHigh, nil),
+			newRegexDetector("discord_webhook", regexp.MustCompile(`(?:^|[^A-Za-z0-9+.-])(https://discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{68})(?:$|[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-])`), 1, ConfidenceHigh, nil),
 			newRegexDetector("discord_bot_token", regexp.MustCompile(`\b([A-Za-z0-9]{23,28})\.([A-Za-z0-9_-]{6,8})\.([A-Za-z0-9_-]{27,38})`), 0, ConfidenceHigh, looksLikeDiscordBotToken),
 			newRegexDetector("sentry_dsn", regexp.MustCompile(`https://[0-9a-f]{16,32}(?::[0-9a-f]{16,32})?@(?:o\d+\.ingest(?:\.us|\.de)?\.sentry\.io|(?:[a-z0-9-]+\.)?sentry\.io)/\d+`), 0, ConfidenceHigh, nil),
 			newRegexDetector("shopify_shared_secret", regexp.MustCompile(`\bshpss_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),

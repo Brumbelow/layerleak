@@ -108,6 +108,12 @@ func Default() Set {
 			newRegexDetector("age_secret_key", regexp.MustCompile(`\bAGE-SECRET-KEY-1[a-z0-9]{58}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("render_api_key", regexp.MustCompile(`\brnd_[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("twilio_auth_token", regexp.MustCompile(`(?i)twilio[_-]?auth[_-]?token\s*(?:=|:)\s*["']?([a-f0-9]{32})`), 1, ConfidenceHigh, nil),
+			newRegexDetector("new_relic_user_api_key", regexp.MustCompile(`\bNRAK-[A-Z0-9]{27}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("okta_api_token", regexp.MustCompile(`\bSSWS[ \t]+([A-Za-z0-9_-]{20,})`), 1, ConfidenceHigh, nil),
+			newRegexDetector("square_application_secret", regexp.MustCompile(`\bsq0csp-[0-9A-Za-z_-]{43}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("square_oauth_token", regexp.MustCompile(`\bsq0atp-[0-9A-Za-z_-]{22}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("gitlab_deploy_token", regexp.MustCompile(`\bgldt-[A-Za-z0-9_-]{20,}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("gitlab_runner_token", regexp.MustCompile(`\bglrt-[A-Za-z0-9_-]{20,}\b`), 0, ConfidenceHigh, nil),
 			contextEntropyDetector{},
 		},
 	}

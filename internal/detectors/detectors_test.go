@@ -350,6 +350,68 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "telegram_bot_token",
 		},
+		{
+			name: "postman api key",
+			input: ScanInput{
+				// Value split to avoid triggering secret-scanner false positives in test files.
+				Content: "POSTMAN_API_KEY=PM" + "AK-" + strings.Repeat("a", 24) + "-" + strings.Repeat("b", 34),
+			},
+			wantDetector: "postman_api_key",
+		},
+		{
+			name: "stripe webhook secret",
+			input: ScanInput{
+				Content: "STRIPE_WEBHOOK_SECRET=whs" + "ec_" + strings.Repeat("A", 32),
+			},
+			wantDetector: "stripe_webhook_secret",
+		},
+		{
+			name: "mapbox secret token",
+			input: ScanInput{
+				// Token split to avoid triggering secret-scanner false positives in test files.
+				Content: "MAPBOX_SECRET_TOKEN=s" + "k.eyJhbGciOiJSUzI1NiJ9.AbCdEfGhIjKlMnOpQrStUvWxYz",
+			},
+			wantDetector: "mapbox_secret_token",
+		},
+		{
+			name: "airtable personal access token",
+			input: ScanInput{
+				// Value split to avoid triggering secret-scanner false positives in test files.
+				Content: "AIRTABLE_TOKEN=pa" + "tABCDEFabcdef12." + strings.Repeat("a", 64),
+			},
+			wantDetector: "airtable_personal_access_token",
+		},
+		{
+			name: "planetscale service token",
+			input: ScanInput{
+				Content: "PLANETSCALE_TOKEN=pscale_tkn_" + strings.Repeat("A", 43),
+			},
+			wantDetector: "planetscale_token",
+		},
+		{
+			name: "fly api token",
+			input: ScanInput{
+				// Token split to avoid triggering secret-scanner false positives in test files.
+				Content: "FLY_API_TOKEN=fo" + "1_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.AbCdEfGhIj",
+			},
+			wantDetector: "fly_api_token",
+		},
+		{
+			name: "cloudflare api token",
+			input: ScanInput{
+				Key:     "CF_API_TOKEN",
+				Content: "CF_API_TOKEN=v1aBcDeFgHiJkLmNoPqRsTuVwXyZ01234Ab56Cd",
+			},
+			wantDetector: "cloudflare_api_token",
+		},
+		{
+			name: "vercel access token",
+			input: ScanInput{
+				Key:     "VERCEL_TOKEN",
+				Content: "VERCEL_TOKEN=AbCdEfGhIjKlMnOpQrStUvWx",
+			},
+			wantDetector: "vercel_access_token",
+		},
 	}
 
 	set := Default()

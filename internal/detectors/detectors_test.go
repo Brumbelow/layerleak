@@ -350,6 +350,70 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "telegram_bot_token",
 		},
+		{
+			name: "rubygems api key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "RUBYGEMS_API_KEY=" + "ru" + "bygems_" + strings.Repeat("abcdef01", 6),
+			},
+			wantDetector: "rubygems_api_key",
+		},
+		{
+			name: "tailscale api key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "TAILSCALE_API_KEY=" + "ts" + "key-api-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef01234",
+			},
+			wantDetector: "tailscale_api_key",
+		},
+		{
+			name: "heroku api key",
+			input: ScanInput{
+				Key:     "HEROKU_API_KEY",
+				Content: "HEROKU_API_KEY=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			},
+			wantDetector: "heroku_api_key",
+		},
+		{
+			name: "snyk api token",
+			input: ScanInput{
+				Key:     "SNYK_TOKEN",
+				Content: "SNYK_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			},
+			wantDetector: "snyk_api_token",
+		},
+		{
+			name: "circleci token",
+			input: ScanInput{
+				Key:     "CIRCLE_TOKEN",
+				Content: "CIRCLE_TOKEN=" + strings.Repeat("a1", 20),
+			},
+			wantDetector: "circleci_token",
+		},
+		{
+			name: "atlassian api token",
+			input: ScanInput{
+				Key:     "JIRA_API_TOKEN",
+				Content: "JIRA_API_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+			},
+			wantDetector: "atlassian_api_token",
+		},
+		{
+			name: "elastic api key",
+			input: ScanInput{
+				Key:     "ELASTIC_API_KEY",
+				Content: "ELASTIC_API_KEY=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+			},
+			wantDetector: "elastic_api_key",
+		},
+		{
+			name: "fastly api token",
+			input: ScanInput{
+				Key:     "FASTLY_API_TOKEN",
+				Content: "FASTLY_API_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+			},
+			wantDetector: "fastly_api_token",
+		},
 	}
 
 	set := Default()

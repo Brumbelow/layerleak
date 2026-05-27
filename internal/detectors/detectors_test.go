@@ -302,6 +302,118 @@ func TestDefaultSetScan(t *testing.T) {
 			},
 			wantDetector: "gitlab_runner_token",
 		},
+		{
+			name: "discord webhook",
+			input: ScanInput{
+				// URL split to avoid triggering secret-scanner false positives in test files.
+				Content: "WEBHOOK_URL=https://disc" + "ord.com/api/webhooks/123456789012345678/" + strings.Repeat("A", 68),
+			},
+			wantDetector: "discord_webhook",
+		},
+		{
+			name: "discord bot token",
+			input: ScanInput{
+				// Token split to avoid triggering secret-scanner false positives in test files.
+				// First segment is base64url("123456789012345678") = "MTIzNDU2Nzg5MDEyMzQ1Njc4".
+				Content: "DISCORD_TOKEN=" + "MTIzNDU2Nzg5MDEyMzQ1Njc4" + ".GH4XYZ." + "abcdefghijklmnopqrstuvwxyz01234",
+			},
+			wantDetector: "discord_bot_token",
+		},
+		{
+			name: "sentry dsn new style",
+			input: ScanInput{
+				Content: "SENTRY_DSN=https://" + strings.Repeat("a", 32) + "@o1234567.ingest.sentry.io/4567890",
+			},
+			wantDetector: "sentry_dsn",
+		},
+		{
+			name: "shopify shared secret",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "SHOPIFY_API_SECRET=" + "shp" + "ss_" + strings.Repeat("a", 32),
+			},
+			wantDetector: "shopify_shared_secret",
+		},
+		{
+			name: "shopify partner key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "SHOPIFY_PARTNER_KEY=" + "shp" + "pa_" + strings.Repeat("a", 32),
+			},
+			wantDetector: "shopify_partner_key",
+		},
+		{
+			name: "telegram bot token",
+			input: ScanInput{
+				// Value split to avoid triggering secret-scanner false positives in test files.
+				Content: "TELEGRAM_BOT_TOKEN=1234567890:" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345678",
+			},
+			wantDetector: "telegram_bot_token",
+		},
+		{
+			name: "rubygems api key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "RUBYGEMS_API_KEY=" + "ru" + "bygems_" + strings.Repeat("abcdef01", 6),
+			},
+			wantDetector: "rubygems_api_key",
+		},
+		{
+			name: "tailscale api key",
+			input: ScanInput{
+				// Prefix split to avoid triggering secret-scanner false positives in test files.
+				Content: "TAILSCALE_API_KEY=" + "ts" + "key-api-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef01234",
+			},
+			wantDetector: "tailscale_api_key",
+		},
+		{
+			name: "heroku api key",
+			input: ScanInput{
+				Key:     "HEROKU_API_KEY",
+				Content: "HEROKU_API_KEY=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			},
+			wantDetector: "heroku_api_key",
+		},
+		{
+			name: "snyk api token",
+			input: ScanInput{
+				Key:     "SNYK_TOKEN",
+				Content: "SNYK_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			},
+			wantDetector: "snyk_api_token",
+		},
+		{
+			name: "circleci token",
+			input: ScanInput{
+				Key:     "CIRCLE_TOKEN",
+				Content: "CIRCLE_TOKEN=" + strings.Repeat("a1", 20),
+			},
+			wantDetector: "circleci_token",
+		},
+		{
+			name: "atlassian api token",
+			input: ScanInput{
+				Key:     "JIRA_API_TOKEN",
+				Content: "JIRA_API_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+			},
+			wantDetector: "atlassian_api_token",
+		},
+		{
+			name: "elastic api key",
+			input: ScanInput{
+				Key:     "ELASTIC_API_KEY",
+				Content: "ELASTIC_API_KEY=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+			},
+			wantDetector: "elastic_api_key",
+		},
+		{
+			name: "fastly api token",
+			input: ScanInput{
+				Key:     "FASTLY_API_TOKEN",
+				Content: "FASTLY_API_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+			},
+			wantDetector: "fastly_api_token",
+		},
 	}
 
 	set := Default()
@@ -993,6 +1105,227 @@ func TestGitLabExtendedTokenDetectors(t *testing.T) {
 		for _, m := range matches {
 			if m.Detector == "gitlab_runner_token" {
 				t.Fatalf("unexpected gitlab_runner_token match: %#v", m)
+			}
+		}
+	})
+}
+
+func TestDiscordWebhookDetector(t *testing.T) {
+	set := Default()
+
+	// URL split to avoid triggering secret-scanner false positives in test files.
+	const webhookBase = "https://disc" + "ord.com/api/webhooks/"
+
+	t.Run("detects standard webhook", func(t *testing.T) {
+		content := webhookBase + "123456789012345678/" + strings.Repeat("A", 68)
+		matches := set.Scan(ScanInput{Content: content})
+		match, ok := findDetectorMatch(matches, "discord_webhook")
+		if !ok {
+			t.Fatalf("expected discord_webhook in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match token with wrong token length", func(t *testing.T) {
+		content := webhookBase + "123456789012345678/" + strings.Repeat("A", 40)
+		matches := set.Scan(ScanInput{Content: content})
+		for _, m := range matches {
+			if m.Detector == "discord_webhook" {
+				t.Fatalf("unexpected discord_webhook match for wrong token length: %#v", m)
+			}
+		}
+	})
+
+	t.Run("does not match snowflake with wrong digit count", func(t *testing.T) {
+		content := webhookBase + "123/" + strings.Repeat("A", 68)
+		matches := set.Scan(ScanInput{Content: content})
+		for _, m := range matches {
+			if m.Detector == "discord_webhook" {
+				t.Fatalf("unexpected discord_webhook match for short snowflake: %#v", m)
+			}
+		}
+	})
+}
+
+func TestDiscordBotTokenDetector(t *testing.T) {
+	set := Default()
+
+	// First segment is base64url("123456789012345678") = "MTIzNDU2Nzg5MDEyMzQ1Njc4" (24 chars).
+	const tokenPart1 = "MTIzNDU2Nzg5MDEyMzQ1Njc4"
+	const tokenPart2 = "GH4XYZ"
+	const tokenPart3 = "abcdefghijklmnopqrstuvwxyz01234"
+
+	t.Run("detects valid bot token", func(t *testing.T) {
+		token := tokenPart1 + "." + tokenPart2 + "." + tokenPart3
+		matches := set.Scan(ScanInput{Content: "DISCORD_TOKEN=" + token})
+		match, ok := findDetectorMatch(matches, "discord_bot_token")
+		if !ok {
+			t.Fatalf("expected discord_bot_token in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+		if !strings.HasPrefix(match.Value, tokenPart1) {
+			t.Fatalf("match.Value = %q", match.Value)
+		}
+	})
+
+	t.Run("does not match JWT", func(t *testing.T) {
+		matches := set.Scan(ScanInput{
+			Content: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.signaturetoken",
+		})
+		for _, m := range matches {
+			if m.Detector == "discord_bot_token" {
+				t.Fatalf("unexpected discord_bot_token match for JWT: %#v", m)
+			}
+		}
+	})
+
+	t.Run("does not match when first segment decodes to non-digits", func(t *testing.T) {
+		// "aGVsbG8" is base64url("hello") — contains non-digit chars.
+		token := "aGVsbG8wMTIzNDU2Nzg5" + "." + tokenPart2 + "." + tokenPart3
+		matches := set.Scan(ScanInput{Content: "TOKEN=" + token})
+		for _, m := range matches {
+			if m.Detector == "discord_bot_token" {
+				t.Fatalf("unexpected discord_bot_token match for non-digit decoded segment: %#v", m)
+			}
+		}
+	})
+}
+
+func TestSentryDSNDetector(t *testing.T) {
+	set := Default()
+
+	t.Run("detects new-style dsn", func(t *testing.T) {
+		dsn := "https://" + strings.Repeat("a", 32) + "@o1234567.ingest.sentry.io/4567890"
+		matches := set.Scan(ScanInput{Content: "SENTRY_DSN=" + dsn})
+		match, ok := findDetectorMatch(matches, "sentry_dsn")
+		if !ok {
+			t.Fatalf("expected sentry_dsn in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("detects new-style dsn with us region", func(t *testing.T) {
+		dsn := "https://" + strings.Repeat("b", 32) + "@o9876543.ingest.us.sentry.io/1234567"
+		matches := set.Scan(ScanInput{Content: "SENTRY_DSN=" + dsn})
+		_, ok := findDetectorMatch(matches, "sentry_dsn")
+		if !ok {
+			t.Fatalf("expected sentry_dsn for us-region DSN in %#v", matches)
+		}
+	})
+
+	t.Run("detects old-style dsn with key and secret", func(t *testing.T) {
+		dsn := "https://" + strings.Repeat("a", 32) + ":" + strings.Repeat("b", 32) + "@sentry.io/1234567"
+		matches := set.Scan(ScanInput{Content: "SENTRY_DSN=" + dsn})
+		_, ok := findDetectorMatch(matches, "sentry_dsn")
+		if !ok {
+			t.Fatalf("expected sentry_dsn for old-style DSN in %#v", matches)
+		}
+	})
+
+	t.Run("does not match dsn with too-short key", func(t *testing.T) {
+		dsn := "https://" + strings.Repeat("a", 8) + "@o1234567.ingest.sentry.io/4567890"
+		matches := set.Scan(ScanInput{Content: "SENTRY_DSN=" + dsn})
+		for _, m := range matches {
+			if m.Detector == "sentry_dsn" {
+				t.Fatalf("unexpected sentry_dsn match for short key: %#v", m)
+			}
+		}
+	})
+}
+
+func TestShopifySecretDetectors(t *testing.T) {
+	set := Default()
+
+	// Prefix split to avoid triggering secret-scanner false positives in test files.
+	const sharedSecretPrefix = "shp" + "ss_"
+	const partnerKeyPrefix = "shp" + "pa_"
+
+	t.Run("detects shared secret", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "SHOPIFY_SECRET=" + sharedSecretPrefix + strings.Repeat("a", 32)})
+		match, ok := findDetectorMatch(matches, "shopify_shared_secret")
+		if !ok {
+			t.Fatalf("expected shopify_shared_secret in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match shared secret with wrong hex length", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: sharedSecretPrefix + strings.Repeat("a", 16)})
+		for _, m := range matches {
+			if m.Detector == "shopify_shared_secret" {
+				t.Fatalf("unexpected shopify_shared_secret match for wrong length: %#v", m)
+			}
+		}
+	})
+
+	t.Run("detects partner key", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "SHOPIFY_PARTNER_KEY=" + partnerKeyPrefix + strings.Repeat("b", 32)})
+		match, ok := findDetectorMatch(matches, "shopify_partner_key")
+		if !ok {
+			t.Fatalf("expected shopify_partner_key in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("does not match partner key with invalid hex", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: partnerKeyPrefix + strings.Repeat("z", 32)})
+		for _, m := range matches {
+			if m.Detector == "shopify_partner_key" {
+				t.Fatalf("unexpected shopify_partner_key match for invalid hex: %#v", m)
+			}
+		}
+	})
+}
+
+func TestTelegramBotTokenDetector(t *testing.T) {
+	set := Default()
+
+	// Value split to avoid triggering secret-scanner false positives in test files.
+	const tokenSuffix = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345678"
+
+	t.Run("detects valid bot token", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "BOT_TOKEN=1234567890:" + tokenSuffix})
+		match, ok := findDetectorMatch(matches, "telegram_bot_token")
+		if !ok {
+			t.Fatalf("expected telegram_bot_token in %#v", matches)
+		}
+		if match.Confidence != ConfidenceHigh {
+			t.Fatalf("match.Confidence = %q", match.Confidence)
+		}
+	})
+
+	t.Run("detects token with 8-digit bot id", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "TELEGRAM_TOKEN=12345678:" + tokenSuffix})
+		_, ok := findDetectorMatch(matches, "telegram_bot_token")
+		if !ok {
+			t.Fatalf("expected telegram_bot_token for 8-digit bot id in %#v", matches)
+		}
+	})
+
+	t.Run("does not match token with too-short secret", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "1234567890:tooshort"})
+		for _, m := range matches {
+			if m.Detector == "telegram_bot_token" {
+				t.Fatalf("unexpected telegram_bot_token match for short secret: %#v", m)
+			}
+		}
+	})
+
+	t.Run("does not match token with too-short bot id", func(t *testing.T) {
+		matches := set.Scan(ScanInput{Content: "1234567:" + tokenSuffix})
+		for _, m := range matches {
+			if m.Detector == "telegram_bot_token" {
+				t.Fatalf("unexpected telegram_bot_token match for short bot id: %#v", m)
 			}
 		}
 	})

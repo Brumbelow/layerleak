@@ -1,0 +1,11 @@
+{
+  "name": "env_heroku_api_key_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "HEROKU_API_KEY",
+  "content": "HEROKU_API_KEY=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["heroku_api_key", "keyword_entropy"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

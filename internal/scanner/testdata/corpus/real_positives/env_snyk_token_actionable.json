@@ -1,0 +1,11 @@
+{
+  "name": "env_snyk_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "SNYK_TOKEN",
+  "content": "SNYK_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["keyword_entropy", "snyk_api_token"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

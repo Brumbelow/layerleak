@@ -1,0 +1,11 @@
+{
+  "name": "env_cloudflare_api_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "CF_API_TOKEN",
+  "content": "CF_API_TOKEN=v1aBcDeFgHiJkLmNoPqRsTuVwXyZ01234Ab56Cd",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["cloudflare_api_token", "keyword_entropy"],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

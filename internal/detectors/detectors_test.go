@@ -351,68 +351,66 @@ func TestDefaultSetScan(t *testing.T) {
 			wantDetector: "telegram_bot_token",
 		},
 		{
-			name: "rubygems api key",
+			name: "postman api key",
 			input: ScanInput{
-				// Prefix split to avoid triggering secret-scanner false positives in test files.
-				Content: "RUBYGEMS_API_KEY=" + "ru" + "bygems_" + strings.Repeat("abcdef01", 6),
+				// Value split to avoid triggering secret-scanner false positives in test files.
+				Content: "POSTMAN_API_KEY=PM" + "AK-" + strings.Repeat("a", 24) + "-" + strings.Repeat("b", 34),
 			},
-			wantDetector: "rubygems_api_key",
+			wantDetector: "postman_api_key",
 		},
 		{
-			name: "tailscale api key",
+			name: "stripe webhook secret",
 			input: ScanInput{
-				// Prefix split to avoid triggering secret-scanner false positives in test files.
-				Content: "TAILSCALE_API_KEY=" + "ts" + "key-api-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef01234",
+				Content: "STRIPE_WEBHOOK_SECRET=whs" + "ec_" + strings.Repeat("A", 32),
 			},
-			wantDetector: "tailscale_api_key",
+			wantDetector: "stripe_webhook_secret",
 		},
 		{
-			name: "heroku api key",
+			name: "mapbox secret token",
 			input: ScanInput{
-				Key:     "HEROKU_API_KEY",
-				Content: "HEROKU_API_KEY=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+				// Token split to avoid triggering secret-scanner false positives in test files.
+				Content: "MAPBOX_SECRET_TOKEN=s" + "k.eyJhbGciOiJSUzI1NiJ9.AbCdEfGhIjKlMnOpQrStUvWxYz",
 			},
-			wantDetector: "heroku_api_key",
+			wantDetector: "mapbox_secret_token",
 		},
 		{
-			name: "snyk api token",
+			name: "airtable personal access token",
 			input: ScanInput{
-				Key:     "SNYK_TOKEN",
-				Content: "SNYK_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+				// Value split to avoid triggering secret-scanner false positives in test files.
+				Content: "AIRTABLE_TOKEN=pa" + "tABCDEFabcdef12." + strings.Repeat("a", 64),
 			},
-			wantDetector: "snyk_api_token",
+			wantDetector: "airtable_personal_access_token",
 		},
 		{
-			name: "circleci token",
+			name: "planetscale service token",
 			input: ScanInput{
-				Key:     "CIRCLE_TOKEN",
-				Content: "CIRCLE_TOKEN=" + strings.Repeat("a1", 20),
+				Content: "PLANETSCALE_TOKEN=pscale_tkn_" + strings.Repeat("A", 43),
 			},
-			wantDetector: "circleci_token",
+			wantDetector: "planetscale_token",
 		},
 		{
-			name: "atlassian api token",
+			name: "fly api token",
 			input: ScanInput{
-				Key:     "JIRA_API_TOKEN",
-				Content: "JIRA_API_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+				// Token split to avoid triggering secret-scanner false positives in test files.
+				Content: "FLY_API_TOKEN=fo" + "1_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.AbCdEfGhIj",
 			},
-			wantDetector: "atlassian_api_token",
+			wantDetector: "fly_api_token",
 		},
 		{
-			name: "elastic api key",
+			name: "cloudflare api token",
 			input: ScanInput{
-				Key:     "ELASTIC_API_KEY",
-				Content: "ELASTIC_API_KEY=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+				Key:     "CF_API_TOKEN",
+				Content: "CF_API_TOKEN=v1aBcDeFgHiJkLmNoPqRsTuVwXyZ01234Ab56Cd",
 			},
-			wantDetector: "elastic_api_key",
+			wantDetector: "cloudflare_api_token",
 		},
 		{
-			name: "fastly api token",
+			name: "vercel access token",
 			input: ScanInput{
-				Key:     "FASTLY_API_TOKEN",
-				Content: "FASTLY_API_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789ABCD",
+				Key:     "VERCEL_TOKEN",
+				Content: "VERCEL_TOKEN=AbCdEfGhIjKlMnOpQrStUvWx",
 			},
-			wantDetector: "fastly_api_token",
+			wantDetector: "vercel_access_token",
 		},
 	}
 

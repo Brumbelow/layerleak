@@ -1,10 +1,9 @@
 <!DOCTYPE html>
-<meta name="h1-domain-verification" content="YEzunEmsGHbz4UhR6L4jVfgg6Aa3jyE1BqNzdrVRvtph1pkw">
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>layerleak Docs</title>
+    <title>layerleak docs</title>
     <meta
       name="description"
       content="Install, operate, and deploy layerleak, a daemonless OCI image secret scanner."
@@ -13,10 +12,11 @@
     <script defer src="../assets/site.js"></script>
   </head>
   <body data-page="docs">
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <div class="site-shell docs-page">
       <header class="site-header">
         <a class="brand-lockup" href="./">
-          <span class="brand-badge">LL</span>
+          <span class="brand-badge" aria-hidden="true">LL</span>
           <span class="brand-copy">
             <strong>layerleak</strong>
             <span>OCI image secret scanner</span>
@@ -29,44 +29,44 @@
         </nav>
       </header>
 
-      <main>
+      <main id="main-content">
         <section class="docs-hero" data-reveal>
           <div class="docs-hero-copy">
             <span class="site-kicker">Operator notes</span>
-            <h1>Scan public OCI images without unpacking trust.</h1>
+            <h1>Scan public OCI images without a daemon.</h1>
             <p>
-              layerleak reads registry manifests, config metadata, history, and filesystem layers
-              directly. It is read-only, daemonless, and built to keep actionable findings separate
-              from test fixtures and examples.
+              layerleak reads registry manifests, image config, build history, and decompressed
+              filesystem layers directly. It is read-only, runs as a single Go binary, and keeps
+              actionable findings separated from likely test fixtures and example placeholders.
             </p>
             <div class="button-row">
               <a class="button-primary" href="#quickstart">Install</a>
-              <a class="button-secondary" href="demo/">Open demo</a>
+              <a class="button-secondary" href="demo/">Open simulated demo</a>
             </div>
           </div>
 
-          <div class="layer-map" role="img" aria-label="layerleak scan flow">
+          <div class="layer-map" role="img" aria-label="layerleak scan flow: registry manifest and config feed layer extraction, then redacted JSON output and optional Postgres persistence">
             <div class="layer-node registry">
-              <span>registry</span>
-              <strong>manifest + config</strong>
+              <span>input</span>
+              <strong>registry manifest + config</strong>
             </div>
             <div class="layer-rail" aria-hidden="true"></div>
             <div class="layer-stack" aria-hidden="true">
-              <span style="--i: 0">layer sha256:8b9</span>
+              <span style="--i: 0">layer sha256:8b9…</span>
               <span style="--i: 1">whiteouts</span>
-              <span style="--i: 2">history</span>
+              <span style="--i: 2">image history</span>
               <span style="--i: 3">env + labels</span>
             </div>
             <div class="layer-node findings">
-              <span>result</span>
-              <strong>redacted JSON + optional Postgres</strong>
+              <span>output</span>
+              <strong>redacted JSON · optional Postgres</strong>
             </div>
           </div>
         </section>
 
         <section class="docs-status-strip" aria-label="Project facts" data-reveal>
           <div>
-            <span>Install path</span>
+            <span>Install</span>
             <strong>github.com/brumbelow/layerleak@latest</strong>
           </div>
           <div>
@@ -84,15 +84,16 @@
         </section>
 
         <div class="docs-shell">
-          <aside class="docs-nav" data-reveal>
-            <strong>Contents</strong>
-            <a href="#quickstart">Quickstart</a>
-            <a href="#scan-model">Scan model</a>
-            <a href="#configuration">Configuration</a>
-            <a href="#results">Results</a>
-            <a href="#postgres">Postgres</a>
-            <a href="#api">HTTP API</a>
-            <a href="#demo">Demo</a>
+          <aside class="docs-nav" data-reveal aria-label="Section">
+            <strong>On this page</strong>
+            <a href="#quickstart">01 · Quickstart</a>
+            <a href="#scan-model">02 · Scan model</a>
+            <a href="#configuration">03 · Configuration</a>
+            <a href="#results">04 · Results</a>
+            <a href="#postgres">05 · Postgres</a>
+            <a href="#api">06 · HTTP API</a>
+            <a href="#deploy">07 · Container &amp; Compose</a>
+            <a href="#demo">08 · Demo</a>
           </aside>
 
           <div class="docs-content">
@@ -102,19 +103,24 @@
                 <h2>Quickstart</h2>
               </div>
               <p>
-                The module root is the supported CLI entrypoint. Build or install from there, then
-                scan a public image reference.
+                The module root is the supported CLI entrypoint. Install or build from there, then
+                scan a public image reference. <code>GOBIN</code> or <code>GOPATH/bin</code> must be
+                on <code>PATH</code> after <code>go install</code>.
               </p>
               <pre><code>go install github.com/brumbelow/layerleak@latest
 layerleak --help
 layerleak scan library/nginx:latest --format json</code></pre>
               <p>
-                Source builds follow the same path:
+                Source builds use the same module:
               </p>
               <pre><code>git clone https://github.com/brumbelow/layerleak.git
 cd layerleak
 go build -o layerleak .
 ./layerleak scan alpine:latest --platform linux/amd64</code></pre>
+              <p class="muted">
+                To pin a published release, replace <code>@latest</code> with the
+                <code>v1.x.y</code> tag you want.
+              </p>
             </section>
 
             <section class="doc-block" id="scan-model" data-reveal>
@@ -136,15 +142,21 @@ layerleak scan repo/app@sha256:...</code></pre>
                 </article>
                 <article>
                   <h3>Repository sweep</h3>
-                  <p>Bare repository names enumerate public tags, resolve digests, and group duplicates.</p>
+                  <p>Bare repository names enumerate public tags, resolve each tag to a digest, and group duplicate digests.</p>
                   <pre><code>layerleak scan mongo
 layerleak scan quay.io/prometheus/busybox</code></pre>
                 </article>
               </div>
               <p>
-                Multi-arch indexes can be narrowed with <code>--platform os/arch[/variant]</code>.
-                Attestation and provenance manifests are skipped instead of counted as platform
-                scan failures.
+                Multi-arch indexes can be narrowed with
+                <code>--platform os/arch[/variant]</code>. Attestation and provenance manifests
+                (for example <code>application/vnd.in-toto+json</code>) are skipped instead of
+                counted as platform scan failures.
+              </p>
+              <p>
+                Detection uses native detectors for 60+ secret types, with TruffleHog defaults as a
+                fallback layer. Findings on paths that look like tests, fixtures, examples, specs,
+                or e2e suites are kept as suppressed findings rather than counted as actionable.
               </p>
             </section>
 
@@ -154,8 +166,9 @@ layerleak scan quay.io/prometheus/busybox</code></pre>
                 <h2>Configuration</h2>
               </div>
               <p>
-                Defaults live in <code>.env.example</code> and in the Go config loader. Limits fail
-                closed when exceeded, while preserving any partial results produced before the error.
+                Defaults live in <code>.env.example</code> and the Go config loader. Positive
+                <code>MAX_*</code> caps fail closed when exceeded, while preserving the partial
+                results produced before the failure.
               </p>
               <pre><code>LAYERLEAK_LOG_LEVEL=info
 LAYERLEAK_FINDINGS_DIR=findings
@@ -173,11 +186,31 @@ LAYERLEAK_MAX_REPOSITORY_TAGS=0
 LAYERLEAK_MAX_REPOSITORY_TARGETS=0
 LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
 LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable</code></pre>
-              <p>
-                Positive <code>MAX_*</code> values enable caps. A value of <code>0</code> disables
-                caps for the non-negative limit settings. <code>LAYERLEAK_HTTP_TIMEOUT</code> uses
-                Go duration syntax.
-              </p>
+              <ul class="config-notes">
+                <li>
+                  <strong>Limits.</strong> Settings with a non-negative semantic
+                  (<code>MAX_LAYER_BYTES</code>, <code>MAX_LAYER_ENTRIES</code>,
+                  <code>MAX_MANIFEST_BYTES</code>, <code>MAX_CONFIG_BYTES</code>,
+                  <code>MAX_TAG_RESPONSE_BYTES</code>, <code>MAX_REPOSITORY_TAGS</code>,
+                  <code>MAX_REPOSITORY_TARGETS</code>) accept <code>0</code> to disable the cap.
+                  <code>MAX_FILE_BYTES</code> must be greater than zero.
+                </li>
+                <li>
+                  <strong>Timeouts.</strong> <code>LAYERLEAK_HTTP_TIMEOUT</code> uses Go duration
+                  syntax (<code>30s</code>, <code>2m</code>, <code>1h</code>) and applies to every
+                  registry request: manifests, blobs, tag pages, and auth tokens.
+                </li>
+                <li>
+                  <strong>Registry overrides.</strong>
+                  <code>LAYERLEAK_REGISTRY_BASE_URL</code> and
+                  <code>LAYERLEAK_REGISTRY_AUTH_URL</code> are optional. Leave them unset unless
+                  forcing traffic through a proxy or alternate auth endpoint.
+                </li>
+                <li>
+                  <strong>API container.</strong> The published image defaults
+                  <code>LAYERLEAK_API_ADDR</code> to <code>0.0.0.0:8080</code>.
+                </li>
+              </ul>
             </section>
 
             <section class="doc-block" id="results" data-reveal>
@@ -186,19 +219,41 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?ssl
                 <h2>Results</h2>
               </div>
               <p>
-                Actionable findings drive non-zero scan status and remain in <code>findings</code>.
-                Likely test, example, and demo placeholders are preserved as suppressed findings
-                with disposition metadata, but do not count toward <code>total_findings</code>.
+                Actionable findings remain in <code>findings</code> and drive the non-zero scan
+                exit status. Likely test, example, fixture, and spec placeholders are emitted as
+                suppressed findings with disposition metadata, and do not count toward
+                <code>total_findings</code>.
               </p>
-              <div class="result-schema">
-                <span>detector_name</span>
-                <span>source_type</span>
-                <span>manifest_digest</span>
-                <span>platform</span>
-                <span>line_number</span>
-                <span>redacted_value</span>
-                <span>fingerprint</span>
-                <span>present_in_final_image</span>
+              <p>
+                A scan saves a JSON file under <code>LAYERLEAK_FINDINGS_DIR</code>. If unset, it
+                defaults to <code>findings/</code> beside the nearest <code>go.mod</code>, falling
+                back to the current working directory.
+              </p>
+              <h3 class="schema-heading">Per-occurrence fields</h3>
+              <div class="result-schema" role="list">
+                <span role="listitem">detector_name</span>
+                <span role="listitem">confidence</span>
+                <span role="listitem">disposition</span>
+                <span role="listitem">disposition_reason</span>
+                <span role="listitem">source_type</span>
+                <span role="listitem">platform</span>
+                <span role="listitem">file_path</span>
+                <span role="listitem">layer_digest</span>
+                <span role="listitem">line_number</span>
+                <span role="listitem">source_location</span>
+                <span role="listitem">context_snippet</span>
+                <span role="listitem">present_in_final_image</span>
+              </div>
+              <h3 class="schema-heading">Per-finding fields</h3>
+              <div class="result-schema" role="list">
+                <span role="listitem">manifest_digest</span>
+                <span role="listitem">fingerprint</span>
+                <span role="listitem">redacted_value</span>
+                <span role="listitem">occurrence_count</span>
+                <span role="listitem">actionable_occurrence_count</span>
+                <span role="listitem">suppressed_occurrence_count</span>
+                <span role="listitem">first_seen_at</span>
+                <span role="listitem">last_seen_at</span>
               </div>
               <p>
                 Saved files and Postgres writes default to redacted values and redacted context
@@ -221,16 +276,23 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?ssl
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.up.sql
 psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
               <p>
-                The container image includes a rerunnable helper:
+                The published container image ships a rerunnable helper that enforces server
+                version <code>&gt;= 16.13</code> and exits non-zero on partial migration state:
               </p>
               <pre><code>docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
   ghcr.io/brumbelow/layerleak:latest \
   layerleak-migrate-up</code></pre>
               <p>
-                Current state is deduplicated by manifest digest and fingerprint. Append-only scan
-                history is stored in <code>scan_runs</code> as a redacted result snapshot.
+                Current state is deduplicated by <code>(manifest_digest, fingerprint)</code>.
+                Append-only scan history lives in <code>scan_runs</code> as a redacted snapshot of
+                the public result JSON, regardless of <code>LAYERLEAK_PERSIST_RAW_SECRETS</code>.
               </p>
+              <div class="callout" role="note">
+                <strong>Safe purge</strong>
+                Use a dedicated database or schema for layerleak. To clear stored data, drop the
+                schema or database rather than deleting individual rows.
+              </div>
             </section>
 
             <section class="doc-block" id="api" data-reveal>
@@ -244,29 +306,72 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
                 files.
               </p>
               <pre><code>go run ./cmd/api</code></pre>
-              <pre><code>GET  /health
-POST /api/v1/scans
-GET  /api/v1/scans/{id}
-GET  /api/v1/repositories
-GET  /api/v1/repositories/{repository}/scans
-GET  /api/v1/repositories/{repository}/findings
-GET  /api/v1/findings/{id}</code></pre>
+              <ul class="api-list">
+                <li><span class="verb verb-get">GET</span><code>/health</code></li>
+                <li><span class="verb verb-post">POST</span><code>/api/v1/scans</code></li>
+                <li><span class="verb verb-get">GET</span><code>/api/v1/scans/{id}</code></li>
+                <li><span class="verb verb-get">GET</span><code>/api/v1/repositories</code></li>
+                <li><span class="verb verb-get">GET</span><code>/api/v1/repositories/{repository}/scans</code></li>
+                <li><span class="verb verb-get">GET</span><code>/api/v1/repositories/{repository}/findings</code></li>
+                <li><span class="verb verb-get">GET</span><code>/api/v1/findings/{id}</code></li>
+              </ul>
               <p>
-                <code>POST /api/v1/scans</code> accepts <code>reference</code> and optional
-                <code>platform</code>. Repository scan and finding list endpoints support
-                <code>?registry=</code>, plus pagination where applicable. The API has no built-in
-                auth layer; deploy it behind private network controls or an auth gateway.
+                <code>POST /api/v1/scans</code> is synchronous and accepts a JSON body with
+                <code>reference</code> and optional <code>platform</code>. The response includes
+                <code>scan_run_id</code> when Postgres persistence is enabled, plus the same
+                redacted result schema produced by the CLI.
+              </p>
+              <p>
+                Repository scan and finding list endpoints accept an optional
+                <code>?registry=</code> query parameter (defaults to <code>docker.io</code>),
+                plus <code>?limit=</code> and <code>?offset=</code> pagination
+                (max <code>limit</code> is 200). Findings list also accepts
+                <code>?disposition=actionable|suppressed|all</code>.
+              </p>
+              <div class="callout callout-warn" role="note">
+                <strong>No built-in auth</strong>
+                The API does not include an authentication layer. Deploy it on a private network
+                and front it with your own authn/authz gateway or reverse proxy policy.
+              </div>
+            </section>
+
+            <section class="doc-block" id="deploy" data-reveal>
+              <div class="doc-heading">
+                <span>07</span>
+                <h2>Container &amp; Compose</h2>
+              </div>
+              <p>
+                The published image runs the API by default. It binds
+                <code>0.0.0.0:8080</code> and expects <code>LAYERLEAK_DATABASE_URL</code>.
+              </p>
+              <pre><code>docker pull ghcr.io/brumbelow/layerleak:latest
+docker run --rm \
+  -p 8080:8080 \
+  -e LAYERLEAK_DATABASE_URL='postgres://&lt;user&gt;:&lt;pass&gt;@&lt;host&gt;:5432/layerleak?sslmode=disable' \
+  ghcr.io/brumbelow/layerleak:latest</code></pre>
+              <p>
+                The repository ships a Compose stack in <code>docker-compose.yml</code> with
+                <code>db</code>, <code>migrate</code>, and <code>api</code> services. The
+                <code>db</code> service baseline is pinned to
+                <code>postgres:16.13-alpine</code>.
+              </p>
+              <pre><code>docker compose --profile manual run --rm migrate
+docker compose up -d api</code></pre>
+              <p>
+                In Dockge or Komodo, import the same Compose file and run the <code>migrate</code>
+                service once before enabling the long-running <code>api</code> service.
               </p>
             </section>
 
             <section class="doc-block" id="demo" data-reveal>
               <div class="doc-heading">
-                <span>07</span>
+                <span>08</span>
                 <h2>Browser demo</h2>
               </div>
               <p>
-                The Pages demo is static and simulated. It replays a fixed transcript and renders a
+                The Pages demo is fully static. It replays a fixed transcript and renders a
                 synthetic Postgres-style snapshot from versioned fixture data in the repository.
+                Nothing is sent to any registry or database.
               </p>
               <pre><code>layerleak scan vulnerableHost:latest --platform linux/amd64</code></pre>
               <p><a class="button-primary" href="demo/">Open the simulated demo</a></p>

@@ -14,10 +14,12 @@
   }
 
   const reveals = document.querySelectorAll("[data-reveal]");
+  const show = (element) => {
+    element.classList.add("is-visible");
+  };
+
   if (!("IntersectionObserver" in window)) {
-    reveals.forEach((element) => {
-      element.classList.add("is-visible");
-    });
+    reveals.forEach(show);
     return;
   }
 
@@ -25,15 +27,21 @@
     (entries) => {
       entries.forEach((entry) => {
         if (entry.isIntersecting) {
-          entry.target.classList.add("is-visible");
+          show(entry.target);
           observer.unobserve(entry.target);
         }
       });
     },
-    { threshold: 0.18 }
+    { threshold: 0.18, rootMargin: "0px 0px -8% 0px" }
   );
 
   reveals.forEach((element) => {
+    const rect = element.getBoundingClientRect();
+    if (rect.top < window.innerHeight && rect.bottom > 0) {
+      show(element);
+      return;
+    }
+
     observer.observe(element);
   });
 })();

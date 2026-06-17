@@ -37,3 +37,12 @@ jobs:
 
       - name: go test
         run: go test ./... -count=1
+
+      - name: install smoke
+        run: |
+          set -euo pipefail
+          install_bin="$(mktemp -d)"
+          GOBIN="${install_bin}" go install .
+          "${install_bin}/layerleak" --help
+          "${install_bin}/layerleak" scan --help
+          "${install_bin}/layerleak" --version

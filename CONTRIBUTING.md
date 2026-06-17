@@ -57,9 +57,9 @@ Use an explicit tag or digest when you want to limit scope.
 
 - The canonical user install path is `go install github.com/brumbelow/layerleak@latest`.
 - The module root must remain the installable CLI entrypoint.
-- For the current module path `github.com/brumbelow/layerleak`, publish only `v1.x.y` release tags.
-- Do not publish new `v2+` tags from the root module unless the module path first changes to `github.com/brumbelow/layerleak/vN`.
-- Before cutting a release tag, verify both `go test ./...` and `GOBIN=/tmp/layerleak-bin go install .` succeed.
+- For the current module path `github.com/brumbelow/layerleak`, publish only `v1.x.y` release tags. `v1.0.0` is already published; the next root-module release continues that sequence (for example, `v1.1.0`).
+- Do not publish new `v2+` tags from the root module unless the module path first changes to `github.com/brumbelow/layerleak/vN`. Historical `v2.x` GitHub Releases are not module-major releases and are not picked up by `go install @latest`.
+- Before cutting a release tag, verify `go test ./... -count=1`, `GOBIN=/tmp/layerleak-bin go install .`, and that `layerleak --help`, `layerleak scan --help`, and `layerleak --version` all run on the installed binary.
 
 ## Contribution Rules
 

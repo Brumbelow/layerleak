@@ -15,9 +15,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const repositorySweepWarning = "warning: bare repository reference; layerleak enumerates every public tag in the repository. Pass a tag or digest (e.g. <repo>:tag) to scan a single image."
+
 func newScanCmd() *cobra.Command {
 	var platform string
 	var format string
+	var tagPageSize int
+	var maxRepositoryTags int
+	var maxRepositoryTargets int
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
@@ -26,6 +31,10 @@ func newScanCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
+				return err
+			}
+
+			if err := applyScanScopeFlags(cmd, &cfg, tagPageSize, maxRepositoryTags, maxRepositoryTargets); err != nil {
 				return err
 			}
 
@@ -44,11 +53,21 @@ func newScanCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 
+			if ref.IsRepositoryOnly() {
+				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), repositorySweepWarning); err != nil {
+					return err
+				}
+			}
+
 			progress := newProgressRenderer(cmd.ErrOrStderr())
+			startingMessage := "Preparing scan"
+			if ref.IsRepositoryOnly() {
+				startingMessage = "Preparing repository sweep across every public tag"
+			}
 			if err := progress.Start(progressSnapshot{
 				repository: ref.Repository,
 				phase:      "Starting",
-				message:    "Preparing scan",
+				message:    startingMessage,
 			}); err != nil {
 				return err
 			}
@@ -204,8 +223,33 @@ func newScanCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform in os/arch[/variant] format")
 	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary or json")
+	cmd.Flags().IntVar(&tagPageSize, "tag-page-size", 0, "Registry tag-list page size for repository sweeps. Overrides LAYERLEAK_TAG_PAGE_SIZE. Must be greater than zero when set.")
+	cmd.Flags().IntVar(&maxRepositoryTags, "max-repository-tags", 0, "Maximum tags enumerated per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TAGS. Set to 0 to disable the limit; negative values are rejected.")
+	cmd.Flags().IntVar(&maxRepositoryTargets, "max-repository-targets", 0, "Maximum distinct targets resolved per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TARGETS. Set to 0 to disable the limit; negative values are rejected.")
 
 	return cmd
+}
+
+func applyScanScopeFlags(cmd *cobra.Command, cfg *config.Config, tagPageSize, maxRepositoryTags, maxRepositoryTargets int) error {
+	if cmd.Flags().Changed("tag-page-size") {
+		if tagPageSize <= 0 {
+			return fmt.Errorf("--tag-page-size must be greater than zero")
+		}
+		cfg.TagPageSize = tagPageSize
+	}
+	if cmd.Flags().Changed("max-repository-tags") {
+		if maxRepositoryTags < 0 {
+			return fmt.Errorf("--max-repository-tags must be greater than or equal to zero")
+		}
+		cfg.MaxRepositoryTags = maxRepositoryTags
+	}
+	if cmd.Flags().Changed("max-repository-targets") {
+		if maxRepositoryTargets < 0 {
+			return fmt.Errorf("--max-repository-targets must be greater than or equal to zero")
+		}
+		cfg.MaxRepositoryTargets = maxRepositoryTargets
+	}
+	return nil
 }
 
 func renderSummary(output io.Writer, result jobs.Result) error {

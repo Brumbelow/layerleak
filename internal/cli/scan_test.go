@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brumbelow/layerleak/internal/manifest"
@@ -258,6 +259,290 @@ func TestScanCommandWritesPartialResultsOnConfiguredLimitError(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"redacted_value"`) {
 		t.Fatalf("partial findings file missing redacted value field: %q", string(body))
+	}
+}
+
+func TestScanCommandRejectsInvalidScopeFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		flag string
+	}{
+		{"tag page size must be positive", "--tag-page-size=0"},
+		{"tag page size must be parsable", "--tag-page-size=-1"},
+		{"max repository tags must be non-negative", "--max-repository-tags=-1"},
+		{"max repository targets must be non-negative", "--max-repository-targets=-1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+			t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+			command := newRootCmd()
+			command.SetOut(io.Discard)
+			command.SetErr(io.Discard)
+			command.SetContext(context.Background())
+			command.SetArgs([]string{"scan", "library/app:latest", "--format", "json", tc.flag})
+
+			err := command.Execute()
+			if err == nil {
+				t.Fatalf("Execute() error = nil for %s", tc.flag)
+			}
+			if !strings.Contains(err.Error(), "must be") {
+				t.Fatalf("Execute() err = %q, want validation message", err.Error())
+			}
+		})
+	}
+}
+
+func TestScanCommandRepositorySweepUsesTagPageSizeFlag(t *testing.T) {
+	var (
+		mu              sync.Mutex
+		observedQueries []string
+	)
+	configDigest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	manifestDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return commandResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+
+		switch request.URL.Path {
+		case "/v2/library/app/tags/list":
+			mu.Lock()
+			observedQueries = append(observedQueries, request.URL.RawQuery)
+			mu.Unlock()
+			body, _ := json.Marshal(map[string]any{"name": "library/app", "tags": []string{"latest"}})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		case "/v2/library/app/manifests/latest":
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configDigest+`","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": manifestDigest,
+			}), nil
+		case "/v2/library/app/manifests/" + manifestDigest:
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configDigest+`","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": manifestDigest,
+			}), nil
+		case "/v2/library/app/blobs/" + configDigest:
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{}}`), nil), nil
+		default:
+			return commandResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	defer func() {
+		http.DefaultTransport = oldTransport
+	}()
+
+	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&stdout)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app", "--format", "json", "--tag-page-size", "37"})
+
+	if err := command.Execute(); err != nil {
+		if _, ok := err.(interface{ ExitCode() int }); !ok {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observedQueries) == 0 {
+		t.Fatalf("no tag list query observed")
+	}
+	for _, query := range observedQueries {
+		if !strings.Contains(query, "n=37") {
+			t.Fatalf("tag list query = %q, want n=37", query)
+		}
+	}
+}
+
+func TestScanCommandRepositorySweepHonorsMaxRepositoryTagsFlag(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return commandResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		if request.URL.Path == "/v2/library/app/tags/list" {
+			body, _ := json.Marshal(map[string]any{"name": "library/app", "tags": []string{"latest", "v1", "v2"}})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		return commandResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+	})
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	defer func() {
+		http.DefaultTransport = oldTransport
+	}()
+
+	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&stdout)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app", "--format", "json", "--max-repository-tags", "1"})
+
+	err := command.Execute()
+	if err == nil {
+		t.Fatalf("Execute() error = nil, want limit exceeded")
+	}
+	if !strings.Contains(err.Error(), "max repository tags") {
+		t.Fatalf("Execute() err = %q, want repository tag limit error", err.Error())
+	}
+}
+
+func TestScanCommandRepositorySweepHonorsMaxRepositoryTargetsFlag(t *testing.T) {
+	firstDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	secondDigest := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return commandResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		switch request.URL.Path {
+		case "/v2/library/app/tags/list":
+			body, _ := json.Marshal(map[string]any{"name": "library/app", "tags": []string{"v1", "v2"}})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		case "/v2/library/app/manifests/v1":
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": firstDigest,
+			}), nil
+		case "/v2/library/app/manifests/v2":
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","size":1},"layers":[]}`), map[string]string{
+				"Docker-Content-Digest": secondDigest,
+			}), nil
+		}
+		return commandResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+	})
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	defer func() {
+		http.DefaultTransport = oldTransport
+	}()
+
+	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&stdout)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app", "--format", "json", "--max-repository-targets", "1"})
+
+	err := command.Execute()
+	if err == nil {
+		t.Fatalf("Execute() error = nil, want repository target limit error")
+	}
+	if !strings.Contains(err.Error(), "max repository targets") {
+		t.Fatalf("Execute() err = %q, want repository target limit error", err.Error())
+	}
+}
+
+func TestScanCommandWarnsOnBareRepositorySweep(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return commandResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		// Make the tag list fail so the run terminates quickly; the warning must
+		// be emitted before tag enumeration begins.
+		return commandResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+	})
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	defer func() {
+		http.DefaultTransport = oldTransport
+	}()
+
+	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	var stdout bytes.Buffer
+	command.SetOut(io.Discard)
+	command.SetErr(&stdout)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app", "--format", "json"})
+
+	_ = command.Execute()
+
+	output := stdout.String()
+	if !strings.Contains(output, "enumerates every public tag") {
+		t.Fatalf("stderr missing bare repository sweep warning: %q", output)
+	}
+}
+
+func TestScanCommandDoesNotWarnOnPinnedReference(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "auth.test" {
+			body, _ := json.Marshal(map[string]string{"token": "test-token"})
+			return commandResponse(http.StatusOK, "application/json", body, nil), nil
+		}
+		if request.Header.Get("Authorization") != "Bearer test-token" {
+			return commandResponse(http.StatusUnauthorized, "", nil, map[string]string{
+				"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
+			}), nil
+		}
+		return commandResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+	})
+
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	defer func() {
+		http.DefaultTransport = oldTransport
+	}()
+
+	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "https://registry.test")
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	command := newRootCmd()
+	var stdout bytes.Buffer
+	command.SetOut(io.Discard)
+	command.SetErr(&stdout)
+	command.SetContext(context.Background())
+	command.SetArgs([]string{"scan", "library/app:latest", "--format", "json"})
+
+	_ = command.Execute()
+
+	if strings.Contains(stdout.String(), "enumerates every public tag") {
+		t.Fatalf("pinned reference run should not warn about bare repository sweep: %q", stdout.String())
 	}
 }
 

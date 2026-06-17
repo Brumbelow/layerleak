@@ -39,7 +39,7 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "layerleak",
 		Short:         "Scan public OCI images for likely secrets",
-		Version:       Version,
+		Version:       effectiveVersion(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}

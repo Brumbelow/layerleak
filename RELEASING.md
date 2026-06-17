@@ -20,6 +20,7 @@
 
 ```bash
 go test ./... -count=1
+docker compose config
 GOBIN=/tmp/layerleak-bin GOCACHE=/tmp/layerleak-gocache go install .
 /tmp/layerleak-bin/layerleak --help
 /tmp/layerleak-bin/layerleak scan --help

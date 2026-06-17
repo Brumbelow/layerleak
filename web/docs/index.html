@@ -200,7 +200,9 @@ LAYERLEAK_MAX_TAG_RESPONSE_BYTES=8388608
 LAYERLEAK_MAX_REPOSITORY_TAGS=0
 LAYERLEAK_MAX_REPOSITORY_TARGETS=0
 LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
-LAYERLEAK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable</code></pre>
+LAYERLEAK_REGISTRY_BASE_URL=
+LAYERLEAK_REGISTRY_AUTH_URL=
+LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=disable</code></pre>
               <ul class="config-notes">
                 <li>
                   <strong>Limits.</strong> Settings with a non-negative semantic
@@ -340,8 +342,9 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
                 Repository scan and finding list endpoints accept an optional
                 <code>?registry=</code> query parameter (defaults to <code>docker.io</code>),
                 plus <code>?limit=</code> and <code>?offset=</code> pagination
-                (max <code>limit</code> is 200). Findings list also accepts
-                <code>?disposition=actionable|suppressed|all</code>.
+                (<code>limit</code> defaults to 50 and is capped at 200). Findings list also
+                accepts <code>?disposition=actionable|suppressed|all</code>; omitted
+                <code>disposition</code> returns actionable findings only.
               </p>
               <div class="callout callout-warn" role="note">
                 <strong>No built-in auth</strong>
@@ -370,7 +373,9 @@ docker run --rm \
                 <code>db</code> service baseline is pinned to
                 <code>postgres:16.13-alpine</code>.
               </p>
-              <pre><code>docker compose --profile manual run --rm migrate
+              <pre><code>docker compose config
+
+docker compose --profile manual run --rm migrate
 docker compose up -d api</code></pre>
               <p>
                 In Dockge or Komodo, import the same Compose file and run the <code>migrate</code>

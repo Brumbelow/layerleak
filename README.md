@@ -59,6 +59,8 @@ go install github.com/brumbelow/layerleak@v1.0.0
 Replace `v1.0.0` with the published `v1.x.y` tag you want.
 Make sure your `GOBIN` or `GOPATH/bin` directory is on `PATH`.
 
+The module path is `github.com/brumbelow/layerleak`, so `go install @latest` resolves to the highest published `v1.x.y` tag. A `v2.x.y` module release would require the module path to change to `github.com/brumbelow/layerleak/v2`. Module-installed binaries report the resolved module version through `layerleak --version`; local checkout builds report the version Go embeds for the checkout, falling back to `dev` when no module version is available.
+
 Build from source:
 
 ```bash
@@ -228,7 +230,12 @@ Those saved findings files contain finding records with `redacted_value`, redact
 If `LAYERLEAK_PERSIST_RAW_SECRETS=1`, the saved findings files also include raw `value` and `raw_context_snippet`.
 If Postgres persistence is enabled, raw `findings.value` and `finding_occurrences.raw_snippet` stay empty unless `LAYERLEAK_PERSIST_RAW_SECRETS=1`.
 For multi-arch images, layerleak skips attestation and provenance manifests such as `application/vnd.in-toto+json` instead of counting them as failed platform scans.
-If you pass a bare repository name such as `mongo`, layerleak enumerates all public tags in that repository, resolves each tag to a digest, groups duplicate digests, and scans the distinct targets. If you want a single image only, pass an explicit tag or digest such as `mongo:latest` or `mongo@sha256:...`.
+
+Bare repository sweeps:
+
+- Passing a bare repository name such as `mongo` enumerates every public tag in that repository, resolves each tag to a digest, groups duplicate digests, and scans the distinct targets.
+- layerleak prints a warning on stderr before starting the sweep so the scope is obvious in CI logs and automation output.
+- If you want a single image only, pass an explicit tag or digest such as `mongo:latest` or `mongo@sha256:...`.
 
 Command syntax:
 
@@ -236,6 +243,14 @@ Command syntax:
 layerleak [command]
 layerleak scan <image-ref> [flags]
 ```
+
+Scope flags for repository sweeps (each overrides the matching environment variable for a single command):
+
+| Flag | Purpose |
+| --- | --- |
+| `--tag-page-size` | Registry tag-list page size for repository sweeps. Must be greater than zero. Overrides `LAYERLEAK_TAG_PAGE_SIZE`. |
+| `--max-repository-tags` | Maximum tags enumerated per repository sweep. `0` disables the limit. Overrides `LAYERLEAK_MAX_REPOSITORY_TAGS`. |
+| `--max-repository-targets` | Maximum distinct targets resolved per repository sweep. `0` disables the limit. Overrides `LAYERLEAK_MAX_REPOSITORY_TARGETS`. |
 
 ## HTTP API
 

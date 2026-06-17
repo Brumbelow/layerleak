@@ -119,7 +119,12 @@ go build -o layerleak .
 ./layerleak scan alpine:latest --platform linux/amd64</code></pre>
               <p class="muted">
                 To pin a published release, replace <code>@latest</code> with the
-                <code>v1.x.y</code> tag you want.
+                <code>v1.x.y</code> tag you want. The module path is
+                <code>github.com/brumbelow/layerleak</code>, so <code>@latest</code> resolves to the
+                highest published <code>v1.x.y</code> tag. Module-installed binaries report that
+                version through <code>layerleak --version</code>; local checkout builds report the
+                version Go embeds for the checkout, falling back to <code>dev</code> when no module
+                version is available.
               </p>
             </section>
 
@@ -142,7 +147,7 @@ layerleak scan repo/app@sha256:...</code></pre>
                 </article>
                 <article>
                   <h3>Repository sweep</h3>
-                  <p>Bare repository names enumerate public tags, resolve each tag to a digest, and group duplicate digests.</p>
+                  <p>Bare repository names enumerate every public tag, resolve each tag to a digest, and group duplicate digests. A warning is printed to stderr before the sweep starts so the scope is obvious in CI logs.</p>
                   <pre><code>layerleak scan mongo
 layerleak scan quay.io/prometheus/busybox</code></pre>
                 </article>
@@ -152,6 +157,16 @@ layerleak scan quay.io/prometheus/busybox</code></pre>
                 <code>--platform os/arch[/variant]</code>. Attestation and provenance manifests
                 (for example <code>application/vnd.in-toto+json</code>) are skipped instead of
                 counted as platform scan failures.
+              </p>
+              <p>
+                Repository sweeps accept per-command scope flags that override the matching
+                environment variables: <code>--tag-page-size</code> for tag-list page size,
+                <code>--max-repository-tags</code> to cap how many tags are enumerated, and
+                <code>--max-repository-targets</code> to cap how many distinct digests are
+                resolved. <code>--max-repository-tags</code> and
+                <code>--max-repository-targets</code> accept <code>0</code> to disable the cap;
+                <code>--tag-page-size</code> must be greater than zero. These flags are
+                non-interactive and safe for automation.
               </p>
               <p>
                 Detection uses native detectors for 60+ secret types, with TruffleHog defaults as a

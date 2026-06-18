@@ -285,12 +285,14 @@ Current endpoints:
 `GET /health` returns `{"status":"ok"}` and does not require a configured store or scanner.
 It is suitable for Kubernetes readiness probes and Docker Compose `healthcheck` targets.
 
-`POST /api/v1/scans` stays synchronous and now returns `scan_run_id` whenever Postgres persistence is enabled.
+`POST /api/v1/scans` stays synchronous. It accepts a JSON body with `reference` and optional `platform`, and returns `scan_run_id` whenever Postgres persistence is enabled.
 API scan responses reuse the same redacted result schema as the CLI JSON output.
 `GET /api/v1/scans/{id}` returns the persisted run metadata plus the stored redacted result snapshot.
 Repository and finding endpoints also stay redacted: they return `redacted_value` and redacted `context_snippet`, never raw secret values or raw snippets from Postgres.
 
 `GET /api/v1/repositories/{repository}/scans` and `GET /api/v1/repositories/{repository}/findings` accept an optional `registry` query parameter (for example `?registry=ghcr.io`). When omitted, the registry defaults to `docker.io` for backward compatibility. Use this to fetch scans of repositories on GHCR, Quay, GCR, MCR, Amazon ECR Public, or any self-hosted registry.
+
+List endpoints (`/repositories`, `/repositories/{repository}/scans`, `/repositories/{repository}/findings`) accept `?limit=` and `?offset=` for pagination. `limit` defaults to `50` and is capped at `200`. `/repositories/{repository}/findings` also accepts `?disposition=actionable|suppressed|all`; when omitted the response only includes actionable findings.
 
 The API does not include authentication.
 For org deployments, keep it on a private network and front it with your own authn/authz gateway or reverse proxy policy.
@@ -309,6 +311,12 @@ export LAYERLEAK_DB_NAME=layerleak
 export LAYERLEAK_DB_USER=layerleak
 export LAYERLEAK_DB_PASSWORD=replace-me
 export LAYERLEAK_API_PORT=8080
+```
+
+Validate the rendered Compose configuration before deployment:
+
+```bash
+docker compose config
 ```
 
 Run migrations once before starting the API:

@@ -46,3 +46,16 @@ jobs:
           "${install_bin}/layerleak" --help
           "${install_bin}/layerleak" scan --help
           "${install_bin}/layerleak" --version
+
+  compose-config:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate default compose config
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Validate compose config with manual profile
+        run: docker compose -f docker-compose.yml --profile manual config -q

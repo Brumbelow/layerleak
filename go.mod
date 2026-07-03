@@ -117,8 +117,8 @@ require (
 )
 
 require (
-	github.com/klauspost/compress v1.18.6
-	github.com/trufflesecurity/trufflehog/v3 v3.95.6
+	github.com/klauspost/compress v1.19.0
+	github.com/trufflesecurity/trufflehog/v3 v3.95.8
 )
 
 require (

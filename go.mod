@@ -1,6 +1,6 @@
 module github.com/brumbelow/layerleak
 
-go 1.25.7
+go 1.21
 
 require (
 	github.com/lib/pq v1.12.3

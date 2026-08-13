@@ -71,7 +71,7 @@
           </div>
           <div>
             <span>Runtime</span>
-            <strong>Go 1.25.7+</strong>
+            <strong>Go 1.25.13+</strong>
           </div>
           <div>
             <span>Persistence</span>
@@ -147,9 +147,9 @@ layerleak scan repo/app@sha256:...</code></pre>
                 </article>
                 <article>
                   <h3>Repository sweep</h3>
-                  <p>Bare repository names enumerate every public tag, resolve each tag to a digest, and group duplicate digests. A warning is printed to stderr before the sweep starts so the scope is obvious in CI logs.</p>
+                  <p>A bare repository scans <code>latest</code>. Add <code>--all-tags</code> to explicitly enumerate public tags, resolve each one to a digest, and group duplicate digests.</p>
                   <pre><code>layerleak scan mongo
-layerleak scan quay.io/prometheus/busybox</code></pre>
+layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
                 </article>
               </div>
               <p>
@@ -169,9 +169,9 @@ layerleak scan quay.io/prometheus/busybox</code></pre>
                 non-interactive and safe for automation.
               </p>
               <p>
-                Detection uses native detectors for 60+ secret types, with TruffleHog defaults as a
-                fallback layer. Findings on paths that look like tests, fixtures, examples, specs,
-                or e2e suites are kept as suppressed findings rather than counted as actionable.
+                Detection uses Layerleak's native detector set. Findings on paths that look like
+                tests, fixtures, examples, specs, or e2e suites are kept as suppressed findings
+                rather than counted as actionable.
               </p>
             </section>
 
@@ -191,15 +191,29 @@ LAYERLEAK_API_ADDR=127.0.0.1:8080
 LAYERLEAK_PERSIST_RAW_SECRETS=0
 LAYERLEAK_TAG_PAGE_SIZE=100
 LAYERLEAK_HTTP_TIMEOUT=30s
+LAYERLEAK_BLOB_TIMEOUT=10m
+LAYERLEAK_SCAN_TIMEOUT=30m
 LAYERLEAK_MAX_FILE_BYTES=1048576
 LAYERLEAK_MAX_LAYER_BYTES=536870912
 LAYERLEAK_MAX_LAYER_ENTRIES=50000
-LAYERLEAK_MAX_MANIFEST_BYTES=0
-LAYERLEAK_MAX_CONFIG_BYTES=0
+LAYERLEAK_MAX_IMAGE_LAYERS=512
+LAYERLEAK_MAX_IMAGE_MANIFESTS=64
+LAYERLEAK_MAX_IMAGE_LAYER_BYTES=4294967296
+LAYERLEAK_MAX_IMAGE_ARTIFACTS=250000
+LAYERLEAK_MAX_RETAINED_BYTES=1073741824
+LAYERLEAK_MAX_MANIFEST_BYTES=8388608
+LAYERLEAK_MAX_CONFIG_BYTES=8388608
 LAYERLEAK_MAX_TAG_RESPONSE_BYTES=8388608
-LAYERLEAK_MAX_REPOSITORY_TAGS=0
-LAYERLEAK_MAX_REPOSITORY_TARGETS=0
+LAYERLEAK_MAX_FINDINGS_PER_SCAN=10000
+# Raw retention stops with partial coverage at this aggregate byte bound.
+LAYERLEAK_MAX_RAW_FINDING_BYTES=67108864
+LAYERLEAK_MAX_REPOSITORY_TAGS=1000
+LAYERLEAK_MAX_REPOSITORY_TARGETS=250
 LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS=2
+LAYERLEAK_REGISTRY_MAX_REDIRECTS=3
+LAYERLEAK_MAX_AUTH_RESPONSE_BYTES=1048576
+LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS=
+LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS=
 LAYERLEAK_REGISTRY_BASE_URL=
 LAYERLEAK_REGISTRY_AUTH_URL=
 LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=disable</code></pre>
@@ -213,15 +227,22 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=
                   <code>MAX_FILE_BYTES</code> must be greater than zero.
                 </li>
                 <li>
-                  <strong>Timeouts.</strong> <code>LAYERLEAK_HTTP_TIMEOUT</code> uses Go duration
-                  syntax (<code>30s</code>, <code>2m</code>, <code>1h</code>) and applies to every
-                  registry request: manifests, blobs, tag pages, and auth tokens.
+                  <strong>Timeouts.</strong> Durations use Go syntax (<code>30s</code>,
+                  <code>2m</code>, <code>1h</code>). Manifest, config, tag, and auth requests use
+                  <code>LAYERLEAK_HTTP_TIMEOUT</code>; each layer transfer uses
+                  <code>LAYERLEAK_BLOB_TIMEOUT</code>.
                 </li>
                 <li>
                   <strong>Registry overrides.</strong>
                   <code>LAYERLEAK_REGISTRY_BASE_URL</code> and
                   <code>LAYERLEAK_REGISTRY_AUTH_URL</code> are optional. Leave them unset unless
                   forcing traffic through a proxy or alternate auth endpoint.
+                </li>
+                <li>
+                  <strong>Private destinations.</strong> Private registry and auth hosts are blocked
+                  by default. Exact, kind-specific exceptions can be set with the two
+                  <code>ALLOWED_PRIVATE_*</code> lists; schemes, paths, credentials, and wildcards
+                  are rejected.
                 </li>
                 <li>
                   <strong>API container.</strong> The published image defaults
@@ -245,6 +266,12 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=
                 A scan saves a JSON file under <code>LAYERLEAK_FINDINGS_DIR</code>. If unset, it
                 defaults to <code>findings/</code> beside the nearest <code>go.mod</code>, falling
                 back to the current working directory.
+              </p>
+              <p>
+                Every result reports <code>status</code> as <code>completed</code>,
+                <code>partial</code>, or <code>failed</code>, plus concrete coverage counters and
+                diagnostics. Incomplete work fails by default; <code>--allow-partial</code> accepts a
+                usable partial result without hiding the missing coverage.
               </p>
               <h3 class="schema-heading">Per-occurrence fields</h3>
               <div class="result-schema" role="list">
@@ -286,20 +313,22 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=
                 <h2>Postgres persistence</h2>
               </div>
               <p>
-                Migrations are manual on purpose. The scanner does not create or upgrade schema at
-                runtime. Use PostgreSQL server <code>&gt;= 16.13</code>.
+                Migrations are explicit. The API does not create or upgrade schema at runtime and
+                does not become ready until schema version <code>0004</code> is installed. Use
+                PostgreSQL server <code>&gt;= 16.13</code>.
               </p>
-              <pre><code>psql "$LAYERLEAK_DATABASE_URL" -f migrations/0001_initial.up.sql
-psql "$LAYERLEAK_DATABASE_URL" -f migrations/0002_finding_occurrence_metadata.up.sql
-psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
+              <pre><code>export LAYERLEAK_MIGRATIONS_DIR="$PWD/migrations"
+go run ./cmd/migrate
+go run ./cmd/migrate</code></pre>
               <p>
-                The published container image ships a rerunnable helper that enforces server
-                version <code>&gt;= 16.13</code> and exits non-zero on partial migration state:
+                The native command is rerunnable, holds a PostgreSQL advisory lock, records
+                checksums in a migration ledger, and refuses drift, gaps, or partial legacy state.
+                The published image contains the same command:
               </p>
               <pre><code>docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
-  ghcr.io/brumbelow/layerleak:latest \
-  layerleak-migrate-up</code></pre>
+  --entrypoint /usr/local/bin/layerleak-migrate-up \
+  ghcr.io/brumbelow/layerleak:latest</code></pre>
               <p>
                 Current state is deduplicated by <code>(manifest_digest, fingerprint)</code>.
                 Append-only scan history lives in <code>scan_runs</code> as a redacted snapshot of
@@ -307,8 +336,10 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
               </p>
               <div class="callout" role="note">
                 <strong>Safe purge</strong>
-                Use a dedicated database or schema for layerleak. To clear stored data, drop the
-                schema or database rather than deleting individual rows.
+                Disable <code>LAYERLEAK_PERSIST_RAW_SECRETS</code> on every database writer and
+                restart or stop those processes first. The
+                <code>layerleak-purge-raw-secrets --confirm</code> command then clears only opted-in
+                raw values and snippets while preserving redacted findings and scan history.
               </div>
             </section>
 
@@ -325,6 +356,8 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
               <pre><code>go run ./cmd/api</code></pre>
               <ul class="api-list">
                 <li><span class="verb verb-get">GET</span><code>/health</code></li>
+                <li><span class="verb verb-get">GET</span><code>/livez</code></li>
+                <li><span class="verb verb-get">GET</span><code>/readyz</code></li>
                 <li><span class="verb verb-post">POST</span><code>/api/v1/scans</code></li>
                 <li><span class="verb verb-get">GET</span><code>/api/v1/scans/{id}</code></li>
                 <li><span class="verb verb-get">GET</span><code>/api/v1/repositories</code></li>
@@ -334,9 +367,13 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
               </ul>
               <p>
                 <code>POST /api/v1/scans</code> is synchronous and accepts a JSON body with
-                <code>reference</code> and optional <code>platform</code>. The response includes
-                <code>scan_run_id</code> when Postgres persistence is enabled, plus the same
-                redacted result schema produced by the CLI.
+                <code>reference</code>, optional <code>platform</code>, and optional
+                <code>all_tags</code>. A bare reference means <code>latest</code> unless
+                <code>all_tags</code> is true. The response includes <code>scan_run_id</code> plus the
+                same redacted result schema produced by the CLI. Incomplete or limit-bounded work
+                returns HTTP 422 with <code>scan_incomplete</code> or
+                <code>scan_limit_exceeded</code> and includes a usable persisted result when one
+                exists.
               </p>
               <p>
                 Repository scan and finding list endpoints accept an optional
@@ -351,6 +388,7 @@ psql "$LAYERLEAK_DATABASE_URL" -f migrations/0003_scan_runs.up.sql</code></pre>
                 The API does not include an authentication layer. Deploy it on a private network
                 and front it with your own authn/authz gateway or reverse proxy policy.
               </div>
+              <p><a href="openapi.yaml">Open the versioned OpenAPI 3.1 specification.</a></p>
             </section>
 
             <section class="doc-block" id="deploy" data-reveal>
@@ -369,17 +407,23 @@ docker run --rm \
   ghcr.io/brumbelow/layerleak:latest</code></pre>
               <p>
                 The repository ships a Compose stack in <code>docker-compose.yml</code> with
-                <code>db</code>, <code>migrate</code>, and <code>api</code> services. The
+                <code>db</code>, <code>migrate</code>, <code>purge-raw-secrets</code>, and
+                <code>api</code> services. The
                 <code>db</code> service baseline is pinned to
                 <code>postgres:16.13-alpine</code>.
               </p>
-              <pre><code>docker compose config
+              <pre><code>cp .env.example .env
+# Set LAYERLEAK_DB_PASSWORD in .env.
+docker compose config
 
-docker compose --profile manual run --rm migrate
-docker compose up -d api</code></pre>
+docker compose --profile tools run --rm migrate
+docker compose up -d api
+curl --fail http://127.0.0.1:8080/readyz</code></pre>
               <p>
                 In Dockge or Komodo, import the same Compose file and run the <code>migrate</code>
-                service once before enabling the long-running <code>api</code> service.
+                service once before enabling the long-running <code>api</code> service. Compose binds
+                the host port to <code>127.0.0.1</code> by default; change
+                <code>LAYERLEAK_API_HOST</code> only when an authenticated network edge is ready.
               </p>
             </section>
 

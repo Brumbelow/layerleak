@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,16 @@ func TestPostgresConfigValidate(t *testing.T) {
 			databaseURL: "mysql://root@localhost:3306/layerleak",
 			wantErr:     true,
 		},
+		{
+			name:        "missing host",
+			databaseURL: "postgres:///layerleak",
+			wantErr:     true,
+		},
+		{
+			name:        "missing database",
+			databaseURL: "postgres://localhost",
+			wantErr:     true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -41,6 +52,60 @@ func TestPostgresConfigValidate(t *testing.T) {
 				t.Fatalf("Validate() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestPostgresConfigValidateDoesNotEchoMalformedDatabaseURL(t *testing.T) {
+	databaseURL := "postgres://layerleak:super-secret-value%ZZ@localhost:5432/layerleak"
+	err := (PostgresConfig{DatabaseURL: databaseURL}).Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil")
+	}
+	if err.Error() != "database url is invalid" {
+		t.Fatalf("Validate() error = %q", err)
+	}
+	if strings.Contains(err.Error(), "super-secret-value") || strings.Contains(err.Error(), databaseURL) {
+		t.Fatalf("Validate() leaked database URL: %v", err)
+	}
+}
+
+func TestIsValidScanStatusAcceptsPartial(t *testing.T) {
+	if !isValidScanStatus("partial") {
+		t.Fatal("isValidScanStatus(partial) = false")
+	}
+}
+
+func TestPostgresConfigValidateRejectsInvalidPoolAndTimeoutSettings(t *testing.T) {
+	databaseURL := "postgres://postgres:postgres@localhost:5432/layerleak?sslmode=disable"
+	tests := []PostgresConfig{
+		{DatabaseURL: databaseURL, MaxOpenConns: -1},
+		{DatabaseURL: databaseURL, MaxOpenConns: 2, MaxIdleConns: 3},
+		{DatabaseURL: databaseURL, ConnMaxLifetime: -time.Second},
+		{DatabaseURL: databaseURL, ConnMaxIdleTime: -time.Second},
+		{DatabaseURL: databaseURL, QueryTimeout: -time.Second},
+		{DatabaseURL: databaseURL, WriteTimeout: -time.Second},
+	}
+	for index, config := range tests {
+		if err := config.Validate(); err == nil {
+			t.Fatalf("test %d: Validate() error = nil", index)
+		}
+	}
+}
+
+func TestPostgresConfigDefaults(t *testing.T) {
+	config := (PostgresConfig{}).withDefaults()
+	if config.MaxOpenConns != 10 || config.MaxIdleConns != 0 {
+		t.Fatalf("pool defaults = (%d,%d)", config.MaxOpenConns, config.MaxIdleConns)
+	}
+	if config.ConnMaxLifetime != 30*time.Minute || config.ConnMaxIdleTime != 5*time.Minute || config.QueryTimeout != 10*time.Second || config.WriteTimeout != 2*time.Minute {
+		t.Fatalf("duration defaults = %#v", config)
+	}
+}
+
+func TestRawSecretCountsTotal(t *testing.T) {
+	counts := RawSecretCounts{FindingValues: 2, OccurrenceSnippets: 3}
+	if got := counts.Total(); got != 5 {
+		t.Fatalf("Total() = %d", got)
 	}
 }
 
@@ -203,6 +268,15 @@ func TestValidateScanRecord(t *testing.T) {
 			record: func() ScanRecord {
 				item := validRecord()
 				item.ResultJSON = []byte("{")
+				return item
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "negative counter",
+			record: func() ScanRecord {
+				item := validRecord()
+				item.PartialTargetCount = -1
 				return item
 			}(),
 			wantErr: true,

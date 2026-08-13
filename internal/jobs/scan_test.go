@@ -6,21 +6,27 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/internal/findings"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/registry"
 )
 
 func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
-	digestOne := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	digestTwo := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	configOne := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	configTwo := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	configOneBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)
+	configTwoBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF"]}}`)
+	configOne := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configOneBody)
+	configTwo := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configTwoBody)
+	manifestOneBody := testManifestBody(t, configOne, nil)
+	manifestTwoBody := testManifestBody(t, configTwo, nil)
+	digestOne := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestOneBody).Digest
+	digestTwo := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestTwoBody).Digest
 
 	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "auth.test" {
@@ -53,17 +59,17 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 				"Docker-Content-Digest": digestTwo,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestOne:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configOne+`","size":1},"layers":[]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestOneBody, map[string]string{
 				"Docker-Content-Digest": digestOne,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestTwo:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configTwo+`","size":1},"layers":[]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestTwoBody, map[string]string{
 				"Docker-Content-Digest": digestTwo,
 			}), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configOne:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`), nil), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configTwo:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF"]}}`), nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+configOne.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configOneBody, nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+configTwo.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configTwoBody, nil), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
@@ -77,8 +83,10 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	progress := make([]ProgressUpdate, 0)
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
+		AllTags:   true,
 		Registry: registry.NewClient(registry.Options{
-			BaseURL: "https://registry.test",
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
 				Transport: transport,
 			},
@@ -124,6 +132,8 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	if result.TotalFindings == 0 {
 		t.Fatal("result.TotalFindings = 0")
 	}
+	assertRawFindingFieldsEmpty(t, result.DetailedFindings)
+	assertRawFindingFieldsEmpty(t, result.SuppressedDetailedFindings)
 	if len(progress) == 0 {
 		t.Fatal("len(progress) = 0")
 	}
@@ -133,8 +143,10 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 }
 
 func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing.T) {
-	manifestDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	configDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	configBody := []byte(`{"architecture":"amd64","os":"linux","config":{}}`)
+	configDescriptor := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configBody)
+	manifestBody := testManifestBody(t, configDescriptor, nil)
+	manifestDigest := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestBody).Digest
 
 	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "auth.test" {
@@ -155,10 +167,10 @@ func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing
 				"Docker-Content-Digest": manifestDigest,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+manifestDigest:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configDigest+`","size":1},"layers":[]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestBody, map[string]string{
 				"Docker-Content-Digest": manifestDigest,
 			}), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configDigest:
+		case request.URL.Path == "/v2/library/app/blobs/"+configDescriptor.Digest:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("missing config"), nil), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
@@ -172,8 +184,10 @@ func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing
 
 	_, err = Scan(context.Background(), Request{
 		Reference: ref,
+		AllTags:   true,
 		Registry: registry.NewClient(registry.Options{
-			BaseURL: "https://registry.test",
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
 				Transport: transport,
 			},
@@ -231,8 +245,10 @@ func TestScanRepositoryReturnsPartialResultWhenTargetLimitExceeded(t *testing.T)
 
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
+		AllTags:   true,
 		Registry: registry.NewClient(registry.Options{
-			BaseURL: "https://registry.test",
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
 				Transport: transport,
 			},
@@ -260,10 +276,14 @@ func TestScanRepositoryReturnsPartialResultWhenTargetLimitExceeded(t *testing.T)
 }
 
 func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing.T) {
-	digestOne := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	digestTwo := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	configOne := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	configTwo := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	configOneBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)
+	configTwoBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"],"User":"builder","WorkingDir":"https://builder:supersecretvalue@registry.internal/app"}}`)
+	configOne := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configOneBody)
+	configTwo := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configTwoBody)
+	manifestOneBody := testManifestBody(t, configOne, nil)
+	manifestTwoBody := testManifestBody(t, configTwo, nil)
+	digestOne := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestOneBody).Digest
+	digestTwo := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestTwoBody).Digest
 
 	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "auth.test" {
@@ -288,17 +308,17 @@ func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing
 				"Docker-Content-Digest": digestTwo,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestOne:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configOne+`","size":1},"layers":[]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestOneBody, map[string]string{
 				"Docker-Content-Digest": digestOne,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestTwo:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configTwo+`","size":1},"layers":[]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestTwoBody, map[string]string{
 				"Docker-Content-Digest": digestTwo,
 			}), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configOne:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`), nil), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configTwo:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"],"User":"builder","WorkingDir":"https://builder:supersecretvalue@registry.internal/app"}}`), nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+configOne.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configOneBody, nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+configTwo.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configTwoBody, nil), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
@@ -311,8 +331,10 @@ func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing
 
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
+		AllTags:   true,
 		Registry: registry.NewClient(registry.Options{
-			BaseURL: "https://registry.test",
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
 				Transport: transport,
 			},
@@ -346,15 +368,19 @@ func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing
 }
 
 func TestScanRepositoryAbortsOnLayerLimitAndPreservesCompletedTargets(t *testing.T) {
-	digestOne := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	digestTwo := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	configOne := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	configTwo := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	layerTwo := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	limitedLayer := gzipLayer(t, []tarEntry{
 		{name: "app/one.txt", body: "one"},
 		{name: "app/two.txt", body: "two"},
 	})
+	configOneBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)
+	configTwoBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)
+	configOne := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configOneBody)
+	configTwo := testDescriptor(t, manifest.MediaTypeOCIImageConfig, configTwoBody)
+	layerTwo := testDescriptor(t, manifest.MediaTypeDockerSchema2LayerGzip, limitedLayer)
+	manifestOneBody := testManifestBody(t, configOne, nil)
+	manifestTwoBody := testManifestBody(t, configTwo, []manifest.Descriptor{layerTwo})
+	digestOne := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestOneBody).Digest
+	digestTwo := testDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestTwoBody).Digest
 
 	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "auth.test" {
@@ -379,18 +405,18 @@ func TestScanRepositoryAbortsOnLayerLimitAndPreservesCompletedTargets(t *testing
 				"Docker-Content-Digest": digestTwo,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestOne:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configOne+`","size":1},"layers":[]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestOneBody, map[string]string{
 				"Docker-Content-Digest": digestOne,
 			}), nil
 		case request.URL.Path == "/v2/library/app/manifests/"+digestTwo:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2,"mediaType":"`+manifest.MediaTypeOCIImageManifest+`","config":{"mediaType":"`+manifest.MediaTypeOCIImageConfig+`","digest":"`+configTwo+`","size":1},"layers":[{"mediaType":"`+manifest.MediaTypeDockerSchema2LayerGzip+`","digest":"`+layerTwo+`","size":1}]}`), map[string]string{
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestTwoBody, map[string]string{
 				"Docker-Content-Digest": digestTwo,
 			}), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configOne:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`), nil), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+configTwo:
-			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`), nil), nil
-		case request.URL.Path == "/v2/library/app/blobs/"+layerTwo:
+		case request.URL.Path == "/v2/library/app/blobs/"+configOne.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configOneBody, nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+configTwo.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configTwoBody, nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+layerTwo.Digest:
 			return repoResponse(http.StatusOK, manifest.MediaTypeDockerSchema2LayerGzip, limitedLayer, nil), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
@@ -404,8 +430,10 @@ func TestScanRepositoryAbortsOnLayerLimitAndPreservesCompletedTargets(t *testing
 
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
+		AllTags:   true,
 		Registry: registry.NewClient(registry.Options{
-			BaseURL: "https://registry.test",
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
 				Transport: transport,
 			},
@@ -439,6 +467,275 @@ func TestScanRepositoryAbortsOnLayerLimitAndPreservesCompletedTargets(t *testing
 	}
 	if !strings.Contains(result.Targets[1].Error, "max layer bytes limit") {
 		t.Fatalf("result.Targets[1].Error = %q", result.Targets[1].Error)
+	}
+}
+
+func TestScanRepositoryPreservesFatalTagResolutionErrors(t *testing.T) {
+	goodDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+	tests := []struct {
+		name      string
+		transport func(*http.Request) (*http.Response, error)
+		check     func(error) bool
+	}{
+		{
+			name: "integrity",
+			transport: func(request *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(request.URL.Path, "/manifests/z-bad") {
+					return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{
+						"Docker-Content-Digest": "not-a-digest",
+					}), nil
+				}
+				return tagResolutionResponse(request, goodDigest), nil
+			},
+			check: manifest.IsIntegrityError,
+		},
+		{
+			name: "cancellation",
+			transport: func(request *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(request.URL.Path, "/manifests/z-bad") {
+					return nil, context.Canceled
+				}
+				return tagResolutionResponse(request, goodDigest), nil
+			},
+			check: func(err error) bool { return errors.Is(err, context.Canceled) },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ref, err := manifest.ParseReference("library/app")
+			if err != nil {
+				t.Fatalf("ParseReference() error = %v", err)
+			}
+			result, err := Scan(context.Background(), Request{
+				Reference: ref,
+				AllTags:   true,
+				Registry: registry.NewClient(registry.Options{
+					BaseURL:           "https://registry.test",
+					AllowPrivateHosts: true,
+					RequestAttempts:   1,
+					HTTPClient:        &http.Client{Transport: repoRoundTripFunc(test.transport)},
+				}),
+				Detectors:   detectors.Default(),
+				TagPageSize: 100,
+			})
+			if !test.check(err) {
+				t.Fatalf("Scan() error = %v", err)
+			}
+			if result.TagsResolved != 1 || result.TagsFailed != 1 {
+				t.Fatalf("tag counts = resolved %d, failed %d", result.TagsResolved, result.TagsFailed)
+			}
+			if result.TargetCount != 0 || len(result.Targets) != 0 {
+				t.Fatalf("scan continued to targets: count %d, results %#v", result.TargetCount, result.Targets)
+			}
+			if len(result.TagResults) != 2 || result.TagResults[0].Status != "resolved" || result.TagResults[1].Status != "failed" {
+				t.Fatalf("result.TagResults = %#v", result.TagResults)
+			}
+		})
+	}
+}
+
+func TestScanRepositoryAppliesMaxFindingsAcrossTargets(t *testing.T) {
+	firstConfigBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["VALUE=ghp_123456789012345678901234567890123456"]}}`)
+	secondConfigBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["NPM_TOKEN=npm_123456789012345678901234567890123456"]}}`)
+	secondLayerBody := gzipLayer(t, []tarEntry{{name: "app/.env", body: "NPM_TOKEN=npm_123456789012345678901234567890123456"}})
+	firstConfig := testDescriptor(t, manifest.MediaTypeOCIImageConfig, firstConfigBody)
+	secondConfig := testDescriptor(t, manifest.MediaTypeOCIImageConfig, secondConfigBody)
+	secondLayer := testDescriptor(t, manifest.MediaTypeDockerSchema2LayerGzip, secondLayerBody)
+	firstManifestBody := testManifestBody(t, firstConfig, nil)
+	secondManifestBody := testManifestBody(t, secondConfig, []manifest.Descriptor{secondLayer})
+	firstDigest := testDescriptor(t, manifest.MediaTypeOCIImageManifest, firstManifestBody).Digest
+	secondDigest := testDescriptor(t, manifest.MediaTypeOCIImageManifest, secondManifestBody).Digest
+
+	requested := make(map[string]int)
+	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requested[request.Method+" "+request.URL.Path]++
+		switch {
+		case request.URL.Path == "/v2/library/app/tags/list":
+			return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["1.0","2.0"]}`), nil), nil
+		case request.URL.Path == "/v2/library/app/manifests/1.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{"Docker-Content-Digest": firstDigest}), nil
+		case request.URL.Path == "/v2/library/app/manifests/2.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{"Docker-Content-Digest": secondDigest}), nil
+		case request.URL.Path == "/v2/library/app/manifests/"+firstDigest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, firstManifestBody, map[string]string{"Docker-Content-Digest": firstDigest}), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+firstConfig.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, firstConfigBody, nil), nil
+		case request.URL.Path == "/v2/library/app/manifests/"+secondDigest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, secondManifestBody, map[string]string{"Docker-Content-Digest": secondDigest}), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+secondConfig.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, secondConfigBody, nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+secondLayer.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeDockerSchema2LayerGzip, secondLayerBody, nil), nil
+		default:
+			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	ref, err := manifest.ParseReference("library/app")
+	if err != nil {
+		t.Fatalf("ParseReference() error = %v", err)
+	}
+	result, err := Scan(context.Background(), Request{
+		Reference: ref,
+		AllTags:   true,
+		Registry: registry.NewClient(registry.Options{
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
+			HTTPClient:        &http.Client{Transport: transport},
+		}),
+		Detectors:    detectors.Default(),
+		MaxFileBytes: 1 << 20,
+		MaxFindings:  1,
+		TagPageSize:  100,
+	})
+	if err == nil || !IsIncomplete(err) {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.TotalFindings != 1 {
+		t.Fatalf("result.TotalFindings = %d", result.TotalFindings)
+	}
+	if len(result.Targets) != 1 || result.Targets[0].Status != ResultStatusCompleted {
+		t.Fatalf("result.Targets = %#v", result.Targets)
+	}
+	if !hasDiagnosticCode(result.Diagnostics, "max_findings_exceeded") {
+		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)
+	}
+	for _, endpoint := range []string{
+		"GET /v2/library/app/manifests/" + secondDigest,
+		"GET /v2/library/app/blobs/" + secondConfig.Digest,
+		"GET /v2/library/app/blobs/" + secondLayer.Digest,
+	} {
+		if requested[endpoint] != 0 {
+			t.Errorf("request count for %q = %d", endpoint, requested[endpoint])
+		}
+	}
+}
+
+func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
+	firstSecret := "ghp_123456789012345678901234567890123456"
+	secondSecret := "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	firstEnv := "FIRST=" + firstSecret
+	secondEnv := "OTHER=" + secondSecret
+	firstConfigBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["` + firstEnv + `"]}}`)
+	secondConfigBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["` + secondEnv + `"]}}`)
+	firstConfig := testDescriptor(t, manifest.MediaTypeOCIImageConfig, firstConfigBody)
+	secondConfig := testDescriptor(t, manifest.MediaTypeOCIImageConfig, secondConfigBody)
+	firstManifestBody := testManifestBody(t, firstConfig, nil)
+	secondManifestBody := testManifestBody(t, secondConfig, nil)
+	firstDigest := testDescriptor(t, manifest.MediaTypeOCIImageManifest, firstManifestBody).Digest
+	secondDigest := testDescriptor(t, manifest.MediaTypeOCIImageManifest, secondManifestBody).Digest
+	maxRawFindingBytes := int64(len(firstSecret) + len(firstEnv))
+
+	transport := repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.URL.Path == "/v2/library/app/tags/list":
+			return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["1.0","2.0"]}`), nil), nil
+		case request.URL.Path == "/v2/library/app/manifests/1.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{"Docker-Content-Digest": firstDigest}), nil
+		case request.URL.Path == "/v2/library/app/manifests/2.0" && request.Method == http.MethodHead:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{"Docker-Content-Digest": secondDigest}), nil
+		case request.URL.Path == "/v2/library/app/manifests/"+firstDigest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, firstManifestBody, map[string]string{"Docker-Content-Digest": firstDigest}), nil
+		case request.URL.Path == "/v2/library/app/manifests/"+secondDigest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, secondManifestBody, map[string]string{"Docker-Content-Digest": secondDigest}), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+firstConfig.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, firstConfigBody, nil), nil
+		case request.URL.Path == "/v2/library/app/blobs/"+secondConfig.Digest:
+			return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, secondConfigBody, nil), nil
+		default:
+			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
+		}
+	})
+
+	ref, err := manifest.ParseReference("library/app")
+	if err != nil {
+		t.Fatalf("ParseReference() error = %v", err)
+	}
+	result, err := Scan(context.Background(), Request{
+		Reference: ref,
+		AllTags:   true,
+		Registry: registry.NewClient(registry.Options{
+			BaseURL:           "https://registry.test",
+			AllowPrivateHosts: true,
+			HTTPClient:        &http.Client{Transport: transport},
+		}),
+		Detectors:          detectors.Default(),
+		MaxFileBytes:       1 << 20,
+		RetainRawSecrets:   true,
+		MaxRawFindingBytes: maxRawFindingBytes,
+		TagPageSize:        100,
+	})
+	if err == nil || !IsIncomplete(err) {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusPartial {
+		t.Fatalf("result.Status = %q", result.Status)
+	}
+	if result.CompletedTargetCount != 1 || result.PartialTargetCount != 1 {
+		t.Fatalf("target counts = completed %d, partial %d", result.CompletedTargetCount, result.PartialTargetCount)
+	}
+	if len(result.DetailedFindings) != 2 {
+		t.Fatalf("len(result.DetailedFindings) = %d", len(result.DetailedFindings))
+	}
+
+	findingsByManifest := make(map[string]int)
+	for index := range result.DetailedFindings {
+		findingsByManifest[result.DetailedFindings[index].ManifestDigest] = index
+	}
+	firstIndex, ok := findingsByManifest[firstDigest]
+	if !ok {
+		t.Fatalf("first manifest finding missing: %#v", result.DetailedFindings)
+	}
+	firstFinding := result.DetailedFindings[firstIndex]
+	if firstFinding.Value != firstSecret || firstFinding.RawSnippet != firstEnv {
+		t.Fatalf("first finding raw fields = %q/%q", firstFinding.Value, firstFinding.RawSnippet)
+	}
+	secondIndex, ok := findingsByManifest[secondDigest]
+	if !ok {
+		t.Fatalf("second manifest finding missing: %#v", result.DetailedFindings)
+	}
+	secondFinding := result.DetailedFindings[secondIndex]
+	if secondFinding.Value != "" || secondFinding.RawSnippet != "" {
+		t.Fatalf("second finding retained raw fields = %q/%q", secondFinding.Value, secondFinding.RawSnippet)
+	}
+	if got := detailedRawBytes(result.DetailedFindings); got != maxRawFindingBytes {
+		t.Fatalf("detailedRawBytes() = %d, want %d", got, maxRawFindingBytes)
+	}
+
+	foundDiagnostic := false
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code != "max_raw_finding_bytes_exceeded" {
+			continue
+		}
+		foundDiagnostic = true
+		if diagnostic.Limit != maxRawFindingBytes || diagnostic.Observed <= diagnostic.Limit {
+			t.Fatalf("raw finding diagnostic = %#v", diagnostic)
+		}
+	}
+	if !foundDiagnostic {
+		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)
+	}
+}
+
+func assertRawFindingFieldsEmpty(t *testing.T, items []findings.DetailedFinding) {
+	t.Helper()
+	for _, item := range items {
+		if item.Value != "" || item.RawSnippet != "" {
+			t.Fatalf("finding retained raw fields = %q/%q", item.Value, item.RawSnippet)
+		}
+	}
+}
+
+func tagResolutionResponse(request *http.Request, goodDigest string) *http.Response {
+	switch {
+	case request.URL.Path == "/v2/library/app/tags/list":
+		return repoResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["a-good","z-bad"]}`), nil)
+	case request.URL.Path == "/v2/library/app/manifests/a-good" && request.Method == http.MethodHead:
+		return repoResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, nil, map[string]string{"Docker-Content-Digest": goodDigest})
+	default:
+		return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil)
 	}
 }
 
@@ -495,4 +792,30 @@ func repoResponse(statusCode int, contentType string, body []byte, headers map[s
 		Header:     header,
 		Body:       io.NopCloser(bytes.NewReader(body)),
 	}
+}
+
+func testDescriptor(t *testing.T, mediaType string, body []byte) manifest.Descriptor {
+	t.Helper()
+	digest, err := manifest.DigestBytes("sha256", body)
+	if err != nil {
+		t.Fatalf("DigestBytes() error = %v", err)
+	}
+	return manifest.Descriptor{MediaType: mediaType, Digest: digest, Size: int64(len(body))}
+}
+
+func testManifestBody(t *testing.T, config manifest.Descriptor, layers []manifest.Descriptor) []byte {
+	t.Helper()
+	if layers == nil {
+		layers = []manifest.Descriptor{}
+	}
+	body, err := json.Marshal(manifest.ImageManifest{
+		SchemaVersion: 2,
+		MediaType:     manifest.MediaTypeOCIImageManifest,
+		Config:        config,
+		Layers:        layers,
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	return body
 }

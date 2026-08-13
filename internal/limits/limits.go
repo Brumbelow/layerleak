@@ -3,6 +3,7 @@ package limits
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -70,4 +71,14 @@ func AsExceeded(err error) (*ExceededError, bool) {
 	}
 
 	return target, true
+}
+
+// OverflowProbeLimit returns room for one byte beyond limit when int64 can
+// represent it. A MaxInt64 limit is already the largest stream size callers
+// can account for safely.
+func OverflowProbeLimit(limit int64) int64 {
+	if limit >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return limit + 1
 }

@@ -2,7 +2,12 @@ package manifest
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
+
+	distributionreference "github.com/distribution/reference"
+	ocidigest "github.com/opencontainers/go-digest"
 )
 
 const DockerHubRegistry = "docker.io"
@@ -17,60 +22,48 @@ type Reference struct {
 }
 
 func ParseReference(raw string) (Reference, error) {
-	value := strings.TrimSpace(raw)
+	value := raw
 	if value == "" {
 		return Reference{}, fmt.Errorf("image reference is required")
+	}
+	if value != strings.TrimSpace(value) {
+		return Reference{}, fmt.Errorf("image reference must not include surrounding whitespace")
 	}
 
 	if strings.Contains(value, "://") {
 		return Reference{}, fmt.Errorf("image reference must not include a scheme")
 	}
-
-	namePart := value
-	digest := ""
-	if at := strings.LastIndex(value, "@"); at >= 0 {
-		namePart = value[:at]
-		digest = value[at+1:]
-		if digest == "" {
-			return Reference{}, fmt.Errorf("digest is required when @ is present")
-		}
-		if !strings.Contains(digest, ":") {
-			return Reference{}, fmt.Errorf("digest must include an algorithm prefix")
-		}
+	if strings.ContainsAny(value, `?#\\`) {
+		return Reference{}, fmt.Errorf("image reference contains invalid characters")
+	}
+	if strings.Count(value, "@") > 1 {
+		return Reference{}, fmt.Errorf("image reference must contain at most one digest separator")
 	}
 
-	tag := ""
-	tagExplicit := false
-	pathPart := namePart
-	if colon := strings.LastIndex(namePart, ":"); colon > strings.LastIndex(namePart, "/") {
-		tag = namePart[colon+1:]
-		pathPart = namePart[:colon]
-		tagExplicit = true
-		if tag == "" {
-			return Reference{}, fmt.Errorf("tag is required when : is present")
-		}
+	named, err := distributionreference.ParseNormalizedNamed(value)
+	if err != nil {
+		return Reference{}, fmt.Errorf("parse image reference: %w", err)
 	}
 
-	segments := strings.Split(pathPart, "/")
-	registry := DockerHubRegistry
-	repositorySegments := segments
-
-	if isRegistrySegment(segments[0]) {
-		registry = normalizeRegistry(segments[0])
-		repositorySegments = segments[1:]
+	registry := normalizeRegistry(distributionreference.Domain(named))
+	if err := validateRegistry(registry); err != nil {
+		return Reference{}, err
 	}
-
-	if len(repositorySegments) == 0 {
+	repository := distributionreference.Path(named)
+	if repository == "" {
 		return Reference{}, fmt.Errorf("repository is required")
 	}
 
-	if registry == DockerHubRegistry && len(repositorySegments) == 1 {
-		repositorySegments = []string{"library", repositorySegments[0]}
+	tag := ""
+	if tagged, ok := named.(distributionreference.Tagged); ok {
+		tag = tagged.Tag()
 	}
-
-	repository := strings.Join(repositorySegments, "/")
-	if repository == "" || strings.HasPrefix(repository, "/") || strings.HasSuffix(repository, "/") {
-		return Reference{}, fmt.Errorf("repository is invalid")
+	digest := ""
+	if digested, ok := named.(distributionreference.Digested); ok {
+		digest = digested.Digest().String()
+		if err := ValidateDigest(digest); err != nil {
+			return Reference{}, err
+		}
 	}
 
 	return Reference{
@@ -79,8 +72,32 @@ func ParseReference(raw string) (Reference, error) {
 		Repository:  repository,
 		Tag:         tag,
 		Digest:      digest,
-		TagExplicit: tagExplicit,
+		TagExplicit: tag != "",
 	}, nil
+}
+
+// ValidateDigest verifies the OCI digest syntax and the encoded length for the
+// digest algorithms layerleak can calculate locally.
+func ValidateDigest(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if value != trimmed {
+		return &IntegrityError{Kind: IntegrityInvalidDigest, Subject: value, Expected: "OCI digest without surrounding whitespace", Actual: value}
+	}
+	parsed, err := ocidigest.Parse(value)
+	if err != nil {
+		return &IntegrityError{Kind: IntegrityInvalidDigest, Subject: value, Expected: "valid OCI digest", Actual: value, Cause: err}
+	}
+	switch parsed.Algorithm() {
+	case ocidigest.SHA256, ocidigest.SHA512:
+		return nil
+	default:
+		return &IntegrityError{
+			Kind:     IntegrityUnsupportedDigestAlgorithm,
+			Subject:  parsed.String(),
+			Expected: "sha256 or sha512",
+			Actual:   parsed.Algorithm().String(),
+		}
+	}
 }
 
 func (r Reference) Identifier() string {
@@ -151,10 +168,6 @@ func (r Reference) String() string {
 	return value
 }
 
-func isRegistrySegment(value string) bool {
-	return strings.Contains(value, ".") || strings.Contains(value, ":") || value == "localhost"
-}
-
 func normalizeRegistry(value string) string {
 	switch strings.ToLower(value) {
 	case "docker.io", "index.docker.io", "registry-1.docker.io":
@@ -162,4 +175,61 @@ func normalizeRegistry(value string) string {
 	default:
 		return strings.ToLower(value)
 	}
+}
+
+func validateRegistry(value string) error {
+	host := value
+	if strings.HasPrefix(value, "[") {
+		var port string
+		var err error
+		host, port, err = net.SplitHostPort(value)
+		if err != nil {
+			return fmt.Errorf("registry is invalid: %w", err)
+		}
+		if err := validatePort(port); err != nil {
+			return err
+		}
+		if net.ParseIP(host) == nil {
+			return fmt.Errorf("registry host is invalid")
+		}
+		return nil
+	}
+
+	if colon := strings.LastIndexByte(value, ':'); colon >= 0 {
+		if strings.Count(value, ":") != 1 {
+			return fmt.Errorf("IPv6 registry hosts must use brackets")
+		}
+		host = value[:colon]
+		if err := validatePort(value[colon+1:]); err != nil {
+			return err
+		}
+	}
+	if host == "" {
+		return fmt.Errorf("registry host is invalid")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return nil
+	}
+	if len(host) > 253 {
+		return fmt.Errorf("registry host is invalid")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return fmt.Errorf("registry host is invalid")
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return fmt.Errorf("registry host is invalid")
+			}
+		}
+	}
+	return nil
+}
+
+func validatePort(value string) error {
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("registry port is invalid")
+	}
+	return nil
 }

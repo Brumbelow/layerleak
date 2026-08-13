@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,7 +60,7 @@ func TestHandleScanSuccess(t *testing.T) {
 		},
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/scans", bytes.NewBufferString(`{"reference":"library/app:latest"}`))
+	request := newJSONScanRequest(`{"reference":"library/app:latest"}`)
 	recorder := httptest.NewRecorder()
 
 	NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, request)
@@ -68,6 +70,9 @@ func TestHandleScanSuccess(t *testing.T) {
 	}
 	if scanner.request.Reference.Repository != "library/app" {
 		t.Fatalf("scanner.request.Reference.Repository = %q", scanner.request.Reference.Repository)
+	}
+	if scanner.request.Logger == nil {
+		t.Fatal("scanner.request.Logger = nil")
 	}
 	if strings.Contains(recorder.Body.String(), "ghp_123456789012345678901234567890123456") {
 		t.Fatalf("response leaked raw secret: %s", recorder.Body.String())
@@ -81,7 +86,7 @@ func TestHandleScanSuccess(t *testing.T) {
 }
 
 func TestHandleScanRejectsInvalidReference(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/scans", bytes.NewBufferString(`{"reference":"https://example.com/app"}`))
+	request := newJSONScanRequest(`{"reference":"https://example.com/app"}`)
 	recorder := httptest.NewRecorder()
 
 	NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, request)
@@ -110,15 +115,15 @@ func TestHandleScanReturnsPartialResultOnLimitError(t *testing.T) {
 		},
 	}
 
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/scans", bytes.NewBufferString(`{"reference":"library/app:latest"}`))
+	request := newJSONScanRequest(`{"reference":"library/app:latest"}`)
 	recorder := httptest.NewRecorder()
 
 	NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, request)
 
-	if recorder.Code != http.StatusInternalServerError {
+	if recorder.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), `"code": "scan_failed"`) {
+	if !strings.Contains(recorder.Body.String(), `"code": "scan_limit_exceeded"`) {
 		t.Fatalf("body = %s", recorder.Body.String())
 	}
 	if !strings.Contains(recorder.Body.String(), `"scan_run_id": 42`) {
@@ -126,6 +131,183 @@ func TestHandleScanReturnsPartialResultOnLimitError(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"total_findings": 1`) {
 		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
+func TestHandleScanAcceptsAllTagsForBareRepository(t *testing.T) {
+	scanner := &stubScanner{}
+	request := newJSONScanRequest(`{"reference":"library/app","all_tags":true}`)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !scanner.request.AllTags {
+		t.Fatal("scanner.request.AllTags = false")
+	}
+}
+
+func TestHandleScanRejectsAllTagsWithTaggedReference(t *testing.T) {
+	request := newJSONScanRequest(`{"reference":"library/app:latest","all_tags":true}`)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleScanRejectsUnsupportedContentType(t *testing.T) {
+	request := newJSONScanRequest(`{"reference":"library/app:latest"}`)
+	request.Header.Set("Content-Type", "text/plain")
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleScanRejectsOversizeBody(t *testing.T) {
+	request := newJSONScanRequest(`{"reference":"library/app:latest"}`)
+	recorder := httptest.NewRecorder()
+	handler := NewHandlerWithOptions(&stubScanner{}, &stubReadStore{}, HandlerOptions{MaxRequestBytes: 16})
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"code": "request_too_large"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
+func TestHandleScanMapsIncompleteResult(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	scanner := &stubScanner{
+		outcome: scanservice.Outcome{Result: jobs.Result{RequestedReference: "library/app:latest"}},
+		err: &scanservice.Error{Phase: scanservice.ErrorPhaseScan, Err: &jobs.IncompleteError{
+			Status:                 jobs.ResultStatusPartial,
+			CompletedManifestCount: 1,
+			FailedManifestCount:    1,
+			Cause:                  errors.New("Authorization: Bearer sentinel-secret"),
+		}},
+	}
+	request := newJSONScanRequest(`{"reference":"library/app:latest"}`)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"code": "scan_incomplete"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "sentinel-secret") || strings.Contains(recorder.Body.String(), "Authorization") {
+		t.Fatalf("body leaked incomplete cause: %s", recorder.Body.String())
+	}
+	if strings.Contains(logs.String(), "sentinel-secret") || strings.Contains(logs.String(), "Authorization") {
+		t.Fatalf("logs leaked incomplete cause: %s", logs.String())
+	}
+}
+
+func TestHandleScanEnforcesTimeout(t *testing.T) {
+	request := newJSONScanRequest(`{"reference":"library/app:latest"}`)
+	recorder := httptest.NewRecorder()
+	handler := NewHandlerWithOptions(contextScanner{}, &stubReadStore{}, HandlerOptions{ScanTimeout: time.Millisecond})
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleScanRejectsWhenConcurrencyIsExhausted(t *testing.T) {
+	scanner := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
+	handler := NewHandlerWithOptions(scanner, &stubReadStore{}, HandlerOptions{MaxConcurrentScans: 1})
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		handler.ServeHTTP(httptest.NewRecorder(), newJSONScanRequest(`{"reference":"library/app:latest"}`))
+	}()
+	<-scanner.started
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, newJSONScanRequest(`{"reference":"library/app:latest"}`))
+	close(scanner.release)
+	<-firstDone
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Retry-After") != "5" {
+		t.Fatalf("Retry-After = %q", recorder.Header().Get("Retry-After"))
+	}
+}
+
+func TestRequestIDIsReturnedInHeaderAndError(t *testing.T) {
+	request := newJSONScanRequest(`{}`)
+	request.Header.Set("X-Request-ID", "client-request-7")
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Header().Get("X-Request-ID") != "client-request-7" {
+		t.Fatalf("X-Request-ID = %q", recorder.Header().Get("X-Request-ID"))
+	}
+	if !strings.Contains(recorder.Body.String(), `"request_id": "client-request-7"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
+func TestReadyChecksStore(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status": "ready"`) {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestReadyReturnsUnavailableWithoutDatabase(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	NewHandler(&stubScanner{}, &stubReadStore{readyErr: context.DeadlineExceeded}).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUnknownEndpointAndWrongMethodReturnJSONErrors(t *testing.T) {
+	tests := []struct {
+		method string
+		path   string
+		status int
+	}{
+		{method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
+		{method: http.MethodPut, path: "/api/v1/scans", status: http.StatusMethodNotAllowed},
+	}
+	for _, test := range tests {
+		recorder := httptest.NewRecorder()
+		NewHandler(&stubScanner{}, &stubReadStore{}).ServeHTTP(recorder, httptest.NewRequest(test.method, test.path, nil))
+		if recorder.Code != test.status || !strings.Contains(recorder.Header().Get("Content-Type"), "application/json") {
+			t.Fatalf("%s %s: status = %d content-type=%q body=%s", test.method, test.path, recorder.Code, recorder.Header().Get("Content-Type"), recorder.Body.String())
+		}
 	}
 }
 
@@ -379,6 +561,24 @@ type stubScanner struct {
 	request scanservice.Request
 }
 
+type contextScanner struct{}
+
+func (contextScanner) ScanAndSave(ctx context.Context, _ scanservice.Request) (scanservice.Outcome, error) {
+	<-ctx.Done()
+	return scanservice.Outcome{}, ctx.Err()
+}
+
+type blockingScanner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingScanner) ScanAndSave(_ context.Context, _ scanservice.Request) (scanservice.Outcome, error) {
+	close(s.started)
+	<-s.release
+	return scanservice.Outcome{}, nil
+}
+
 func (s *stubScanner) ScanAndSave(_ context.Context, request scanservice.Request) (scanservice.Outcome, error) {
 	s.request = request
 	return s.outcome, s.err
@@ -392,6 +592,7 @@ type stubReadStore struct {
 	detail        storage.FindingDetail
 	scanDetailErr error
 	detailErr     error
+	readyErr      error
 
 	limit       int
 	offset      int
@@ -400,6 +601,10 @@ type stubReadStore struct {
 	disposition storage.FindingDispositionFilter
 	scanID      int64
 	findingID   int64
+}
+
+func (s *stubReadStore) Ready(_ context.Context) error {
+	return s.readyErr
 }
 
 func (s *stubReadStore) ListRepositories(_ context.Context, limit, offset int) ([]storage.RepositorySummary, error) {
@@ -452,4 +657,49 @@ func TestWriteJSONProducesValidJSON(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Fatalf("body = %#v", body)
 	}
+}
+
+func TestSanitizeResultJSONRemovesNestedOperationalErrors(t *testing.T) {
+	body, err := sanitizeResultJSON([]byte(`{
+		"error_message":"upstream body contained token=secret",
+		"large_counter":9007199254740993,
+		"targets":[{"error":"dial registry.internal:5000"}],
+		"diagnostics":[{"code":"upstream_failed","message":"Authorization: Bearer secret"}]
+	}`))
+	if err != nil {
+		t.Fatalf("sanitizeResultJSON() error = %v", err)
+	}
+	if strings.Contains(string(body), "secret") || strings.Contains(string(body), "registry.internal") {
+		t.Fatalf("body leaked operational detail: %s", body)
+	}
+	if !strings.Contains(string(body), `"message":"scan step failed"`) {
+		t.Fatalf("body = %s", body)
+	}
+	if !strings.Contains(string(body), `"large_counter":9007199254740993`) {
+		t.Fatalf("body lost integer precision: %s", body)
+	}
+}
+
+func TestSanitizeResultJSONPreservesSafeRawFindingLimitMessage(t *testing.T) {
+	body, err := sanitizeResultJSON([]byte(`{
+		"diagnostics":[{
+			"code":"max_raw_finding_bytes_exceeded",
+			"message":"raw context contained secret"
+		}]
+	}`))
+	if err != nil {
+		t.Fatalf("sanitizeResultJSON() error = %v", err)
+	}
+	if strings.Contains(string(body), "secret") {
+		t.Fatalf("body leaked operational detail: %s", body)
+	}
+	if !strings.Contains(string(body), `"message":"the scan exceeded the configured raw finding byte limit"`) {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func newJSONScanRequest(body string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/scans", bytes.NewBufferString(body))
+	request.Header.Set("Content-Type", "application/json")
+	return request
 }

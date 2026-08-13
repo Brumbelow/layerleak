@@ -2,6 +2,7 @@ package storage
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/brumbelow/layerleak/internal/findings"
@@ -181,6 +182,35 @@ func TestPersistedValueRespectsFlag(t *testing.T) {
 	}
 }
 
+func TestUpsertFindingOccurrenceSQLArity(t *testing.T) {
+	query := strings.Join(strings.Fields(upsertFindingOccurrenceSQL), " ")
+	columns, remainder, ok := strings.Cut(query, ") VALUES (")
+	if !ok {
+		t.Fatal("upsertFindingOccurrenceSQL is missing VALUES")
+	}
+	columns = strings.TrimPrefix(columns, "INSERT INTO finding_occurrences (")
+	values, _, ok := strings.Cut(remainder, ") ON CONFLICT (")
+	if !ok {
+		t.Fatal("upsertFindingOccurrenceSQL is missing ON CONFLICT")
+	}
+
+	columnList := strings.Split(columns, ", ")
+	valueList := strings.Split(values, ", ")
+	if len(columnList) != len(valueList) {
+		t.Fatalf("finding occurrence INSERT has %d columns and %d values", len(columnList), len(valueList))
+	}
+	wantValues := []string{
+		"$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11",
+		"$12", "$13", "$14", "$15", "$16", "$17", "$18", "$19", "$20", "$20",
+	}
+	if !slices.Equal(valueList, wantValues) {
+		t.Fatalf("finding occurrence INSERT values = %v, want %v", valueList, wantValues)
+	}
+	if !strings.Contains(query, "WHEN $21 AND") {
+		t.Fatal("upsertFindingOccurrenceSQL does not use argument 21 for the raw-secret flag")
+	}
+}
+
 func TestUpsertManifestRecordPrefersScannedOverFailed(t *testing.T) {
 	items := make(map[string]ManifestRecord)
 	upsertManifestRecord(items, ManifestRecord{Digest: "sha256:abc", Status: "failed", Error: "nope"})
@@ -206,6 +236,17 @@ func TestUpsertManifestRecordKeepsScannedWhenFailedArrives(t *testing.T) {
 	got := items["sha256:abc"]
 	if got.Status != "scanned" {
 		t.Errorf("Status = %q, want scanned (existing scanned must be sticky)", got.Status)
+	}
+}
+
+func TestUpsertManifestRecordPrefersPartialOverFailed(t *testing.T) {
+	items := make(map[string]ManifestRecord)
+	upsertManifestRecord(items, ManifestRecord{Digest: "sha256:abc", Status: "failed", Error: "nope"})
+	upsertManifestRecord(items, ManifestRecord{Digest: "sha256:abc", Status: "partial"})
+
+	got := items["sha256:abc"]
+	if got.Status != "partial" || got.Error != "" {
+		t.Fatalf("record = %#v, want partial without an error", got)
 	}
 }
 
@@ -313,6 +354,22 @@ func TestCollectManifestRecordsDerivesRootFromReferenceWhenDigestMissing(t *test
 	}
 	if got[0].RootDigest != "sha256:0000000000000000000000000000000000000000000000000000000000000001" {
 		t.Errorf("RootDigest = %q, want digest from reference", got[0].RootDigest)
+	}
+}
+
+func TestCollectManifestRecordsKeepsPartialStatusWhenFindingExists(t *testing.T) {
+	record := ScanRecord{
+		Targets: []TargetRecord{{
+			Manifests: []ManifestRecord{{Digest: "sha256:abc", Status: "partial"}},
+		}},
+		DetailedFindings: []findings.DetailedFinding{{
+			Finding: findings.Finding{ManifestDigest: "sha256:abc", Fingerprint: "fp"},
+		}},
+	}
+
+	got := collectManifestRecords(record)
+	if len(got) != 1 || got[0].Status != "partial" {
+		t.Fatalf("collectManifestRecords() = %#v", got)
 	}
 }
 

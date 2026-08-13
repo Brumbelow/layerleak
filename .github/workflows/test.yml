@@ -1,61 +1,47 @@
-name: Go Tests
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: vet + test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+  verify:
+    name: Full verification
+    uses: ./.github/workflows/verify.yml
+    permissions:
+      contents: read
 
-      - name: Set up Go
-        uses: actions/setup-go@v7
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
         with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Verify gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt found unformatted files:" >&2
-            echo "$unformatted" >&2
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test
-        run: go test ./... -count=1
-
-      - name: install smoke
-        run: |
-          set -euo pipefail
-          install_bin="$(mktemp -d)"
-          GOBIN="${install_bin}" go install .
-          "${install_bin}/layerleak" --help
-          "${install_bin}/layerleak" scan --help
-          "${install_bin}/layerleak" --version
-
-  compose-config:
-    name: docker compose config
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Validate default compose config
-        run: docker compose -f docker-compose.yml config -q
-
-      - name: Validate compose config with manual profile
-        run: docker compose -f docker-compose.yml --profile manual config -q
+          fail-on-severity: high
+          deny-licenses: >-
+            AGPL-1.0-only, AGPL-1.0-or-later,
+            AGPL-3.0-only, AGPL-3.0-or-later,
+            GPL-1.0-only, GPL-1.0-or-later,
+            GPL-2.0-only, GPL-2.0-or-later,
+            GPL-3.0-only, GPL-3.0-or-later,
+            LGPL-2.0-only, LGPL-2.0-or-later,
+            LGPL-2.1-only, LGPL-2.1-or-later,
+            LGPL-3.0-only, LGPL-3.0-or-later
+          comment-summary-in-pr: never

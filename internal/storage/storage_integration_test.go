@@ -37,6 +37,407 @@ func TestMigrationFilesApplyAndRollback(t *testing.T) {
 	}
 }
 
+func TestRunMigrationsTracksChecksumsAndIsIdempotent(t *testing.T) {
+	db := openIntegrationDB(t)
+	db.Close()
+
+	result, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	})
+	if err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	if len(result.Applied) != currentMigrationCount || result.Current != CurrentSchemaVersion {
+		t.Fatalf("result = %#v", result)
+	}
+
+	result, err = RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	})
+	if err != nil {
+		t.Fatalf("RunMigrations(second) error = %v", err)
+	}
+	if len(result.Applied) != 0 {
+		t.Fatalf("second result = %#v", result)
+	}
+}
+
+func TestRunMigrationsAdoptsLegacySchema(t *testing.T) {
+	db := openIntegrationDB(t)
+	if err := applyMigrationSet(t, db, "000[1-3]*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet(legacy) error = %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO repositories (registry, repository, first_seen_at, last_seen_at)
+		VALUES ('docker.io', 'library/legacy', '2026-03-15 14:00:00+00', '2026-03-15 12:00:00+00')
+	`); err != nil {
+		t.Fatalf("insert out-of-order legacy repository: %v", err)
+	}
+	db.Close()
+
+	result, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	})
+	if err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	if len(result.Applied) != 1 || result.Applied[0] != "0004_storage_hardening" {
+		t.Fatalf("result = %#v", result)
+	}
+
+	db, err = sql.Open("postgres", integrationDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+	var firstSeen, lastSeen time.Time
+	if err := db.QueryRow(`
+		SELECT first_seen_at, last_seen_at
+		FROM repositories
+		WHERE repository = 'library/legacy'
+	`).Scan(&firstSeen, &lastSeen); err != nil {
+		t.Fatalf("read repaired legacy repository: %v", err)
+	}
+	if firstSeen.After(lastSeen) {
+		t.Fatalf("legacy timestamps were not repaired: first=%s last=%s", firstSeen, lastSeen)
+	}
+}
+
+func TestRunMigrationsRejectsIncompleteLegacySchema(t *testing.T) {
+	db := openIntegrationDB(t)
+	if err := applyMigrationSet(t, db, "000[1-3]*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet(legacy) error = %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE tags DROP COLUMN root_digest`); err != nil {
+		t.Fatalf("drop legacy column: %v", err)
+	}
+	db.Close()
+
+	_, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "legacy schema is missing tags.root_digest") {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+}
+
+func TestPostgresStoreRequireSchemaRejectsDrift(t *testing.T) {
+	db := openIntegrationDB(t)
+	db.Close()
+	if _, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	}); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+
+	db, err := sql.Open("postgres", integrationDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE tags DROP COLUMN root_digest`); err != nil {
+		t.Fatalf("drop current column: %v", err)
+	}
+	db.Close()
+
+	store, err := NewPostgresStore(PostgresConfig{
+		DatabaseURL:   integrationDatabaseURL(t),
+		RequireSchema: true,
+	})
+	if store != nil {
+		store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "database schema is missing tags.root_digest") {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+}
+
+func TestPostgresStoreRequireSchemaRejectsColumnDefinitionDrift(t *testing.T) {
+	tests := []struct {
+		name    string
+		change  string
+		wantErr string
+	}{
+		{
+			name:    "dropped identity default",
+			change:  `ALTER TABLE repositories ALTER COLUMN id DROP DEFAULT`,
+			wantErr: "column repositories.id has an unexpected default",
+		},
+		{
+			name:    "wrong type",
+			change:  `ALTER TABLE scan_runs ALTER COLUMN mode TYPE VARCHAR(255)`,
+			wantErr: "column scan_runs.mode has type character varying(255), expected text",
+		},
+		{
+			name:    "nullable runtime column",
+			change:  `ALTER TABLE tags ALTER COLUMN error DROP NOT NULL`,
+			wantErr: "column tags.error has unexpected nullability",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := openMigratedIntegrationDB(t)
+			defer db.Close()
+			if _, err := db.Exec(tt.change); err != nil {
+				t.Fatalf("apply schema drift: %v", err)
+			}
+
+			err := checkSchemaVersion(context.Background(), db)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("checkSchemaVersion() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPostgresStoreRequireSchemaRejectsConstraintDrift(t *testing.T) {
+	tests := []struct {
+		name    string
+		change  string
+		wantErr string
+	}{
+		{
+			name:    "dropped runtime unique constraint",
+			change:  `ALTER TABLE repositories DROP CONSTRAINT repositories_registry_repository_key`,
+			wantErr: "missing constraint repositories_registry_repository_key on repositories",
+		},
+		{
+			name:    "dropped runtime foreign key",
+			change:  `ALTER TABLE scan_runs DROP CONSTRAINT scan_runs_repository_id_fkey`,
+			wantErr: "missing constraint scan_runs_repository_id_fkey on scan_runs",
+		},
+		{
+			name: "same name with wrong check",
+			change: `
+				ALTER TABLE scan_runs DROP CONSTRAINT scan_runs_status_valid;
+				ALTER TABLE scan_runs
+					ADD CONSTRAINT scan_runs_status_valid CHECK (status <> '');
+			`,
+			wantErr: "constraint scan_runs_status_valid on scan_runs has an unexpected definition",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := openMigratedIntegrationDB(t)
+			defer db.Close()
+			if _, err := db.Exec(tt.change); err != nil {
+				t.Fatalf("apply schema drift: %v", err)
+			}
+
+			err := checkSchemaVersion(context.Background(), db)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("checkSchemaVersion() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPostgresStoreRequireSchemaRejectsSameNameWrongIndex(t *testing.T) {
+	db := openMigratedIntegrationDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`
+		DROP INDEX findings_manifest_last_seen_idx;
+		CREATE INDEX findings_manifest_last_seen_idx ON findings (fingerprint);
+	`); err != nil {
+		t.Fatalf("replace index: %v", err)
+	}
+
+	err := checkSchemaVersion(context.Background(), db)
+	if err == nil || !strings.Contains(err.Error(), "index findings_manifest_last_seen_idx has an unexpected definition") {
+		t.Fatalf("checkSchemaVersion() error = %v", err)
+	}
+}
+
+func TestPostgresStoreRequireSchemaValidatesIndexOrdering(t *testing.T) {
+	db := openMigratedIntegrationDB(t)
+	defer db.Close()
+
+	if err := checkSchemaVersion(context.Background(), db); err != nil {
+		t.Fatalf("checkSchemaVersion() rejected migration index ordering: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		definition string
+	}{
+		{
+			name:       "direction",
+			definition: "manifest_digest, last_seen_at, id DESC",
+		},
+		{
+			name:       "null ordering",
+			definition: "manifest_digest, last_seen_at DESC NULLS LAST, id DESC",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := db.Exec(`DROP INDEX findings_manifest_last_seen_idx`); err != nil {
+				t.Fatalf("drop index: %v", err)
+			}
+			if _, err := db.Exec(fmt.Sprintf(
+				"CREATE INDEX findings_manifest_last_seen_idx ON findings (%s)",
+				tt.definition,
+			)); err != nil {
+				t.Fatalf("replace index: %v", err)
+			}
+
+			err := checkSchemaVersion(context.Background(), db)
+			if err == nil || !strings.Contains(err.Error(), "index findings_manifest_last_seen_idx has an unexpected definition") {
+				t.Fatalf("checkSchemaVersion() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPostgresStoreRequireSchemaRejectsInvalidIndex(t *testing.T) {
+	db := openMigratedIntegrationDB(t)
+	defer db.Close()
+	if _, err := db.Exec(`
+		INSERT INTO repositories (registry, repository, first_seen_at, last_seen_at)
+		VALUES ('docker.io', 'library/index-test', '2026-03-15 12:00:00+00', '2026-03-15 12:00:00+00');
+
+		INSERT INTO manifests (digest, first_seen_at, last_seen_at, last_scan_status)
+		VALUES ('sha256:index-test', '2026-03-15 12:00:00+00', '2026-03-15 12:00:00+00', 'scanned');
+
+		INSERT INTO findings (manifest_digest, fingerprint, redacted_value, value, first_seen_at, last_seen_at)
+		VALUES ('sha256:index-test', 'index-test', 'redacted', '', '2026-03-15 12:00:00+00', '2026-03-15 12:00:00+00');
+
+		INSERT INTO finding_occurrences (
+			finding_id,
+			detector_name,
+			confidence,
+			source_type,
+			present_in_final_image,
+			first_seen_at,
+			last_seen_at
+		)
+		SELECT id, 'first', 'high', 'env', TRUE, '2026-03-15 12:00:00+00', '2026-03-15 12:00:00+00'
+		FROM findings
+		WHERE fingerprint = 'index-test';
+
+		INSERT INTO finding_occurrences (
+			finding_id,
+			detector_name,
+			confidence,
+			source_type,
+			present_in_final_image,
+			first_seen_at,
+			last_seen_at
+		)
+		SELECT id, 'second', 'high', 'env', TRUE, '2026-03-15 12:00:00+00', '2026-03-15 12:00:00+00'
+		FROM findings
+		WHERE fingerprint = 'index-test';
+
+		DROP INDEX finding_occurrences_disposition_idx;
+	`); err != nil {
+		t.Fatalf("prepare invalid index: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE UNIQUE INDEX CONCURRENTLY finding_occurrences_disposition_idx
+		ON finding_occurrences (finding_id, disposition, last_seen_at DESC)
+	`); err == nil {
+		t.Fatal("CREATE UNIQUE INDEX CONCURRENTLY unexpectedly succeeded")
+	}
+
+	var valid, ready bool
+	if err := db.QueryRow(`
+		SELECT indisvalid, indisready
+		FROM pg_index
+		WHERE indexrelid = 'finding_occurrences_disposition_idx'::regclass
+	`).Scan(&valid, &ready); err != nil {
+		t.Fatalf("inspect invalid index: %v", err)
+	}
+	if valid && ready {
+		t.Fatalf("failed concurrent index is valid=%t ready=%t", valid, ready)
+	}
+
+	err := checkSchemaVersion(context.Background(), db)
+	if err == nil || !strings.Contains(err.Error(), "index finding_occurrences_disposition_idx is not valid and ready") {
+		t.Fatalf("checkSchemaVersion() error = %v", err)
+	}
+}
+
+func TestRunMigrationsRejectsLegacyColumnDefinitionDrift(t *testing.T) {
+	db := openIntegrationDB(t)
+	if err := applyMigrationSet(t, db, "000[1-3]*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet(legacy) error = %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE repositories ALTER COLUMN id DROP DEFAULT`); err != nil {
+		t.Fatalf("drop legacy default: %v", err)
+	}
+	db.Close()
+
+	_, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "legacy schema column repositories.id has an unexpected default") {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+}
+
+func TestRunMigrationsAdoptsSchemaAppliedDirectlyThroughVersionFour(t *testing.T) {
+	db := openIntegrationDB(t)
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+	assertCount(t, db, "SELECT COUNT(*) FROM schema_migrations", 0)
+	db.Close()
+
+	result, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	})
+	if err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	if len(result.Applied) != 0 || result.Current != CurrentSchemaVersion {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestRunMigrationsRejectsChangedAppliedMigration(t *testing.T) {
+	db := openIntegrationDB(t)
+	db.Close()
+	directory := t.TempDir()
+	for _, migration := range []string{
+		"0001_initial.up.sql",
+		"0002_finding_occurrence_metadata.up.sql",
+		"0003_scan_runs.up.sql",
+		"0004_storage_hardening.up.sql",
+	} {
+		body, err := os.ReadFile(filepath.Join(repoRoot(t), "migrations", migration))
+		if err != nil {
+			t.Fatalf("os.ReadFile(%s) error = %v", migration, err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, migration), body, 0o600); err != nil {
+			t.Fatalf("os.WriteFile(%s) error = %v", migration, err)
+		}
+	}
+	if _, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   directory,
+	}); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+	file := filepath.Join(directory, "0001_initial.up.sql")
+	if err := os.WriteFile(file, []byte("SELECT 1;"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(changed) error = %v", err)
+	}
+	if _, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   directory,
+	}); err == nil || !strings.Contains(err.Error(), "checksum changed") {
+		t.Fatalf("RunMigrations(changed) error = %v", err)
+	}
+}
+
 func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	db := openIntegrationDB(t)
 	defer db.Close()
@@ -132,6 +533,117 @@ func TestPostgresStoreSaveScanPersistsRawSecretsWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreNewerRedactedWritePreservesRawMaterialUntilExplicitPurge(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	rawStore, err := NewPostgresStore(PostgresConfig{
+		DatabaseURL:       integrationDatabaseURL(t),
+		PersistRawSecrets: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPostgresStore(raw) error = %v", err)
+	}
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	if _, err := rawStore.SaveScan(context.Background(), record); err != nil {
+		t.Fatalf("SaveScan(raw) error = %v", err)
+	}
+	rawStore.Close()
+
+	redactedStore, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore(redacted) error = %v", err)
+	}
+	defer redactedStore.Close()
+	record.ScannedAt = record.ScannedAt.Add(time.Hour)
+	if _, err := redactedStore.SaveScan(context.Background(), record); err != nil {
+		t.Fatalf("SaveScan(redacted) error = %v", err)
+	}
+
+	assertCount(t, db, "SELECT COUNT(*) FROM findings WHERE value <> ''", 1)
+	assertCount(t, db, "SELECT COUNT(*) FROM finding_occurrences WHERE raw_snippet <> ''", 2)
+	assertCount(t, db, "SELECT COUNT(*) FROM finding_occurrences", 2)
+}
+
+func TestPostgresStoreOlderWriteDoesNotRegressTimestampsOrTagMapping(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	newer := integrationScanRecord(time.Date(2026, time.March, 15, 14, 0, 0, 0, time.UTC))
+	older := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	older.Tags[0].ManifestDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	older.Tags[0].RootDigest = older.Tags[0].ManifestDigest
+	if _, err := store.SaveScan(context.Background(), newer); err != nil {
+		t.Fatalf("SaveScan(newer) error = %v", err)
+	}
+	if _, err := store.SaveScan(context.Background(), older); err != nil {
+		t.Fatalf("SaveScan(older) error = %v", err)
+	}
+
+	var lastSeen time.Time
+	if err := db.QueryRow("SELECT last_seen_at FROM repositories").Scan(&lastSeen); err != nil {
+		t.Fatalf("QueryRow(last_seen_at) error = %v", err)
+	}
+	if !lastSeen.Equal(newer.ScannedAt) {
+		t.Fatalf("last_seen_at = %s, want %s", lastSeen, newer.ScannedAt)
+	}
+	var digest string
+	if err := db.QueryRow("SELECT manifest_digest FROM tags WHERE tag = 'latest'").Scan(&digest); err != nil {
+		t.Fatalf("QueryRow(tag) error = %v", err)
+	}
+	if digest != newer.Tags[0].ManifestDigest {
+		t.Fatalf("tag manifest = %q, want %q", digest, newer.Tags[0].ManifestDigest)
+	}
+}
+
+func TestPostgresStorePurgeRawSecrets(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+	store, err := NewPostgresStore(PostgresConfig{
+		DatabaseURL:       integrationDatabaseURL(t),
+		PersistRawSecrets: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+	if _, err := store.SaveScan(context.Background(), integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))); err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+
+	before, err := store.CountRawSecrets(context.Background())
+	if err != nil || before.Total() == 0 {
+		t.Fatalf("CountRawSecrets() = %#v, %v", before, err)
+	}
+	purged, err := store.PurgeRawSecrets(context.Background())
+	if err != nil {
+		t.Fatalf("PurgeRawSecrets() error = %v", err)
+	}
+	if purged.Total() != before.Total() {
+		t.Fatalf("purged = %#v, before = %#v", purged, before)
+	}
+	after, err := store.CountRawSecrets(context.Background())
+	if err != nil || after.Total() != 0 {
+		t.Fatalf("CountRawSecrets(after) = %#v, %v", after, err)
+	}
+	assertCount(t, db, "SELECT COUNT(*) FROM findings", 1)
+	assertCount(t, db, "SELECT COUNT(*) FROM finding_occurrences", 2)
+}
+
 func TestPostgresStoreSaveScanPersistsScanRunHistory(t *testing.T) {
 	db := openIntegrationDB(t)
 	defer db.Close()
@@ -179,6 +691,35 @@ func TestPostgresStoreSaveScanPersistsScanRunHistory(t *testing.T) {
 	if !strings.Contains(resultJSON, "ghp********************************56") {
 		t.Fatalf("result_json missing redacted value: %q", resultJSON)
 	}
+}
+
+func TestPostgresStoreSaveScanPersistsPartialRelationalStatus(t *testing.T) {
+	db := openIntegrationDB(t)
+	defer db.Close()
+	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
+		t.Fatalf("applyMigrationSet() error = %v", err)
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
+	record.Status = ScanRunStatusPartial
+	record.CompletedTargetCount = 0
+	record.PartialTargetCount = 1
+	record.ErrorMessage = "scan did not complete successfully"
+	record.Targets[0].Manifests[0].Status = "partial"
+	record.Tags[0].Status = "partial"
+	if _, err := store.SaveScan(context.Background(), record); err != nil {
+		t.Fatalf("SaveScan() error = %v", err)
+	}
+
+	assertCount(t, db, "SELECT COUNT(*) FROM manifests WHERE last_scan_status = 'partial'", 1)
+	assertCount(t, db, "SELECT COUNT(*) FROM repository_manifests WHERE last_scan_status = 'partial'", 1)
+	assertCount(t, db, "SELECT COUNT(*) FROM tags WHERE status = 'partial'", 1)
 }
 
 func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
@@ -487,6 +1028,27 @@ func openIntegrationDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func openMigratedIntegrationDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db := openIntegrationDB(t)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close reset database: %v", err)
+	}
+	if _, err := RunMigrations(context.Background(), MigrationConfig{
+		DatabaseURL: integrationDatabaseURL(t),
+		Directory:   filepath.Join(repoRoot(t), "migrations"),
+	}); err != nil {
+		t.Fatalf("RunMigrations() error = %v", err)
+	}
+
+	db, err := sql.Open("postgres", integrationDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	return db
+}
+
 func integrationDatabaseURL(t *testing.T) string {
 	t.Helper()
 
@@ -513,6 +1075,9 @@ func applyMigrationSet(t *testing.T, db *sql.DB, pattern string) error {
 		return err
 	}
 	slices.Sort(files)
+	if strings.Contains(pattern, ".down.sql") {
+		slices.Reverse(files)
+	}
 	for _, filePath := range files {
 		body, err := os.ReadFile(filePath)
 		if err != nil {

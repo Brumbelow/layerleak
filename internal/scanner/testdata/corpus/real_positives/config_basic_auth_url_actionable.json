@@ -5,7 +5,7 @@
   "key": "config.working_dir",
   "content": "https://builder:realpass123@registry.internal/app",
   "expected_outcome": "actionable",
-  "expected_detectors": ["basic_auth_url", "uri"],
+  "expected_detectors": ["basic_auth_url"],
   "expected_confidence_floor": "medium",
   "expected_reason": ""
 }

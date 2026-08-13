@@ -49,19 +49,46 @@ func writeResultFile(configuredDir string, persistRawSecrets bool, result jobs.R
 	if err := os.MkdirAll(findingsDir, 0o700); err != nil {
 		return "", fmt.Errorf("create findings directory: %w", err)
 	}
+	if err := os.Chmod(findingsDir, 0o700); err != nil {
+		return "", fmt.Errorf("secure findings directory: %w", err)
+	}
 
-	filePath := filepath.Join(findingsDir, buildResultFileName(result))
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tempFile, err := os.CreateTemp(findingsDir, ".layerleak-result-*")
 	if err != nil {
 		return "", fmt.Errorf("create findings result file: %w", err)
 	}
-	defer file.Close()
+	tempPath := tempFile.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
 
-	encoder := json.NewEncoder(file)
+	encoder := json.NewEncoder(tempFile)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(buildPersistedFindings(result, persistRawSecrets)); err != nil {
+		_ = tempFile.Close()
 		return "", fmt.Errorf("write findings result file: %w", err)
 	}
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return "", fmt.Errorf("sync findings result file: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return "", fmt.Errorf("close findings result file: %w", err)
+	}
+
+	fileName := strings.TrimSuffix(buildResultFileName(result), ".json") + "-" + strings.TrimPrefix(filepath.Base(tempPath), ".layerleak-result-") + ".json"
+	filePath := filepath.Join(findingsDir, fileName)
+	if err := os.Link(tempPath, filePath); err != nil {
+		return "", fmt.Errorf("publish findings result file: %w", err)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		_ = os.Remove(filePath)
+		return "", fmt.Errorf("remove temporary findings result file: %w", err)
+	}
+	removeTemp = false
 
 	return filePath, nil
 }

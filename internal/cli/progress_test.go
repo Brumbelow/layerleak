@@ -29,7 +29,7 @@ func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 `
 
 	var buffer bytes.Buffer
-	renderer := newProgressRenderer(&buffer)
+	renderer := newProgressRendererWithMode(&buffer, progressModeTTY)
 
 	if err := renderer.Start(progressSnapshot{
 		repository: "library/app",
@@ -75,6 +75,29 @@ func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 		if !strings.Contains(output, pattern) {
 			t.Fatalf("output missing %q: %q", pattern, output)
 		}
+	}
+}
+
+func TestProgressRendererAutoUsesPlainOutputWithoutLogoForPipes(t *testing.T) {
+	var buffer bytes.Buffer
+	renderer := newProgressRenderer(&buffer)
+
+	if err := renderer.Start(progressSnapshot{
+		repository: "library/app",
+		phase:      "Starting",
+		message:    "Preparing scan",
+	}); err != nil {
+		t.Fatalf("renderer.Start() error = %v", err)
+	}
+	if err := renderer.Finish(); err != nil {
+		t.Fatalf("renderer.Finish() error = %v", err)
+	}
+
+	if strings.Contains(buffer.String(), "██") {
+		t.Fatalf("plain progress output contains logo: %q", buffer.String())
+	}
+	if !strings.Contains(buffer.String(), "layerleak: Starting: Preparing scan") {
+		t.Fatalf("plain progress output = %q", buffer.String())
 	}
 }
 

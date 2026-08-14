@@ -1,5 +1,6 @@
 # layerleak
 
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/e84f645fb6504679979b99e907b3255c)](https://app.codacy.com/gh/Brumbelow/layerleak?utm_source=github.com&utm_medium=referral&utm_content=Brumbelow/layerleak&utm_campaign=Badge_Grade)
 [![CI](https://github.com/brumbelow/layerleak/actions/workflows/test.yml/badge.svg)](https://github.com/brumbelow/layerleak/actions/workflows/test.yml)
 [![CodeQL](https://github.com/brumbelow/layerleak/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/brumbelow/layerleak/actions/workflows/codeql-analysis.yml)
 [![Go](https://img.shields.io/badge/Go-1.25.13%2B-00ADD8?logo=go)](https://go.dev/)

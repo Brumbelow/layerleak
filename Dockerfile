@@ -2,7 +2,7 @@
 
 # Keep the readable tag next to the immutable multi-platform digest so dependency
 # updates remain reviewable.
-FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS build
+FROM golang:1.26.0-bookworm@sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c AS build
 
 WORKDIR /src
 

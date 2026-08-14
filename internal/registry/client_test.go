@@ -454,7 +454,7 @@ func TestListTagsReturnsPartialTagsWhenTagResponseLimitExceededMidPagination(t *
 }
 
 func TestListTagsRejectsPaginationCycle(t *testing.T) {
-	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest"]}`), map[string]string{
 			"Link": `<https://registry.test/v2/library/app/tags/list?n=100>; rel="next"`,
 		}), nil

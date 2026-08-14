@@ -2,12 +2,17 @@ package cli
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/brumbelow/layerleak/internal/jobs"
 	"github.com/brumbelow/layerleak/internal/manifest"
 )
+
+func newProgressRenderer(out io.Writer) *progressRenderer {
+	return newProgressRendererWithMode(out, progressModeAuto)
+}
 
 func TestProgressRendererRendersLogoAndStatusBlock(t *testing.T) {
 	const wantLogo = `

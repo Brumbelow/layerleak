@@ -7,7 +7,7 @@ license terms.
 | Module | Version | License |
 | --- | --- | --- |
 | `github.com/distribution/reference` | v0.6.0 | Apache-2.0 |
-| `github.com/klauspost/compress` | v1.19.1 | Apache-2.0, BSD-3-Clause, and MIT components |
+| `github.com/klauspost/compress` | v1.19.2 | Apache-2.0, BSD-3-Clause, and MIT components |
 | `github.com/lib/pq` | v1.12.3 | MIT |
 | `github.com/opencontainers/go-digest` | v1.0.0 | Apache-2.0 |
 | `github.com/spf13/cobra` | v1.10.2 | Apache-2.0 |

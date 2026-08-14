@@ -328,10 +328,6 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	return result, nil
 }
 
-func scanManifest(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest) (PlatformResult, []findings.DetailedFinding, []findings.DetailedFinding, error) {
-	return scanManifestWithBudget(ctx, request, descriptor, preloaded, newDetectionBudget(ctx, request))
-}
-
 func scanManifestWithBudget(ctx context.Context, request Request, descriptor manifest.Descriptor, preloaded *manifest.ImageManifest, budget *detectionBudget) (PlatformResult, []findings.DetailedFinding, []findings.DetailedFinding, error) {
 	platformResult := PlatformResult{
 		Status:         ResultStatusFailed,
@@ -766,10 +762,6 @@ func scanMetadataWithBudget(budget *detectionBudget, detectorSet detectors.Set, 
 	return result
 }
 
-func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
-	return scanArtifactsWithBudget(&detectionBudget{retainRaw: true}, detectorSet, manifestDigest, platform, sourceType, presentInFinalImage, artifacts)
-}
-
 func scanArtifactsWithBudget(budget *detectionBudget, detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
 	result := make([]findings.DetailedFinding, 0)
 	for _, artifact := range artifacts {
@@ -893,15 +885,6 @@ func collectErrorMessages(limit int, message func(index int) string) []string {
 
 func isCancellationError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func emitProgress(request Request, update ProgressUpdate) {

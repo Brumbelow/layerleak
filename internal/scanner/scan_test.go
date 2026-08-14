@@ -22,6 +22,10 @@ import (
 	"github.com/brumbelow/layerleak/internal/registry"
 )
 
+func scanArtifacts(detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
+	return scanArtifactsWithBudget(&detectionBudget{retainRaw: true}, detectorSet, manifestDigest, platform, sourceType, presentInFinalImage, artifacts)
+}
+
 func TestScanMultiArchImage(t *testing.T) {
 	amd64LayerOne := gzipLayer(t, []tarEntry{
 		{name: "app/.env", body: "STRIPE=sk_live_abcdefghijklmnopqrstuvwxyz12"},

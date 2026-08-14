@@ -36,19 +36,24 @@ Complete these settings before the first RC:
 1. Enable GitHub immutable releases for the repository.
 2. Create a `release` environment with required maintainer review. Restrict it
    to `main` and do not allow administrators to bypass approval casually.
-3. Allow Actions to request read/write `GITHUB_TOKEN` permissions.
+3. Keep the default `GITHUB_TOKEN` permissions read-only. The release workflow
+   grants required write scopes only to the jobs that publish evidence or the
+   release.
 4. Protect `main` with pull requests, no force pushes or deletion, and all CI,
    CodeQL, and Codacy checks required.
-5. Add a tag ruleset for `v1.*` that blocks update/deletion and permits creation
-   only by the protected release path. The workflow's token must be allowed to
-   create a new tag after approval.
+5. Add a tag ruleset for `v1.*` that blocks updates, deletion, and non-fast-
+   forward changes with no bypass. Personal repositories cannot select the
+   GitHub Actions integration as a ruleset bypass actor, so leave initial tag
+   creation enabled for the protected workflow and do not create tags manually.
 6. Enable dependency graph, Dependabot, secret scanning, push protection, code
    scanning, and artifact attestations.
 7. Make `ghcr.io/brumbelow/layerleak` public after its initial publication.
 
 The workflow uses only `GITHUB_TOKEN` and GitHub's OIDC token. It does not
 require a Cosign private key, registry password, PAT, or custom release secret.
-Codacy continues to require `CODACY_PROJECT_TOKEN` for its separate workflow.
+The public-repository GitHub code-scanning workflow runs without a
+`CODACY_PROJECT_TOKEN`; configure the optional secret only when the scan must
+retrieve remote Codacy project settings.
 `GITHUB_TOKEN` cannot read repository Administration settings, so enabling
 immutable releases remains a required setup step. The workflow checks every
 existing candidate/release and verifies `isImmutable` plus the GitHub release

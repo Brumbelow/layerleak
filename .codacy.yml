@@ -1,4 +1,8 @@
 ---
+engines:
+  revive:
+    exclude_paths:
+      - "go.sum"
 exclude_paths:
   - ".github/**"
   - "migrations/**"

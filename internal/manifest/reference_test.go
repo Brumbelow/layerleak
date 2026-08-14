@@ -1,6 +1,9 @@
 package manifest
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseReference(t *testing.T) {
 	tests := []struct {
@@ -159,4 +162,81 @@ func TestReferenceIdentifierUsesLatestWhenTagMissing(t *testing.T) {
 	if !ref.IsRepositoryOnly() {
 		t.Fatal("ref.IsRepositoryOnly() = false")
 	}
+}
+
+func TestParseReferenceRejectsMalformedValues(t *testing.T) {
+	tests := []string{
+		" ubuntu",
+		"ubuntu ",
+		"owner/Image:latest",
+		"owner/Image:latest",
+		"owner//image:latest",
+		"owner/../image:latest",
+		`owner\\image:latest`,
+		"owner/image?tag=latest",
+		"owner/image#latest",
+		"owner/image:bad tag",
+		"owner/image:tag@sha256:abc",
+		"owner/image:tag@md5:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"owner/image:tag@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaG",
+		"ghcr.io:0/owner/image:latest",
+		"ghcr.io:65536/owner/image:latest",
+		"bad_host.example/owner/image:latest",
+		"[2001:db8::1/owner/image:latest",
+		"owner/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+
+	for _, value := range tests {
+		t.Run(strings.ReplaceAll(value, "/", "_"), func(t *testing.T) {
+			if _, err := ParseReference(value); err == nil {
+				t.Fatalf("ParseReference(%q) error = nil", value)
+			}
+		})
+	}
+}
+
+func TestParseReferenceAcceptsIPv6Registry(t *testing.T) {
+	ref, err := ParseReference("[2001:db8::1]:5000/owner/image:latest")
+	if err != nil {
+		t.Fatalf("ParseReference() error = %v", err)
+	}
+	if ref.Registry != "[2001:db8::1]:5000" {
+		t.Fatalf("ref.Registry = %q", ref.Registry)
+	}
+}
+
+func TestValidateDigest(t *testing.T) {
+	if err := ValidateDigest("sha512:" + strings.Repeat("a", 128)); err != nil {
+		t.Fatalf("ValidateDigest() error = %v", err)
+	}
+	if err := ValidateDigest("sha512:" + strings.Repeat("a", 127)); err == nil {
+		t.Fatal("ValidateDigest() error = nil")
+	}
+}
+
+func FuzzParseReference(f *testing.F) {
+	for _, seed := range []string{
+		"ubuntu",
+		"ghcr.io/owner/image:latest",
+		"localhost:5000/image@sha256:" + strings.Repeat("a", 64),
+		"https://example.com/image",
+		"owner/../image",
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, value string) {
+		ref, err := ParseReference(value)
+		if err != nil {
+			return
+		}
+		if ref.Registry == "" || ref.Repository == "" {
+			t.Fatalf("accepted incomplete reference: %#v", ref)
+		}
+		if ref.Digest != "" {
+			if err := ValidateDigest(ref.Digest); err != nil {
+				t.Fatalf("accepted invalid digest %q: %v", ref.Digest, err)
+			}
+		}
+	})
 }

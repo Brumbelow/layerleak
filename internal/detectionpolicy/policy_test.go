@@ -81,6 +81,11 @@ func TestDiscardReason(t *testing.T) {
 			value: "https://root:password@db.internal/",
 			want:  ReasonDiscardPlaceholder,
 		},
+		{
+			name:  "placeholder prefix in real credential",
+			value: "https://admin:passwordREALSECRET@db.internal/",
+			want:  ReasonNone,
+		},
 	}
 
 	for _, tt := range tests {
@@ -225,6 +230,7 @@ func TestTestPathReason(t *testing.T) {
 		{name: "windows-style backslash path", filePath: "src\\tests\\config.yaml", want: ReasonTestPath},
 		{name: "case-insensitive", filePath: "src/TESTS/config.yaml", want: ReasonTestPath},
 		{name: "test substring not whole segment", filePath: "src/contest/config.yaml", want: ReasonNone},
+		{name: "test segment with trailing space", filePath: "src/tests /config.yaml", want: ReasonNone},
 		{name: "e2e segment", filePath: "src/e2e/config.yaml", want: ReasonTestPath},
 		{name: "acceptance segment", filePath: "src/acceptance/config.yaml", want: ReasonTestPath},
 		{name: "stubs segment", filePath: "src/stubs/server.go", want: ReasonTestPath},
@@ -254,6 +260,7 @@ func TestExampleFilenameReason(t *testing.T) {
 		{name: "config.example.yaml", filePath: "etc/config.example.yaml", want: ReasonExamplePath},
 		{name: "case insensitive", filePath: "etc/CONFIG.EXAMPLE.YAML", want: ReasonExamplePath},
 		{name: "windows path", filePath: "etc\\config.example.yaml", want: ReasonExamplePath},
+		{name: "example suffix with trailing space", filePath: "etc/.env.example ", want: ReasonNone},
 	}
 
 	for _, tt := range tests {

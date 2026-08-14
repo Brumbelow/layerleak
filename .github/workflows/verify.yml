@@ -1,0 +1,332 @@
+name: Full verification
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to verify. Defaults to the caller's commit.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  quality:
+    name: Go quality and CLI smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify module identity and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go list -m)" = "github.com/brumbelow/layerleak"
+          go mod verify
+          go mod tidy -diff
+
+      - name: Verify formatting and whitespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "gofmt found unformatted files:" >&2
+            echo "${unformatted}" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -short ./... -count=1
+
+      - name: Race test
+        run: go test -short -race ./... -count=1
+
+      - name: Install and exercise CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_bin="${RUNNER_TEMP}/layerleak-bin"
+          mkdir -p "${install_bin}"
+          GOBIN="${install_bin}" go install .
+          "${install_bin}/layerleak" --help
+          "${install_bin}/layerleak" scan --help
+          "${install_bin}/layerleak" --version
+
+  licenses:
+    name: Linked dependency licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned license auditor
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/license-tools"
+          mkdir -p "${tool_dir}"
+          GOBIN="${tool_dir}" go install github.com/google/go-licenses/v2@v2.0.1
+
+      - name: Gate linked dependency licenses and create inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          auditor="${RUNNER_TEMP}/license-tools/go-licenses"
+          packages=(. ./cmd/api ./cmd/migrate ./cmd/purge ./cmd/healthcheck)
+          "${auditor}" check --disallowed_types=restricted,forbidden,unknown "${packages[@]}"
+          "${auditor}" report "${packages[@]}" | LC_ALL=C sort -u > dependency-licenses.csv
+          test -s dependency-licenses.csv
+
+      - name: Upload dependency license inventory
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-dependency-licenses
+          path: dependency-licenses.csv
+          if-no-files-found: error
+          retention-days: 90
+
+  postgres:
+    name: PostgreSQL integration and migrations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+        env:
+          POSTGRES_DB: layerleak_test
+          POSTGRES_USER: layerleak
+          POSTGRES_PASSWORD: layerleak-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U layerleak -d layerleak_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      LAYERLEAK_TEST_DATABASE_URL: postgres://layerleak:layerleak-test-only@127.0.0.1:5432/layerleak_test?sslmode=disable
+      LAYERLEAK_DATABASE_URL: postgres://layerleak:layerleak-test-only@127.0.0.1:5432/layerleak_test?sslmode=disable
+      LAYERLEAK_MIGRATIONS_DIR: ${{ github.workspace }}/migrations
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build database administration commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -o "${RUNNER_TEMP}/layerleak-migrate-up" ./cmd/migrate
+          go build -trimpath -o "${RUNNER_TEMP}/layerleak-purge-raw-secrets" ./cmd/purge
+
+      - name: Apply migrations twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/layerleak-migrate-up"
+          "${RUNNER_TEMP}/layerleak-migrate-up"
+
+      - name: Verify purge confirmation guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if "${RUNNER_TEMP}/layerleak-purge-raw-secrets"; then
+            echo "purge command succeeded without --confirm" >&2
+            exit 1
+          fi
+
+      - name: Run full test suite with PostgreSQL
+        run: go test ./... -count=1
+
+  compose:
+    name: Compose configuration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LAYERLEAK_DB_PASSWORD: compose-validation-only
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Validate default configuration
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate tools profile
+        run: docker compose -f docker-compose.yml --profile tools config --quiet
+
+  container:
+    name: Container smoke (${{ matrix.platform }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+          - platform: linux/arm64
+            suffix: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build platform image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          pull: true
+          tags: layerleak-ci:${{ matrix.suffix }}
+
+      - name: Exercise migration and API runtime
+        shell: bash
+        env:
+          TEST_IMAGE: layerleak-ci:${{ matrix.suffix }}
+          TEST_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          network="layerleak-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.suffix }}"
+          database="layerleak-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.suffix }}"
+          api="layerleak-api-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.suffix }}"
+          cleanup() {
+            docker rm -f "${api}" "${database}" >/dev/null 2>&1 || true
+            docker network rm "${network}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          test "$(docker image inspect --format '{{.Config.User}}' "${TEST_IMAGE}")" = "10001:10001"
+          docker network create "${network}" >/dev/null
+          docker run -d --name "${database}" --network "${network}" \
+            -e POSTGRES_DB=layerleak \
+            -e POSTGRES_USER=layerleak \
+            -e POSTGRES_PASSWORD=layerleak-test-only \
+            postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50 >/dev/null
+
+          for attempt in {1..30}; do
+            if docker exec "${database}" pg_isready -h 127.0.0.1 -U layerleak -d layerleak >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" -eq 30 ]]; then
+              docker logs "${database}"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          database_url='postgres://layerleak:layerleak-test-only@'"${database}"':5432/layerleak?sslmode=disable'
+          for pass in 1 2; do
+            docker run --rm --platform "${TEST_PLATFORM}" --network "${network}" \
+              --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
+              -e LAYERLEAK_DATABASE_URL="${database_url}" \
+              --entrypoint /usr/local/bin/layerleak-migrate-up \
+              "${TEST_IMAGE}"
+          done
+
+          docker run -d --name "${api}" --platform "${TEST_PLATFORM}" --network "${network}" \
+            --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:18080:8080 \
+            -e LAYERLEAK_DATABASE_URL="${database_url}" \
+            -e LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings \
+            "${TEST_IMAGE}" >/dev/null
+
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:18080/readyz >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" -eq 60 ]]; then
+              docker logs "${api}"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/health
+          test "$(docker exec "${database}" psql -U layerleak -d layerleak -tAc "SELECT to_regclass('public.scan_runs') IS NOT NULL")" = "t"
+
+  vulnerability:
+    name: Reachable Go vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+
+      - name: Gate reachable vulnerabilities
+        run: govulncheck ./...
+
+      - name: Generate SARIF report
+        if: always()
+        run: govulncheck -format sarif ./... > govulncheck.sarif
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: govulncheck-sarif
+          path: govulncheck.sarif
+          if-no-files-found: warn
+          retention-days: 30

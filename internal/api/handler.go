@@ -1,12 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,14 +18,21 @@ import (
 	"time"
 
 	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/scanservice"
 	"github.com/brumbelow/layerleak/internal/storage"
 )
 
 const (
-	defaultPageLimit = 50
-	maxPageLimit     = 200
+	defaultPageLimit          = 50
+	maxPageLimit              = 200
+	defaultMaxRequestBytes    = int64(16 * (1 << 10))
+	defaultScanTimeout        = 30 * time.Minute
+	defaultMaxConcurrentScans = 1
+	defaultQueryTimeout       = 10 * time.Second
+	defaultReadinessTimeout   = 2 * time.Second
+	defaultResponseTimeout    = 30 * time.Second
 )
 
 type scanExecutor interface {
@@ -29,24 +40,43 @@ type scanExecutor interface {
 }
 
 type Handler struct {
-	scanner scanExecutor
-	store   storage.ReadStore
+	scanner   scanExecutor
+	store     storage.ReadStore
+	options   HandlerOptions
+	scanSlots chan struct{}
+	requestID func() string
+}
+
+type HandlerOptions struct {
+	MaxRequestBytes    int64
+	ScanTimeout        time.Duration
+	MaxConcurrentScans int
+	QueryTimeout       time.Duration
+	ReadinessTimeout   time.Duration
+	ResponseTimeout    time.Duration
+	RequestID          func() string
+}
+
+type readinessChecker interface {
+	Ready(context.Context) error
 }
 
 type errorResponse struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 type scanRequest struct {
 	Reference string `json:"reference"`
 	Platform  string `json:"platform,omitempty"`
+	AllTags   bool   `json:"all_tags,omitempty"`
 }
 
 type scanResponse struct {
-	ScanRunID int64          `json:"scan_run_id,omitempty"`
-	Result    *jobs.Result   `json:"result,omitempty"`
-	Error     *errorResponse `json:"error,omitempty"`
+	ScanRunID int64           `json:"scan_run_id,omitempty"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     *errorResponse  `json:"error,omitempty"`
 }
 
 type repositoriesResponse struct {
@@ -109,6 +139,7 @@ type scanSummaryItem struct {
 	TargetCount                  int    `json:"target_count"`
 	CompletedTargetCount         int    `json:"completed_target_count"`
 	FailedTargetCount            int    `json:"failed_target_count"`
+	PartialTargetCount           int    `json:"partial_target_count"`
 	ManifestCount                int    `json:"manifest_count"`
 	CompletedManifestCount       int    `json:"completed_manifest_count"`
 	FailedManifestCount          int    `json:"failed_manifest_count"`
@@ -157,23 +188,85 @@ type findingOccurrenceItem struct {
 // NewHandler returns the JSON HTTP API mux. The scanner runs synchronous scans for
 // POST /api/v1/scans; the store backs all read endpoints. Both must be non-nil.
 func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
+	return NewHandlerWithOptions(scanner, store, HandlerOptions{})
+}
+
+// NewHandlerWithOptions returns the JSON HTTP API with explicit resource and
+// deadline limits. Zero-valued options use the stable API defaults.
+func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) http.Handler {
+	options = options.withDefaults()
 	handler := &Handler{
-		scanner: scanner,
-		store:   store,
+		scanner:   scanner,
+		store:     store,
+		options:   options,
+		scanSlots: make(chan struct{}, options.MaxConcurrentScans),
+		requestID: options.RequestID,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.handleHealth)
+	mux.HandleFunc("GET /livez", handler.handleHealth)
+	mux.HandleFunc("GET /readyz", handler.handleReady)
 	mux.HandleFunc("POST /api/v1/scans", handler.handleScan)
 	mux.HandleFunc("GET /api/v1/scans/{id}", handler.handleGetScan)
 	mux.HandleFunc("GET /api/v1/repositories", handler.handleListRepositories)
 	mux.HandleFunc("GET /api/v1/repositories/", handler.handleRepositorySubtree)
 	mux.HandleFunc("GET /api/v1/findings/{id}", handler.handleGetFinding)
-	return mux
+	mux.HandleFunc("/health", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/livez", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/readyz", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/api/v1/scans", handler.methodNotAllowed(http.MethodPost))
+	mux.HandleFunc("/api/v1/scans/{id}", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/api/v1/repositories", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/api/v1/repositories/", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/api/v1/findings/{id}", handler.methodNotAllowed(http.MethodGet))
+	mux.HandleFunc("/", handler.handleNotFound)
+	return handler.middleware(mux)
+}
+
+func (options HandlerOptions) withDefaults() HandlerOptions {
+	if options.MaxRequestBytes <= 0 {
+		options.MaxRequestBytes = defaultMaxRequestBytes
+	}
+	if options.ScanTimeout <= 0 {
+		options.ScanTimeout = defaultScanTimeout
+	}
+	if options.MaxConcurrentScans <= 0 {
+		options.MaxConcurrentScans = defaultMaxConcurrentScans
+	}
+	if options.QueryTimeout <= 0 {
+		options.QueryTimeout = defaultQueryTimeout
+	}
+	if options.ReadinessTimeout <= 0 {
+		options.ReadinessTimeout = defaultReadinessTimeout
+	}
+	if options.ResponseTimeout <= 0 {
+		options.ResponseTimeout = defaultResponseTimeout
+	}
+	if options.RequestID == nil {
+		options.RequestID = newRequestID
+	}
+	return options
 }
 
 func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request) {
+	checker, ok := h.store.(readinessChecker)
+	if !ok || checker == nil {
+		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database readiness check is not configured")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), h.options.ReadinessTimeout)
+	defer cancel()
+	if err := checker.Ready(ctx); err != nil {
+		slog.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
+		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database is not ready")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {
@@ -181,15 +274,29 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "scan service is not configured")
 		return
 	}
-
+	if !isJSONContentType(request.Header.Get("Content-Type"), request.ContentLength) {
+		writeAPIError(writer, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+		return
+	}
 	var body scanRequest
+	request.Body = http.MaxBytesReader(writer, request.Body, h.options.MaxRequestBytes)
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeAPIError(writer, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body must not exceed %d bytes", h.options.MaxRequestBytes))
+			return
+		}
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", invalidBodyMessage(err))
 		return
 	}
 	if err := requireSingleJSONValue(decoder); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeAPIError(writer, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body must not exceed %d bytes", h.options.MaxRequestBytes))
+			return
+		}
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -199,29 +306,57 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if body.AllTags && !reference.IsRepositoryOnly() {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", "all_tags requires a bare repository reference")
+		return
+	}
+	platform := strings.TrimSpace(body.Platform)
+	if platform != "" {
+		if _, err := manifest.ParsePlatformSelector(platform); err != nil {
+			writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+	}
+	select {
+	case h.scanSlots <- struct{}{}:
+		defer func() { <-h.scanSlots }()
+	default:
+		writer.Header().Set("Retry-After", "5")
+		writeAPIError(writer, http.StatusTooManyRequests, "scan_capacity_exceeded", "the maximum number of concurrent scans is already running")
+		return
+	}
 
-	outcome, err := h.scanner.ScanAndSave(request.Context(), scanservice.Request{
+	scanCtx, cancel := context.WithTimeout(request.Context(), h.options.ScanTimeout)
+	defer cancel()
+	outcome, err := h.scanner.ScanAndSave(scanCtx, scanservice.Request{
 		Reference: reference,
-		Platform:  strings.TrimSpace(body.Platform),
+		Platform:  platform,
+		AllTags:   body.AllTags,
+		Logger:    slog.Default(),
 	})
+	resultJSON, marshalErr := marshalScanResult(outcome.Result)
+	if marshalErr != nil {
+		slog.Error("encode scan result", "error_type", fmt.Sprintf("%T", marshalErr), "request_id", requestIDFromWriter(writer))
+		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "scan result could not be encoded")
+		return
+	}
 	if err != nil {
+		statusCode, code, message := classifyScanError(err)
+		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", code, "status", statusCode, "request_id", requestIDFromWriter(writer))
 		response := scanResponse{
 			ScanRunID: outcome.ScanRunID,
-			Error: &errorResponse{
-				Code:    scanErrorCode(err),
-				Message: err.Error(),
-			},
+			Error:     newErrorResponse(writer, code, message),
 		}
 		if hasResult(outcome.Result) {
-			response.Result = &outcome.Result
+			response.Result = resultJSON
 		}
-		writeJSON(writer, http.StatusInternalServerError, response)
+		writeJSON(writer, statusCode, response)
 		return
 	}
 
 	writeJSON(writer, http.StatusOK, scanResponse{
 		ScanRunID: outcome.ScanRunID,
-		Result:    &outcome.Result,
+		Result:    resultJSON,
 	})
 }
 
@@ -237,9 +372,11 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		return
 	}
 
-	items, err := h.store.ListRepositories(request.Context(), limit, offset)
+	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
+	defer cancel()
+	items, err := h.store.ListRepositories(ctx, limit, offset)
 	if err != nil {
-		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		h.writeStorageError(writer, "list repositories", err)
 		return
 	}
 
@@ -272,7 +409,7 @@ func (h *Handler) handleRepositorySubtree(writer http.ResponseWriter, request *h
 	case strings.HasSuffix(request.URL.Path, "/scans"):
 		h.handleListRepositoryScans(writer, request)
 	default:
-		http.NotFound(writer, request)
+		h.handleNotFound(writer, request)
 	}
 }
 
@@ -283,7 +420,7 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		return
 	}
 	if !ok {
-		http.NotFound(writer, request)
+		h.handleNotFound(writer, request)
 		return
 	}
 
@@ -294,9 +431,11 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 	}
 
 	registry := request.URL.Query().Get("registry")
-	items, err := h.store.ListRepositoryScans(request.Context(), registry, repository, limit, offset)
+	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
+	defer cancel()
+	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset)
 	if err != nil {
-		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		h.writeStorageError(writer, "list repository scans", err)
 		return
 	}
 
@@ -320,7 +459,7 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 	if !ok {
-		http.NotFound(writer, request)
+		h.handleNotFound(writer, request)
 		return
 	}
 
@@ -336,9 +475,11 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 	}
 
 	registry := request.URL.Query().Get("registry")
-	items, err := h.store.ListRepositoryFindings(request.Context(), registry, repository, disposition, limit, offset)
+	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
+	defer cancel()
+	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset)
 	if err != nil {
-		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		h.writeStorageError(writer, "list repository findings", err)
 		return
 	}
 
@@ -368,13 +509,21 @@ func (h *Handler) handleGetScan(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	item, err := h.store.GetScanRun(request.Context(), id)
+	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
+	defer cancel()
+	item, err := h.store.GetScanRun(ctx, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeAPIError(writer, http.StatusNotFound, "not_found", "scan run not found")
 			return
 		}
-		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		h.writeStorageError(writer, "get scan run", err)
+		return
+	}
+	resultJSON, err := sanitizeResultJSON(item.ResultJSON)
+	if err != nil {
+		slog.Error("decode stored scan result", "error_type", fmt.Sprintf("%T", err), "scan_run_id", id, "request_id", requestIDFromWriter(writer))
+		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "stored scan result is invalid")
 		return
 	}
 
@@ -383,7 +532,7 @@ func (h *Handler) handleGetScan(writer http.ResponseWriter, request *http.Reques
 			scanSummaryItem: mapScanRunSummary(item.ScanRunSummary),
 			Registry:        item.Registry,
 			Repository:      item.Repository,
-			Result:          append(json.RawMessage(nil), item.ResultJSON...),
+			Result:          resultJSON,
 		},
 	})
 }
@@ -400,13 +549,15 @@ func (h *Handler) handleGetFinding(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	item, err := h.store.GetFinding(request.Context(), id)
+	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
+	defer cancel()
+	item, err := h.store.GetFinding(ctx, id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeAPIError(writer, http.StatusNotFound, "not_found", "finding not found")
 			return
 		}
-		writeAPIError(writer, http.StatusInternalServerError, "internal_error", err.Error())
+		h.writeStorageError(writer, "get finding", err)
 		return
 	}
 
@@ -442,6 +593,10 @@ func (h *Handler) handleGetFinding(writer http.ResponseWriter, request *http.Req
 }
 
 func mapScanRunSummary(item storage.ScanRunSummary) scanSummaryItem {
+	errorMessage := ""
+	if strings.TrimSpace(item.ErrorMessage) != "" {
+		errorMessage = "scan did not complete successfully"
+	}
 	return scanSummaryItem{
 		ID:                           item.ID,
 		RequestedReference:           item.RequestedReference,
@@ -449,7 +604,7 @@ func mapScanRunSummary(item storage.ScanRunSummary) scanSummaryItem {
 		RequestedDigest:              item.RequestedDigest,
 		Mode:                         item.Mode,
 		Status:                       string(item.Status),
-		ErrorMessage:                 item.ErrorMessage,
+		ErrorMessage:                 errorMessage,
 		ScannedAt:                    item.ScannedAt.UTC().Format(time.RFC3339),
 		TagsEnumerated:               item.TagsEnumerated,
 		TagsResolved:                 item.TagsResolved,
@@ -457,6 +612,7 @@ func mapScanRunSummary(item storage.ScanRunSummary) scanSummaryItem {
 		TargetCount:                  item.TargetCount,
 		CompletedTargetCount:         item.CompletedTargetCount,
 		FailedTargetCount:            item.FailedTargetCount,
+		PartialTargetCount:           item.PartialTargetCount,
 		ManifestCount:                item.ManifestCount,
 		CompletedManifestCount:       item.CompletedManifestCount,
 		FailedManifestCount:          item.FailedManifestCount,
@@ -559,16 +715,35 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 	if err := decoder.Decode(&extra); err == io.EOF {
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("request body must be valid JSON")
+		return err
 	}
 	return fmt.Errorf("request body must contain a single JSON object")
 }
 
-func scanErrorCode(err error) string {
-	if scanservice.IsSaveError(err) {
-		return "storage_failed"
+func classifyScanError(err error) (int, string, string) {
+	switch {
+	case scanservice.IsSaveError(err):
+		return http.StatusServiceUnavailable, "storage_unavailable", "the scan completed, but its result could not be stored"
+	case jobs.IsIncomplete(err):
+		var incomplete *jobs.IncompleteError
+		if errors.As(err, &incomplete) && incomplete != nil {
+			return http.StatusUnprocessableEntity, "scan_incomplete", fmt.Sprintf(
+				"scan coverage is %s: %d manifest(s) completed, %d failed",
+				incomplete.Status,
+				incomplete.CompletedManifestCount,
+				incomplete.FailedManifestCount,
+			)
+		}
+		return http.StatusUnprocessableEntity, "scan_incomplete", "the scan did not cover every selected manifest"
+	case limits.IsExceeded(err):
+		return http.StatusUnprocessableEntity, "scan_limit_exceeded", err.Error()
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, "scan_timeout", "the scan exceeded its configured deadline"
+	case errors.Is(err, context.Canceled):
+		return http.StatusRequestTimeout, "scan_canceled", "the scan was canceled"
+	default:
+		return http.StatusBadGateway, "scan_failed", "the registry scan could not be completed"
 	}
-	return "scan_failed"
 }
 
 func hasResult(result jobs.Result) bool {
@@ -583,19 +758,217 @@ func hasResult(result jobs.Result) bool {
 
 func writeAPIError(writer http.ResponseWriter, statusCode int, code, message string) {
 	writeJSON(writer, statusCode, map[string]any{
-		"error": errorResponse{
-			Code:    code,
-			Message: message,
-		},
+		"error": newErrorResponse(writer, code, message),
 	})
 }
 
 func writeJSON(writer http.ResponseWriter, statusCode int, payload any) {
-	writer.Header().Set("Content-Type", "application/json")
+	setResponseWriteDeadline(writer)
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.WriteHeader(statusCode)
 	encoder := json.NewEncoder(writer)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(payload); err != nil {
-		slog.Error("encode api response", "err", err, "status", statusCode)
+		slog.Error("encode api response", "error_type", fmt.Sprintf("%T", err), "status", statusCode)
+	}
+}
+
+type apiResponseWriter struct {
+	http.ResponseWriter
+	requestID    string
+	writeTimeout time.Duration
+	wroteHeader  bool
+}
+
+func (w *apiResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *apiResponseWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (h *Handler) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestID := validRequestID(request.Header.Get("X-Request-ID"))
+		if requestID == "" {
+			requestID = h.requestID()
+		}
+		wrapped := &apiResponseWriter{
+			ResponseWriter: writer,
+			requestID:      requestID,
+			writeTimeout:   h.options.ResponseTimeout,
+		}
+		wrapped.Header().Set("X-Request-ID", requestID)
+		wrapped.Header().Set("Cache-Control", "no-store")
+		wrapped.Header().Set("X-Content-Type-Options", "nosniff")
+
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.Error("panic serving api request", "panic_type", fmt.Sprintf("%T", recovered), "request_id", requestID)
+				if !wrapped.wroteHeader {
+					writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+				}
+			}
+		}()
+		next.ServeHTTP(wrapped, request)
+	})
+}
+
+func (h *Handler) methodNotAllowed(allowed string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Allow", allowed)
+		writeAPIError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "method is not allowed for this endpoint")
+	}
+}
+
+func (h *Handler) handleNotFound(writer http.ResponseWriter, _ *http.Request) {
+	writeAPIError(writer, http.StatusNotFound, "not_found", "endpoint not found")
+}
+
+func (h *Handler) writeStorageError(writer http.ResponseWriter, operation string, err error) {
+	slog.Warn("api storage request failed", "operation", operation, "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
+	writeAPIError(writer, http.StatusServiceUnavailable, "storage_unavailable", "database request failed")
+}
+
+func newErrorResponse(writer http.ResponseWriter, code, message string) *errorResponse {
+	return &errorResponse{
+		Code:      code,
+		Message:   message,
+		RequestID: requestIDFromWriter(writer),
+	}
+}
+
+func requestIDFromWriter(writer http.ResponseWriter) string {
+	for {
+		wrapped, ok := writer.(*apiResponseWriter)
+		if !ok {
+			return ""
+		}
+		if wrapped.requestID != "" {
+			return wrapped.requestID
+		}
+		writer = wrapped.ResponseWriter
+	}
+}
+
+func validRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return ""
+	}
+	return value
+}
+
+func newRequestID() string {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err == nil {
+		return hex.EncodeToString(random[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func isJSONContentType(value string, contentLength int64) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return contentLength == 0
+	}
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/json" || (strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json"))
+}
+
+func marshalScanResult(result jobs.Result) (json.RawMessage, error) {
+	body, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	return sanitizeResultJSON(body)
+}
+
+func sanitizeResultJSON(body []byte) (json.RawMessage, error) {
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("decode scan result: %w", err)
+	}
+	if err := requireSingleJSONValue(decoder); err != nil {
+		return nil, fmt.Errorf("decode scan result: %w", err)
+	}
+	sanitizeResultErrors(value)
+	sanitized, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode scan result: %w", err)
+	}
+	return json.RawMessage(sanitized), nil
+}
+
+func sanitizeResultErrors(value any) {
+	switch item := value.(type) {
+	case map[string]any:
+		for key, child := range item {
+			if (key == "error" || key == "error_message") && strings.TrimSpace(fmt.Sprint(child)) != "" {
+				item[key] = "scan step failed"
+				continue
+			}
+			if key == "message" {
+				if code, ok := item["code"].(string); ok {
+					item[key] = safeDiagnosticMessage(code)
+					continue
+				}
+			}
+			sanitizeResultErrors(child)
+		}
+	case []any:
+		for _, child := range item {
+			sanitizeResultErrors(child)
+		}
+	}
+}
+
+func safeDiagnosticMessage(code string) string {
+	switch code {
+	case "files_skipped_oversize":
+		return "one or more files exceeded the configured per-file scan limit"
+	case "max_findings_exceeded":
+		return "the scan exceeded the configured findings limit"
+	case "max_raw_finding_bytes_exceeded":
+		return "the scan exceeded the configured raw finding byte limit"
+	default:
+		return "scan step failed"
+	}
+}
+
+func setResponseWriteDeadline(writer http.ResponseWriter) {
+	wrapped, ok := writer.(*apiResponseWriter)
+	if !ok || wrapped.writeTimeout <= 0 {
+		return
+	}
+	err := http.NewResponseController(writer).SetWriteDeadline(time.Now().Add(wrapped.writeTimeout))
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		slog.Warn("set api response deadline", "error_type", fmt.Sprintf("%T", err), "request_id", wrapped.requestID)
 	}
 }

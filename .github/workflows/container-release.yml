@@ -1,47 +1,1154 @@
-name: Container Release
+name: Release
+
+run-name: Release ${{ inputs.version }} from ${{ inputs.source_sha }}
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact v1 release, for example v1.1.0-rc.1 or v1.1.0
+        required: true
+        type: string
+      source_sha:
+        description: Full 40-character commit SHA to release
+        required: true
+        type: string
+      candidate_version:
+        description: Accepted RC tag when promoting a stable release
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: layerleak-release
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/brumbelow/layerleak
+  GRYPE_VERSION: v0.99.1
 
 jobs:
-  publish-image:
-    name: Publish API image to GHCR
-    runs-on: ubuntu-latest
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+      version: ${{ steps.validate.outputs.version }}
+      prerelease: ${{ steps.validate.outputs.prerelease }}
+      candidate_version: ${{ steps.validate.outputs.candidate_version }}
+      tag_exists: ${{ steps.validate.outputs.tag_exists }}
+      release_exists: ${{ steps.validate.outputs.release_exists }}
+      source_date: ${{ steps.validate.outputs.source_date }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - name: Checkout release control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate version, source, and candidate
+        id: validate
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+          REQUESTED_CANDIDATE: ${{ inputs.candidate_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REPOSITORY,,}" != "brumbelow/layerleak" ]]; then
+            echo "Refusing to publish from ${GITHUB_REPOSITORY}." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_WORKFLOW_REF}" != "${GITHUB_REPOSITORY}/.github/workflows/container-release.yml@refs/heads/main" ]]; then
+            echo "The release control workflow must come from main, not ${GITHUB_WORKFLOW_REF}." >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_VERSION}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+            echo "Version must be a canonical v1 stable or RC tag." >&2
+            exit 1
+          fi
+          if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_sha must be a full lowercase commit SHA." >&2
+            exit 1
+          fi
+          if [[ "$(awk '$1 == "module" { print $2 }' go.mod)" != "github.com/brumbelow/layerleak" ]]; then
+            echo "The root Go module path is not release-compatible." >&2
+            exit 1
+          fi
+
+          git fetch --quiet origin main --tags
+          git cat-file -e "${REQUESTED_SOURCE_SHA}^{commit}"
+          if ! git merge-base --is-ancestor "${REQUESTED_SOURCE_SHA}" origin/main; then
+            echo "The release commit is not reachable from origin/main." >&2
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "${REQUESTED_VERSION}" == *-rc.* ]]; then
+            prerelease=true
+          fi
+
+          tag_exists=false
+          release_exists=false
+          if git show-ref --verify --quiet "refs/tags/${REQUESTED_VERSION}"; then
+            tag_exists=true
+            existing_sha="$(git rev-parse "${REQUESTED_VERSION}^{commit}")"
+            if [[ "${existing_sha}" != "${REQUESTED_SOURCE_SHA}" ]]; then
+              echo "${REQUESTED_VERSION} already points to another commit." >&2
+              exit 1
+            fi
+            if gh release view "${REQUESTED_VERSION}" >/dev/null 2>&1; then
+              release_state="$(gh release view "${REQUESTED_VERSION}" \
+                --json isDraft,isImmutable,isPrerelease \
+                --jq '[.isDraft, .isImmutable, .isPrerelease] | @tsv')"
+              if [[ "${release_state}" != $'false\ttrue\t'"${prerelease}" ]]; then
+                echo "${REQUESTED_VERSION} has incompatible GitHub release state." >&2
+                exit 1
+              fi
+              gh release verify "${REQUESTED_VERSION}" >/dev/null
+              release_exists=true
+            fi
+          fi
+
+          if [[ "${prerelease}" == true ]]; then
+            if [[ -n "${REQUESTED_CANDIDATE}" ]]; then
+              echo "candidate_version is only valid for a stable release." >&2
+              exit 1
+            fi
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "RC release dispatches must run from main, not ${GITHUB_REF}." >&2
+              exit 1
+            fi
+            if [[ "${tag_exists}" == false && "${REQUESTED_SOURCE_SHA}" != "$(git rev-parse origin/main)" ]]; then
+              echo "A new RC must target the current origin/main head." >&2
+              exit 1
+            fi
+            if [[ "${release_exists}" == false && "${REQUESTED_SOURCE_SHA}" != "${GITHUB_SHA}" ]]; then
+              echo "An unpublished RC must run from its source commit so provenance names the code that was built." >&2
+              echo "Dispatch the workflow at the original source commit instead of a newer main commit." >&2
+              exit 1
+            fi
+          else
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "Stable release dispatches must run from main, not ${GITHUB_REF}." >&2
+              exit 1
+            fi
+            if [[ ! "${REQUESTED_CANDIDATE}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*$ ]]; then
+              echo "A stable release requires an accepted v1 RC tag." >&2
+              exit 1
+            fi
+            if [[ "${REQUESTED_CANDIDATE%%-rc.*}" != "${REQUESTED_VERSION}" ]]; then
+              echo "The candidate must belong to ${REQUESTED_VERSION}." >&2
+              exit 1
+            fi
+            candidate_sha="$(git rev-parse "${REQUESTED_CANDIDATE}^{commit}")"
+            if [[ "${candidate_sha}" != "${REQUESTED_SOURCE_SHA}" ]]; then
+              echo "Stable releases must use the accepted RC commit without changes." >&2
+              exit 1
+            fi
+
+            candidate_state="$(gh release view "${REQUESTED_CANDIDATE}" \
+              --json isDraft,isImmutable,isPrerelease,publishedAt \
+              --jq '[.isDraft, .isImmutable, .isPrerelease, .publishedAt] | @tsv')"
+            IFS=$'\t' read -r candidate_draft candidate_immutable candidate_prerelease candidate_published_at <<<"${candidate_state}"
+            if [[ "${candidate_draft}" != false || "${candidate_immutable}" != true || "${candidate_prerelease}" != true ]]; then
+              echo "${REQUESTED_CANDIDATE} must be a published immutable prerelease." >&2
+              exit 1
+            fi
+            gh release verify "${REQUESTED_CANDIDATE}" >/dev/null
+            candidate_published_epoch="$(date --date="${candidate_published_at}" +%s)"
+            current_epoch="$(date -u +%s)"
+            soak_seconds="$((current_epoch - candidate_published_epoch))"
+            if (( soak_seconds < 72 * 60 * 60 )); then
+              remaining_hours="$(((72 * 60 * 60 - soak_seconds + 3599) / 3600))"
+              echo "${REQUESTED_CANDIDATE} has not completed the required 72-hour soak (${remaining_hours}h remaining)." >&2
+              exit 1
+            fi
+
+            if [[ "${release_exists}" == false ]]; then
+              latest_stable=""
+              latest_minor=-1
+              latest_patch=-1
+              while IFS= read -r stable_tag; do
+                if [[ "${stable_tag}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                  minor="${BASH_REMATCH[1]}"
+                  patch="${BASH_REMATCH[2]}"
+                  if (( minor > latest_minor || (minor == latest_minor && patch > latest_patch) )); then
+                    latest_stable="${stable_tag}"
+                    latest_minor="${minor}"
+                    latest_patch="${patch}"
+                  fi
+                fi
+              done < <(git tag --list 'v1.*')
+
+              if [[ -n "${latest_stable}" && "${latest_stable}" != "${REQUESTED_VERSION}" ]]; then
+                [[ "${REQUESTED_VERSION}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+                requested_minor="${BASH_REMATCH[1]}"
+                requested_patch="${BASH_REMATCH[2]}"
+                if (( requested_minor < latest_minor ||
+                  (requested_minor == latest_minor && requested_patch <= latest_patch) )); then
+                  echo "${REQUESTED_VERSION} must be newer than the current stable ${latest_stable}." >&2
+                  exit 1
+                fi
+              fi
+            fi
+          fi
+
+          source_date="$(git show -s --format=%cI "${REQUESTED_SOURCE_SHA}")"
+          {
+            echo "source_sha=${REQUESTED_SOURCE_SHA}"
+            echo "version=${REQUESTED_VERSION}"
+            echo "prerelease=${prerelease}"
+            echo "candidate_version=${REQUESTED_CANDIDATE}"
+            echo "tag_exists=${tag_exists}"
+            echo "release_exists=${release_exists}"
+            echo "source_date=${source_date}"
+          } >> "${GITHUB_OUTPUT}"
+
+  verify:
+    name: Full source verification
+    needs: validate
+    uses: ./.github/workflows/verify.yml
+    permissions:
+      contents: read
+    with:
+      ref: ${{ needs.validate.outputs.source_sha }}
+
+  stage-image:
+    name: Stage immutable image
+    needs:
+      - validate
+      - verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      attestations: read
+    outputs:
+      digest: ${{ steps.finalize.outputs.digest }}
+      reference: ${{ steps.reference.outputs.reference }}
+      latest_before: ${{ steps.reference.outputs.latest_before }}
+      recovered: ${{ steps.recover.outputs.recovered }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
-      - name: Extract image metadata
-        id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
-        with:
-          images: ghcr.io/brumbelow/layerleak
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest
+      - name: Resolve an interrupted RC publication
+        id: recover
+        if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          TAG_EXISTS: ${{ needs.validate.outputs.tag_exists }}
+        run: |
+          set -euo pipefail
+          if ! docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_VERSION}" --raw > recovered-index.json 2>/dev/null; then
+            echo "recovered=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${TAG_EXISTS}" != true ]]; then
+            echo "${IMAGE_NAME}:${RELEASE_VERSION} already exists without the matching source tag; refusing to replace it." >&2
+            exit 1
+          fi
+          digest="sha256:$(sha256sum recovered-index.json | awk '{print $1}')"
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          echo "recovered=true" >> "${GITHUB_OUTPUT}"
 
-      - name: Build and push image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+      - name: Build and push RC candidate
+        id: build
+        if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false' && steps.recover.outputs.recovered != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
+          pull: true
           push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
+          tags: ${{ env.IMAGE_NAME }}:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.created=${{ needs.validate.outputs.source_date }}
+            org.opencontainers.image.description=Layerleak PostgreSQL-backed API
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ needs.validate.outputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=layerleak
+            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+          attests: |
+            type=provenance,mode=max,version=v1
+            type=sbom
+
+      - name: Reuse a published release image
+        id: reuse
+        if: needs.validate.outputs.release_exists == 'true' || needs.validate.outputs.prerelease == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_VERSION: ${{ needs.validate.outputs.candidate_version }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          manifest_version="${CANDIDATE_VERSION}"
+          expected_prerelease=true
+          if [[ "${RELEASE_EXISTS}" == true ]]; then
+            manifest_version="${RELEASE_VERSION}"
+            expected_prerelease="${PRERELEASE}"
+          fi
+          mkdir -p candidate-release
+          release_state="$(gh release view "${manifest_version}" --repo "${GITHUB_REPOSITORY}" \
+            --json isDraft,isImmutable,isPrerelease \
+            --jq '[.isDraft, .isImmutable, .isPrerelease] | @tsv')"
+          test "${release_state}" = $'false\ttrue\t'"${expected_prerelease}"
+          gh release verify "${manifest_version}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          gh release download "${manifest_version}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern release-manifest.json \
+            --dir candidate-release
+          manifest=candidate-release/release-manifest.json
+          gh release verify-asset "${manifest_version}" "${manifest}" \
+            --repo "${GITHUB_REPOSITORY}" >/dev/null
+          test "$(jq -r .version "${manifest}")" = "${manifest_version}"
+          test "$(jq -r .source_sha "${manifest}")" = "${SOURCE_SHA}"
+          digest="$(jq -r .image.index_digest "${manifest}")"
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The candidate release manifest has an invalid image digest." >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "${IMAGE_NAME}:${manifest_version}" --raw > candidate-index.json
+          registry_digest="sha256:$(sha256sum candidate-index.json | awk '{print $1}')"
+          if [[ "${registry_digest}" != "${digest}" ]]; then
+            echo "The accepted RC tag no longer resolves to its recorded image digest." >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Record staged reference
+        id: reference
+        shell: bash
+        env:
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          CANDIDATE_VERSION: ${{ needs.validate.outputs.candidate_version }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
+          RECOVERED: ${{ steps.recover.outputs.recovered }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_EXISTS}" == true ]]; then
+            echo "reference=${IMAGE_NAME}:${RELEASE_VERSION}" >> "${GITHUB_OUTPUT}"
+          elif [[ "${RECOVERED}" == true ]]; then
+            echo "reference=${IMAGE_NAME}:${RELEASE_VERSION}" >> "${GITHUB_OUTPUT}"
+          elif [[ "${PRERELEASE}" == true ]]; then
+            echo "reference=${IMAGE_NAME}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "reference=${IMAGE_NAME}:${CANDIDATE_VERSION}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ "${PRERELEASE}" == true ]]; then
+            if docker buildx imagetools inspect "${IMAGE_NAME}:latest" --raw > previous-latest.json 2>/dev/null; then
+              echo "latest_before=sha256:$(sha256sum previous-latest.json | awk '{print $1}')" >> "${GITHUB_OUTPUT}"
+            else
+              echo "latest_before=absent" >> "${GITHUB_OUTPUT}"
+            fi
+          else
+            echo "latest_before=not-applicable" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Validate selected image digest
+        id: finalize
+        shell: bash
+        env:
+          SELECTED_DIGEST: ${{ steps.build.outputs.digest || steps.recover.outputs.digest || steps.reuse.outputs.digest }}
+          SELECTED_REFERENCE: ${{ steps.reference.outputs.reference }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SELECTED_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "The staged image digest is missing or malformed." >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "${SELECTED_REFERENCE}" --raw > selected-index.json
+          registry_digest="sha256:$(sha256sum selected-index.json | awk '{print $1}')"
+          test "${registry_digest}" = "${SELECTED_DIGEST}"
+          echo "digest=${SELECTED_DIGEST}" >> "${GITHUB_OUTPUT}"
+
+  scan-image:
+    name: Image vulnerabilities (${{ matrix.platform }})
+    needs:
+      - validate
+      - stage-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+          - platform: linux/arm64
+            suffix: arm64
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Scan all critical vulnerabilities
+        id: critical
+        continue-on-error: true
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        env:
+          GRYPE_PLATFORM: ${{ matrix.platform }}
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
+          grype-version: ${{ env.GRYPE_VERSION }}
+          severity-cutoff: critical
+          only-fixed: false
+          fail-build: true
+          output-format: sarif
+          output-file: grype-critical-${{ matrix.suffix }}.sarif
+          cache-db: false
+
+      - name: Scan fixable high vulnerabilities
+        id: fixable_high
+        continue-on-error: true
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        env:
+          GRYPE_PLATFORM: ${{ matrix.platform }}
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
+          grype-version: ${{ env.GRYPE_VERSION }}
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: json
+          output-file: grype-fixable-high-${{ matrix.suffix }}.json
+          cache-db: false
+
+      - name: Upload vulnerability reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-scan-${{ matrix.suffix }}
+          path: grype-*-${{ matrix.suffix }}.*
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce vulnerability policy
+        if: always()
+        shell: bash
+        env:
+          CRITICAL_OUTCOME: ${{ steps.critical.outcome }}
+          FIXABLE_HIGH_OUTCOME: ${{ steps.fixable_high.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "${CRITICAL_OUTCOME}" != success || "${FIXABLE_HIGH_OUTCOME}" != success ]]; then
+            echo "Image failed the critical or fixable-high vulnerability policy." >&2
+            exit 1
+          fi
+
+  supply-chain:
+    name: Attest and sign image
+    needs:
+      - validate
+      - stage-image
+      - scan-image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      amd64_digest: ${{ steps.inspect.outputs.amd64_digest }}
+      arm64_digest: ${{ steps.inspect.outputs.arm64_digest }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Inspect image, SBOMs, and provenance
+        id: inspect
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          reference="${IMAGE_NAME}@${IMAGE_DIGEST}"
+          docker buildx imagetools inspect "${reference}" --raw > release-assets/image-index.json
+
+          platform_count="$(jq '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))] | length' release-assets/image-index.json)"
+          if [[ "${platform_count}" -ne 2 ]]; then
+            echo "Expected exactly linux/amd64 and linux/arm64 image manifests." >&2
+            exit 1
+          fi
+          amd64_digest="$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' release-assets/image-index.json)"
+          arm64_digest="$(jq -r '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' release-assets/image-index.json)"
+          for digest in "${amd64_digest}" "${arm64_digest}"; do
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
+
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .SBOM "linux/amd64").SPDX }}' > release-assets/sbom-linux-amd64.spdx.json
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .SBOM "linux/arm64").SPDX }}' > release-assets/sbom-linux-arm64.spdx.json
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .Provenance "linux/amd64").SLSA }}' > release-assets/provenance-linux-amd64.slsa.json
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .Provenance "linux/arm64").SLSA }}' > release-assets/provenance-linux-arm64.slsa.json
+          jq -e '.spdxVersion | startswith("SPDX-")' release-assets/sbom-linux-amd64.spdx.json >/dev/null
+          jq -e '.spdxVersion | startswith("SPDX-")' release-assets/sbom-linux-arm64.spdx.json >/dev/null
+          jq -e '.buildDefinition and .runDetails' release-assets/provenance-linux-amd64.slsa.json >/dev/null
+          jq -e '.buildDefinition and .runDetails' release-assets/provenance-linux-arm64.slsa.json >/dev/null
+
+          {
+            echo "amd64_digest=${amd64_digest}"
+            echo "arm64_digest=${arm64_digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Reuse published GitHub attestations
+        if: needs.validate.outputs.prerelease == 'false' || needs.validate.outputs.release_exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_VERSION: ${{ needs.validate.outputs.candidate_version }}
+          RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          attested_version="${CANDIDATE_VERSION}"
+          if [[ "${RELEASE_EXISTS}" == true ]]; then
+            attested_version="${RELEASE_VERSION}"
+          fi
+          mkdir -p published-attestations
+          gh release download "${attested_version}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'attestation-*.jsonl' \
+            --dir published-attestations
+          for asset in \
+            attestation-image-index.jsonl \
+            attestation-linux-amd64-sbom.jsonl \
+            attestation-linux-arm64-sbom.jsonl; do
+            test -s "published-attestations/${asset}"
+            gh release verify-asset "${attested_version}" "published-attestations/${asset}" \
+              --repo "${GITHUB_REPOSITORY}" >/dev/null
+            cp "published-attestations/${asset}" "release-assets/${asset}"
+          done
+
+      - name: Recover source-bound GitHub attestations
+        if: needs.stage-image.outputs.recovered == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          AMD64_DIGEST: ${{ steps.inspect.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.inspect.outputs.arm64_digest }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          attestation_policy=(
+            --repo "${GITHUB_REPOSITORY}"
+            --bundle-from-oci
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/container-release.yml"
+            --source-ref refs/heads/main
+            --source-digest "${SOURCE_SHA}"
+            --deny-self-hosted-runners
+            --format json
+          )
+          gh attestation verify "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            "${attestation_policy[@]}" > recovered-index-attestations.json
+          jq -e 'length > 0 and all(.[]; .attestation != null)' \
+            recovered-index-attestations.json >/dev/null
+          jq -c '.[].attestation' recovered-index-attestations.json \
+            > release-assets/attestation-image-index.jsonl
+
+          for platform in amd64 arm64; do
+            if [[ "${platform}" == amd64 ]]; then
+              digest="${AMD64_DIGEST}"
+            else
+              digest="${ARM64_DIGEST}"
+            fi
+            gh attestation verify "oci://${IMAGE_NAME}@${digest}" \
+              "${attestation_policy[@]}" \
+              --predicate-type https://spdx.dev/Document/v2.3 \
+              > "recovered-${platform}-attestations.json"
+            jq -e 'length > 0 and all(.[]; .attestation != null)' \
+              "recovered-${platform}-attestations.json" >/dev/null
+            jq -c '.[].attestation' "recovered-${platform}-attestations.json" \
+              > "release-assets/attestation-linux-${platform}-sbom.jsonl"
+          done
+
+      - name: Attest image index provenance
+        id: index_attestation
+        if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false' && needs.stage-image.outputs.recovered != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ needs.stage-image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest amd64 SBOM
+        id: amd64_attestation
+        if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false' && needs.stage-image.outputs.recovered != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.inspect.outputs.amd64_digest }}
+          sbom-path: release-assets/sbom-linux-amd64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest arm64 SBOM
+        id: arm64_attestation
+        if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false' && needs.stage-image.outputs.recovered != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.inspect.outputs.arm64_digest }}
+          sbom-path: release-assets/sbom-linux-arm64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Install pinned Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+        with:
+          cosign-release: v3.0.2
+
+      - name: Sign and verify every image manifest
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          AMD64_DIGEST: ${{ steps.inspect.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.inspect.outputs.arm64_digest }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container-release.yml@refs/heads/main"
+          for digest in "${IMAGE_DIGEST}" "${AMD64_DIGEST}" "${ARM64_DIGEST}"; do
+            reference="${IMAGE_NAME}@${digest}"
+            cosign sign --yes "${reference}"
+            cosign verify \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${reference}" >/dev/null
+          done
+
+          attestation_policy=(
+            --repo "${GITHUB_REPOSITORY}"
+            --bundle-from-oci
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/container-release.yml"
+            --source-ref refs/heads/main
+            --source-digest "${SOURCE_SHA}"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            "${attestation_policy[@]}" >/dev/null
+          for digest in "${AMD64_DIGEST}" "${ARM64_DIGEST}"; do
+            gh attestation verify "oci://${IMAGE_NAME}@${digest}" \
+              "${attestation_policy[@]}" \
+              --predicate-type https://spdx.dev/Document/v2.3 >/dev/null
+          done
+
+      - name: Create release manifest
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          AMD64_DIGEST: ${{ steps.inspect.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.inspect.outputs.arm64_digest }}
+          CANDIDATE_VERSION: ${{ needs.validate.outputs.candidate_version }}
+          INDEX_ATTESTATION_BUNDLE: ${{ steps.index_attestation.outputs.bundle-path }}
+          AMD64_ATTESTATION_BUNDLE: ${{ steps.amd64_attestation.outputs.bundle-path }}
+          ARM64_ATTESTATION_BUNDLE: ${{ steps.arm64_attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg version "${RELEASE_VERSION}" \
+            --arg source_sha "${SOURCE_SHA}" \
+            --arg workflow_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg candidate_version "${CANDIDATE_VERSION}" \
+            --arg index_digest "${IMAGE_DIGEST}" \
+            --arg amd64_digest "${AMD64_DIGEST}" \
+            --arg arm64_digest "${ARM64_DIGEST}" \
+            --arg grype_version "${GRYPE_VERSION}" \
+            --arg cosign_version "v3.0.2" \
+            '{
+              schema_version: 1,
+              version: $version,
+              source_sha: $source_sha,
+              workflow_run: $workflow_run,
+              candidate_version: (if $candidate_version == "" then null else $candidate_version end),
+              image: {
+                name: "ghcr.io/brumbelow/layerleak",
+                index_digest: $index_digest,
+                platforms: {
+                  "linux/amd64": $amd64_digest,
+                  "linux/arm64": $arm64_digest
+                }
+              },
+              tools: {
+                grype: $grype_version,
+                cosign: $cosign_version
+              }
+            }' > release-assets/release-manifest.json
+
+          if [[ -n "${INDEX_ATTESTATION_BUNDLE}" ]]; then
+            cp "${INDEX_ATTESTATION_BUNDLE}" release-assets/attestation-image-index.jsonl
+            cp "${AMD64_ATTESTATION_BUNDLE}" release-assets/attestation-linux-amd64-sbom.jsonl
+            cp "${ARM64_ATTESTATION_BUNDLE}" release-assets/attestation-linux-arm64-sbom.jsonl
+          fi
+          test -s release-assets/attestation-image-index.jsonl
+          test -s release-assets/attestation-linux-amd64-sbom.jsonl
+          test -s release-assets/attestation-linux-arm64-sbom.jsonl
+
+      - name: Upload supply-chain assets
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-supply-chain
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 90
+
+  registry-smoke:
+    name: Published image smoke (${{ matrix.platform }})
+    needs:
+      - validate
+      - stage-image
+      - supply-chain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+          - platform: linux/arm64
+            suffix: arm64
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Exercise exact registry image
+        shell: bash
+        env:
+          TEST_PLATFORM: ${{ matrix.platform }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          CANDIDATE_VERSION: ${{ needs.validate.outputs.candidate_version }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          image="${IMAGE_NAME}@${IMAGE_DIGEST}"
+          network="release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.suffix }}"
+          database="release-db-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.suffix }}"
+          api="release-api-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.suffix }}"
+          cleanup() {
+            docker rm -f "${api}" "${database}" >/dev/null 2>&1 || true
+            docker network rm "${network}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker pull --platform "${TEST_PLATFORM}" "${image}"
+          expected_version="${RELEASE_VERSION}"
+          if [[ "${PRERELEASE}" == false ]]; then
+            expected_version="${CANDIDATE_VERSION}"
+          fi
+          test "$(docker image inspect --format '{{.Config.User}}' "${image}")" = "10001:10001"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${image}")" = "${SOURCE_SHA}"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "${image}")" = "${expected_version}"
+          docker network create "${network}" >/dev/null
+          docker run -d --name "${database}" --network "${network}" \
+            -e POSTGRES_DB=layerleak \
+            -e POSTGRES_USER=layerleak \
+            -e POSTGRES_PASSWORD=layerleak-release-test \
+            postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50 >/dev/null
+          for attempt in {1..30}; do
+            if docker exec "${database}" pg_isready -h 127.0.0.1 -U layerleak -d layerleak >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" -eq 30 ]]; then
+              docker logs "${database}"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          database_url='postgres://layerleak:layerleak-release-test@'"${database}"':5432/layerleak?sslmode=disable'
+          for pass in 1 2; do
+            docker run --rm --platform "${TEST_PLATFORM}" --network "${network}" \
+              --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
+              -e LAYERLEAK_DATABASE_URL="${database_url}" \
+              --entrypoint /usr/local/bin/layerleak-migrate-up \
+              "${image}"
+          done
+          docker run -d --name "${api}" --platform "${TEST_PLATFORM}" --network "${network}" \
+            --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:18080:8080 \
+            -e LAYERLEAK_DATABASE_URL="${database_url}" \
+            -e LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings \
+            "${image}" >/dev/null
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:18080/readyz >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" -eq 60 ]]; then
+              docker logs "${api}"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/health
+
+  publish:
+    name: Publish protected release
+    needs:
+      - validate
+      - stage-image
+      - scan-image
+      - supply-chain
+      - registry-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate.outputs.version }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release-assets
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum
+          ) > release-assets/SHA256SUMS
+
+      - name: Create immutable source tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          TAG_EXISTS: ${{ needs.validate.outputs.tag_exists }}
+        run: |
+          set -euo pipefail
+          if [[ "${TAG_EXISTS}" == false ]]; then
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_VERSION}" \
+              -f sha="${SOURCE_SHA}" >/dev/null; then
+              echo "Tag creation raced; verifying the winner." >&2
+            fi
+          fi
+          git fetch --quiet --force origin \
+            "refs/tags/${RELEASE_VERSION}:refs/tags/${RELEASE_VERSION}"
+          remote_commit="$(git rev-parse "${RELEASE_VERSION}^{commit}")"
+          test "${remote_commit}" = "${SOURCE_SHA}"
+
+      - name: Promote exact image digest
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
+        run: |
+          set -euo pipefail
+          source_ref="${IMAGE_NAME}@${IMAGE_DIGEST}"
+          if [[ "${RELEASE_EXISTS}" == false ]]; then
+            if docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_VERSION}" --raw > existing-index.json 2>/dev/null; then
+              existing_digest="sha256:$(sha256sum existing-index.json | awk '{print $1}')"
+              if [[ "${existing_digest}" != "${IMAGE_DIGEST}" ]]; then
+                echo "${IMAGE_NAME}:${RELEASE_VERSION} already points to ${existing_digest}; refusing to replace it." >&2
+                exit 1
+              fi
+            else
+              docker buildx imagetools create --tag "${IMAGE_NAME}:${RELEASE_VERSION}" "${source_ref}"
+            fi
+          fi
+          docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_VERSION}" --raw > promoted-index.json
+          promoted_digest="sha256:$(sha256sum promoted-index.json | awk '{print $1}')"
+          test "${promoted_digest}" = "${IMAGE_DIGEST}"
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_EXISTS}" == true ]]; then
+            release_state="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" \
+              --json isDraft,isImmutable,isPrerelease \
+              --jq '[.isDraft, .isImmutable, .isPrerelease] | @tsv')"
+            test "${release_state}" = $'false\ttrue\t'"${PRERELEASE}"
+            gh release verify "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+            exit 0
+          fi
+
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          generated_notes="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${RELEASE_VERSION}" \
+            -f previous_tag_name=v1.0.0 \
+            --jq .body)"
+          {
+            echo "Canonical Go module releases continue on v1.x."
+            echo
+            echo "Historical v2.0.0-v2.5.0 GitHub and container releases did not use a /v2 module path and are not installable as v2 Go modules. This release contains and supersedes those changes; the v1 version is not a source downgrade."
+            echo
+            echo "The attached release manifest records the source commit, multi-platform image digests, scanner versions, SBOMs, and provenance."
+            echo
+            printf '%s\n' "${generated_notes}"
+          } > "${notes_file}"
+
+          release_args=(
+            "${RELEASE_VERSION}"
+            --repo "${GITHUB_REPOSITORY}"
+            --verify-tag
+            --title "layerleak ${RELEASE_VERSION}"
+            --notes-file "${notes_file}"
+          )
+          if [[ "${PRERELEASE}" == true ]]; then
+            release_args+=(--prerelease --latest=false)
+          else
+            release_args+=(--latest)
+          fi
+          if gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            release_state="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" \
+              --json isDraft,isImmutable,isPrerelease \
+              --jq '[.isDraft, .isImmutable, .isPrerelease] | @tsv')"
+            test "${release_state}" = $'false\ttrue\t'"${PRERELEASE}"
+            gh release verify "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+            recovery_dir="$(mktemp -d)"
+            gh release download "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern release-manifest.json --dir "${recovery_dir}"
+            gh release verify-asset "${RELEASE_VERSION}" "${recovery_dir}/release-manifest.json" \
+              --repo "${GITHUB_REPOSITORY}" >/dev/null
+            test "$(jq -r .version "${recovery_dir}/release-manifest.json")" = "${RELEASE_VERSION}"
+            test "$(jq -r .source_sha "${recovery_dir}/release-manifest.json")" = "${SOURCE_SHA}"
+            test "$(jq -r .image.index_digest "${recovery_dir}/release-manifest.json")" = "${IMAGE_DIGEST}"
+            exit 0
+          fi
+          gh release create "${release_args[@]}" release-assets/*
+
+      - name: Promote stable image to latest
+        if: needs.validate.outputs.prerelease == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_EXISTS}" == true ]]; then
+            latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+            if [[ "${latest_release}" != "${RELEASE_VERSION}" ]]; then
+              echo "Refusing to repoint latest while ${latest_release} is the latest stable release." >&2
+              exit 1
+            fi
+          fi
+          source_ref="${IMAGE_NAME}@${IMAGE_DIGEST}"
+          docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${source_ref}"
+          docker buildx imagetools inspect "${IMAGE_NAME}:latest" --raw > latest-index.json
+          latest_digest="sha256:$(sha256sum latest-index.json | awk '{print $1}')"
+          test "${latest_digest}" = "${IMAGE_DIGEST}"
+
+  post-release:
+    name: Verify public release
+    needs:
+      - validate
+      - stage-image
+      - publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Install pinned Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+        with:
+          cosign-release: v3.0.2
+
+      - name: Verify module proxy, registry, and release metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          LATEST_BEFORE: ${{ needs.stage-image.outputs.latest_before }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          install_bin="${RUNNER_TEMP}/public-install"
+          mkdir -p "${install_bin}"
+          for attempt in {1..30}; do
+            if GOBIN="${install_bin}" GOPROXY=https://proxy.golang.org go install "github.com/brumbelow/layerleak@${RELEASE_VERSION}"; then
+              break
+            fi
+            if [[ "${attempt}" -eq 30 ]]; then
+              echo "The Go proxy did not publish ${RELEASE_VERSION} within five minutes." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          "${install_bin}/layerleak" --version | grep -F "${RELEASE_VERSION}"
+          if [[ "${PRERELEASE}" == true ]]; then
+            latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' github.com/brumbelow/layerleak@latest)"
+            test "${latest_module}" != "${RELEASE_VERSION}"
+          else
+            for attempt in {1..30}; do
+              latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' github.com/brumbelow/layerleak@latest)"
+              if [[ "${latest_module}" == "${RELEASE_VERSION}" ]]; then
+                break
+              fi
+              if [[ "${attempt}" -eq 30 ]]; then
+                echo "The Go proxy did not advance @latest within five minutes." >&2
+                exit 1
+              fi
+              sleep 10
+            done
+          fi
+
+          docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_VERSION}" --raw > release-index.json
+          release_digest="sha256:$(sha256sum release-index.json | awk '{print $1}')"
+          test "${release_digest}" = "${IMAGE_DIGEST}"
+          if [[ "${PRERELEASE}" == false ]]; then
+            docker buildx imagetools inspect "${IMAGE_NAME}:latest" --raw > latest-index.json
+            latest_digest="sha256:$(sha256sum latest-index.json | awk '{print $1}')"
+            test "${latest_digest}" = "${IMAGE_DIGEST}"
+          else
+            if docker buildx imagetools inspect "${IMAGE_NAME}:latest" --raw > latest-index.json 2>/dev/null; then
+              latest_digest="sha256:$(sha256sum latest-index.json | awk '{print $1}')"
+              test "${latest_digest}" = "${LATEST_BEFORE}"
+            else
+              test "${LATEST_BEFORE}" = absent
+            fi
+          fi
+
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container-release.yml@refs/heads/main"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE_NAME}@${IMAGE_DIGEST}" >/dev/null
+          gh attestation verify "oci://${IMAGE_NAME}@${IMAGE_DIGEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --bundle-from-oci \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/container-release.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "${SOURCE_SHA}" \
+            --deny-self-hosted-runners >/dev/null
+
+          release_state="$(gh release view "${RELEASE_VERSION}" \
+            --json isImmutable,isPrerelease \
+            --jq '[.isImmutable, .isPrerelease] | @tsv')"
+          test "${release_state}" = $'true\t'"${PRERELEASE}"
+          gh release verify "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ "${PRERELEASE}" == true ]]; then
+            test "${latest_release}" != "${RELEASE_VERSION}"
+          else
+            test "${latest_release}" = "${RELEASE_VERSION}"
+          fi

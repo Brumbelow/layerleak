@@ -17,6 +17,8 @@ import (
 type PostgresStore struct {
 	db                *sql.DB
 	persistRawSecrets bool
+	queryTimeout      time.Duration
+	writeTimeout      time.Duration
 }
 
 const (
@@ -28,6 +30,7 @@ const (
 // that the server is at least PostgreSQL 16.13. Migrations are not applied here; run them
 // out-of-band via psql or layerleak-migrate-up.
 func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
+	config = config.withDefaults()
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -36,8 +39,13 @@ func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open postgres connection: %w", err)
 	}
+	db.SetMaxOpenConns(config.MaxOpenConns)
+	db.SetMaxIdleConns(config.MaxIdleConns)
+	db.SetConnMaxLifetime(config.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(config.ConnMaxIdleTime)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	connectTimeout := minDuration(config.QueryTimeout, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
@@ -47,14 +55,22 @@ func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 		db.Close()
 		return nil, err
 	}
+	if config.RequireSchema {
+		if err := checkSchemaVersion(ctx, db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 
 	return &PostgresStore{
 		db:                db,
 		persistRawSecrets: config.PersistRawSecrets,
+		queryTimeout:      config.QueryTimeout,
+		writeTimeout:      config.WriteTimeout,
 	}, nil
 }
 
-func ensureMinimumPostgresServerVersion(ctx context.Context, db *sql.DB) error {
+func ensureMinimumPostgresServerVersion(ctx context.Context, db queryRower) error {
 	var rawVersionNum string
 	if err := db.QueryRowContext(ctx, "SHOW server_version_num").Scan(&rawVersionNum); err != nil {
 		return fmt.Errorf("query postgres server version: %w", err)
@@ -101,6 +117,20 @@ func validateMinimumPostgresServerVersionNum(versionNum int) error {
 	return nil
 }
 
+func minDuration(left, right time.Duration) time.Duration {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= timeout {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 func (s *PostgresStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -119,6 +149,8 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64,
 	if err := validateScanRecord(record); err != nil {
 		return 0, err
 	}
+	ctx, cancel := withTimeout(ctx, s.writeTimeout)
+	defer cancel()
 
 	scannedAt := record.ScannedAt.UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -128,6 +160,14 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64,
 	defer func() {
 		_ = tx.Rollback()
 	}()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared($1)`, rawSecretPurgeAdvisoryKey); err != nil {
+		return 0, fmt.Errorf("lock raw secret write: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+	`, strings.TrimSpace(record.Registry)+"/"+strings.TrimSpace(record.Repository)); err != nil {
+		return 0, fmt.Errorf("lock repository scan write: %w", err)
+	}
 
 	repositoryID, err := upsertRepository(ctx, tx, record, scannedAt)
 	if err != nil {
@@ -175,7 +215,9 @@ func upsertRepository(ctx context.Context, tx *sql.Tx, record ScanRecord, scanne
 		INSERT INTO repositories (registry, repository, first_seen_at, last_seen_at)
 		VALUES ($1, $2, $3, $3)
 		ON CONFLICT (registry, repository)
-		DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at
+		DO UPDATE SET
+			first_seen_at = LEAST(repositories.first_seen_at, EXCLUDED.first_seen_at),
+			last_seen_at = GREATEST(repositories.last_seen_at, EXCLUDED.last_seen_at)
 		RETURNING id
 	`, strings.TrimSpace(record.Registry), strings.TrimSpace(record.Repository), scannedAt).Scan(&repositoryID); err != nil {
 		return 0, fmt.Errorf("upsert repository: %w", err)
@@ -201,20 +243,27 @@ func upsertManifest(ctx context.Context, tx *sql.Tx, item ManifestRecord, scanne
 		ON CONFLICT (digest)
 		DO UPDATE SET
 			platform_os = CASE
-				WHEN EXCLUDED.platform_os <> '' THEN EXCLUDED.platform_os
+				WHEN EXCLUDED.last_seen_at >= manifests.last_seen_at AND EXCLUDED.platform_os <> '' THEN EXCLUDED.platform_os
 				ELSE manifests.platform_os
 			END,
 			platform_architecture = CASE
-				WHEN EXCLUDED.platform_architecture <> '' THEN EXCLUDED.platform_architecture
+				WHEN EXCLUDED.last_seen_at >= manifests.last_seen_at AND EXCLUDED.platform_architecture <> '' THEN EXCLUDED.platform_architecture
 				ELSE manifests.platform_architecture
 			END,
 			platform_variant = CASE
-				WHEN EXCLUDED.platform_variant <> '' THEN EXCLUDED.platform_variant
+				WHEN EXCLUDED.last_seen_at >= manifests.last_seen_at AND EXCLUDED.platform_variant <> '' THEN EXCLUDED.platform_variant
 				ELSE manifests.platform_variant
 			END,
-			last_seen_at = EXCLUDED.last_seen_at,
-			last_scan_status = EXCLUDED.last_scan_status,
-			last_scan_error = EXCLUDED.last_scan_error
+			first_seen_at = LEAST(manifests.first_seen_at, EXCLUDED.first_seen_at),
+			last_seen_at = GREATEST(manifests.last_seen_at, EXCLUDED.last_seen_at),
+			last_scan_status = CASE
+				WHEN EXCLUDED.last_seen_at >= manifests.last_seen_at THEN EXCLUDED.last_scan_status
+				ELSE manifests.last_scan_status
+			END,
+			last_scan_error = CASE
+				WHEN EXCLUDED.last_seen_at >= manifests.last_seen_at THEN EXCLUDED.last_scan_error
+				ELSE manifests.last_scan_error
+			END
 	`, item.Digest, item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, scannedAt, item.Status, item.Error); err != nil {
 		return fmt.Errorf("upsert manifest %s: %w", item.Digest, err)
 	}
@@ -237,10 +286,20 @@ func upsertRepositoryManifest(ctx context.Context, tx *sql.Tx, repositoryID int6
 		VALUES ($1, $2, $3, $4, $4, $5, $6)
 		ON CONFLICT (repository_id, manifest_digest)
 		DO UPDATE SET
-			root_digest = EXCLUDED.root_digest,
-			last_seen_at = EXCLUDED.last_seen_at,
-			last_scan_status = EXCLUDED.last_scan_status,
-			last_scan_error = EXCLUDED.last_scan_error
+			root_digest = CASE
+				WHEN EXCLUDED.last_seen_at >= repository_manifests.last_seen_at AND EXCLUDED.root_digest <> '' THEN EXCLUDED.root_digest
+				ELSE repository_manifests.root_digest
+			END,
+			first_seen_at = LEAST(repository_manifests.first_seen_at, EXCLUDED.first_seen_at),
+			last_seen_at = GREATEST(repository_manifests.last_seen_at, EXCLUDED.last_seen_at),
+			last_scan_status = CASE
+				WHEN EXCLUDED.last_seen_at >= repository_manifests.last_seen_at THEN EXCLUDED.last_scan_status
+				ELSE repository_manifests.last_scan_status
+			END,
+			last_scan_error = CASE
+				WHEN EXCLUDED.last_seen_at >= repository_manifests.last_seen_at THEN EXCLUDED.last_scan_error
+				ELSE repository_manifests.last_scan_error
+			END
 	`, repositoryID, item.Digest, item.RootDigest, scannedAt, item.Status, item.Error); err != nil {
 		return fmt.Errorf("upsert repository manifest %s: %w", item.Digest, err)
 	}
@@ -253,8 +312,10 @@ func replaceTagMappings(ctx context.Context, tx *sql.Tx, repositoryID int64, ite
 	if len(tagNames) > 0 {
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM tags
-			WHERE repository_id = $1 AND tag = ANY($2)
-		`, repositoryID, pq.Array(tagNames)); err != nil {
+			WHERE repository_id = $1
+			  AND tag = ANY($2)
+			  AND last_seen_at <= $3
+		`, repositoryID, pq.Array(tagNames), scannedAt); err != nil {
 			return fmt.Errorf("delete existing tag mappings: %w", err)
 		}
 	}
@@ -274,7 +335,21 @@ func replaceTagMappings(ctx context.Context, tx *sql.Tx, repositoryID int64, ite
 				first_seen_at,
 				last_seen_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+			SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM tags
+				WHERE repository_id = $1
+				  AND tag = $2
+				  AND last_seen_at > $10
+			)
+			ON CONFLICT (repository_id, tag, manifest_digest, platform_os, platform_architecture, platform_variant)
+			DO UPDATE SET
+				root_digest = EXCLUDED.root_digest,
+				status = EXCLUDED.status,
+				error = EXCLUDED.error,
+				first_seen_at = LEAST(tags.first_seen_at, EXCLUDED.first_seen_at),
+				last_seen_at = GREATEST(tags.last_seen_at, EXCLUDED.last_seen_at)
 		`, repositoryID, item.Name, item.ManifestDigest, item.RootDigest, item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.Status, item.Error, scannedAt); err != nil {
 			return fmt.Errorf("insert tag mapping %s: %w", item.Name, err)
 		}
@@ -297,67 +372,89 @@ func upsertFinding(ctx context.Context, tx *sql.Tx, item findings.DetailedFindin
 		VALUES ($1, $2, $3, $4, $5, $5)
 		ON CONFLICT (manifest_digest, fingerprint)
 		DO UPDATE SET
-			redacted_value = EXCLUDED.redacted_value,
-			value = EXCLUDED.value,
-			last_seen_at = EXCLUDED.last_seen_at
+			redacted_value = CASE
+				WHEN EXCLUDED.last_seen_at >= findings.last_seen_at THEN EXCLUDED.redacted_value
+				ELSE findings.redacted_value
+			END,
+			value = CASE
+				WHEN $6 AND EXCLUDED.last_seen_at >= findings.last_seen_at THEN EXCLUDED.value
+				ELSE findings.value
+			END,
+			first_seen_at = LEAST(findings.first_seen_at, EXCLUDED.first_seen_at),
+			last_seen_at = GREATEST(findings.last_seen_at, EXCLUDED.last_seen_at)
 		RETURNING id
-	`, strings.TrimSpace(item.ManifestDigest), strings.TrimSpace(item.Fingerprint), item.RedactedValue, persistedValue(item, persistRawSecrets), scannedAt).Scan(&findingID); err != nil {
+	`, strings.TrimSpace(item.ManifestDigest), strings.TrimSpace(item.Fingerprint), item.RedactedValue, persistedValue(item, persistRawSecrets), scannedAt, persistRawSecrets).Scan(&findingID); err != nil {
 		return 0, fmt.Errorf("upsert finding %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
 	}
 
 	return findingID, nil
 }
 
+const upsertFindingOccurrenceSQL = `
+	INSERT INTO finding_occurrences (
+		finding_id,
+		detector_name,
+		confidence,
+		disposition,
+		disposition_reason,
+		source_type,
+		platform_os,
+		platform_architecture,
+		platform_variant,
+		file_path,
+		layer_digest,
+		source_key,
+		line_number,
+		context_snippet,
+		raw_snippet,
+		source_location,
+		match_start,
+		match_end,
+		present_in_final_image,
+		first_seen_at,
+		last_seen_at
+	)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $20)
+	ON CONFLICT (
+		finding_id,
+		detector_name,
+		confidence,
+		source_type,
+		platform_os,
+		platform_architecture,
+		platform_variant,
+		file_path,
+		layer_digest,
+		source_key,
+		context_snippet,
+		source_location,
+		match_start,
+		match_end,
+		present_in_final_image
+	)
+	DO UPDATE SET
+		disposition = CASE
+			WHEN EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.disposition
+			ELSE finding_occurrences.disposition
+		END,
+		disposition_reason = CASE
+			WHEN EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.disposition_reason
+			ELSE finding_occurrences.disposition_reason
+		END,
+		line_number = CASE
+			WHEN EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.line_number
+			ELSE finding_occurrences.line_number
+		END,
+		raw_snippet = CASE
+			WHEN $21 AND EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.raw_snippet
+			ELSE finding_occurrences.raw_snippet
+		END,
+		first_seen_at = LEAST(finding_occurrences.first_seen_at, EXCLUDED.first_seen_at),
+		last_seen_at = GREATEST(finding_occurrences.last_seen_at, EXCLUDED.last_seen_at)
+`
+
 func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, item findings.DetailedFinding, scannedAt time.Time, persistRawSecrets bool) error {
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO finding_occurrences (
-			finding_id,
-			detector_name,
-			confidence,
-			disposition,
-			disposition_reason,
-			source_type,
-			platform_os,
-			platform_architecture,
-			platform_variant,
-			file_path,
-			layer_digest,
-			source_key,
-			line_number,
-			context_snippet,
-			raw_snippet,
-			source_location,
-			match_start,
-			match_end,
-			present_in_final_image,
-			first_seen_at,
-			last_seen_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
-		ON CONFLICT (
-			finding_id,
-			detector_name,
-			confidence,
-			source_type,
-			platform_os,
-			platform_architecture,
-			platform_variant,
-			file_path,
-			layer_digest,
-			source_key,
-			context_snippet,
-			raw_snippet,
-			source_location,
-			match_start,
-			match_end,
-			present_in_final_image
-		)
-		DO UPDATE SET
-			disposition = EXCLUDED.disposition,
-			disposition_reason = EXCLUDED.disposition_reason,
-			line_number = EXCLUDED.line_number,
-			last_seen_at = EXCLUDED.last_seen_at
-	`, findingID, item.DetectorName, item.Confidence, string(item.Disposition), string(item.DispositionReason), string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.LineNumber, item.ContextSnippet, persistedRawSnippet(item, persistRawSecrets), item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, upsertFindingOccurrenceSQL, findingID, item.DetectorName, item.Confidence, string(item.Disposition), string(item.DispositionReason), string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.LineNumber, item.ContextSnippet, persistedRawSnippet(item, persistRawSecrets), item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt, persistRawSecrets); err != nil {
 		return fmt.Errorf("upsert finding occurrence %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
 	}
 
@@ -397,6 +494,7 @@ func insertScanRun(ctx context.Context, tx *sql.Tx, repositoryID int64, record S
 			target_count,
 			completed_target_count,
 			failed_target_count,
+			partial_target_count,
 			manifest_count,
 			completed_manifest_count,
 			failed_manifest_count,
@@ -407,7 +505,7 @@ func insertScanRun(ctx context.Context, tx *sql.Tx, repositoryID int64, record S
 			result_json,
 			scanned_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING id
 	`, repositoryID,
 		strings.TrimSpace(record.RequestedReference),
@@ -422,6 +520,7 @@ func insertScanRun(ctx context.Context, tx *sql.Tx, repositoryID int64, record S
 		record.TargetCount,
 		record.CompletedTargetCount,
 		record.FailedTargetCount,
+		record.PartialTargetCount,
 		record.ManifestCount,
 		record.CompletedManifestCount,
 		record.FailedManifestCount,
@@ -462,12 +561,19 @@ func collectManifestRecords(record ScanRecord) []ManifestRecord {
 	}
 
 	for _, item := range record.DetailedFindings {
-		upsertManifestRecord(manifestsByDigest, ManifestRecord{
+		findingManifest := normalizeManifestRecord(ManifestRecord{
 			Digest:     strings.TrimSpace(item.ManifestDigest),
 			RootDigest: strings.TrimSpace(item.ManifestDigest),
 			Platform:   item.Platform,
 			Status:     "scanned",
 		})
+		if current, ok := manifestsByDigest[findingManifest.Digest]; ok {
+			current.RootDigest = firstNonEmpty(current.RootDigest, findingManifest.RootDigest, current.Digest)
+			current.Platform = mergePlatform(current.Platform, findingManifest.Platform)
+			manifestsByDigest[findingManifest.Digest] = current
+			continue
+		}
+		upsertManifestRecord(manifestsByDigest, findingManifest)
 	}
 
 	items := make([]ManifestRecord, 0, len(manifestsByDigest))
@@ -496,14 +602,13 @@ func upsertManifestRecord(items map[string]ManifestRecord, incoming ManifestReco
 	current.RootDigest = firstNonEmpty(current.RootDigest, incoming.RootDigest, current.Digest)
 	current.Platform = mergePlatform(current.Platform, incoming.Platform)
 	switch {
-	case current.Status == "scanned":
-	case incoming.Status == "scanned":
+	case scanStatusRank(incoming.Status) > scanStatusRank(current.Status):
 		current.Status = incoming.Status
-		current.Error = ""
+		current.Error = incoming.Error
 	case current.Status == "":
 		current.Status = incoming.Status
 		current.Error = incoming.Error
-	case current.Status == "failed" && incoming.Error != "":
+	case current.Status == incoming.Status && current.Error == "" && incoming.Error != "":
 		current.Error = incoming.Error
 	}
 	if current.Error == "" && incoming.Error != "" && current.Status != "scanned" {
@@ -511,6 +616,19 @@ func upsertManifestRecord(items map[string]ManifestRecord, incoming ManifestReco
 	}
 
 	items[incoming.Digest] = current
+}
+
+func scanStatusRank(value string) int {
+	switch strings.TrimSpace(value) {
+	case "scanned":
+		return 3
+	case "partial":
+		return 2
+	case "failed":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func normalizeManifestRecord(item ManifestRecord) ManifestRecord {

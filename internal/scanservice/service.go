@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/brumbelow/layerleak/internal/config"
 	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/internal/findings"
 	"github.com/brumbelow/layerleak/internal/jobs"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/registry"
@@ -20,6 +20,7 @@ type BeforeSaveFunc func(result jobs.Result) error
 type Request struct {
 	Reference  manifest.Reference
 	Platform   string
+	AllTags    bool
 	Logger     *slog.Logger
 	Progress   jobs.ProgressFunc
 	BeforeSave BeforeSaveFunc
@@ -66,7 +67,7 @@ type Service struct {
 	store             storage.Store
 	now               func() time.Time
 	detectors         detectors.Set
-	newRegistryClient func() *registry.Client
+	newRegistryClient func(registry.Options) *registry.Client
 }
 
 func New(cfg config.Config, store storage.Store) *Service {
@@ -93,15 +94,36 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		MaxLayerBytes:        s.config.MaxLayerBytes,
 		MaxLayerEntries:      s.config.MaxLayerEntries,
 		MaxConfigBytes:       s.config.MaxConfigBytes,
+		MaxImageLayers:       s.config.MaxImageLayers,
+		MaxImageManifests:    s.config.MaxImageManifests,
+		MaxImageLayerBytes:   s.config.MaxImageLayerBytes,
+		MaxImageArtifacts:    s.config.MaxImageArtifacts,
+		MaxRetainedBytes:     s.config.MaxRetainedBytes,
+		MaxFindings:          s.config.MaxFindingsPerScan,
+		RetainRawSecrets:     s.config.PersistRawSecrets,
+		MaxRawFindingBytes:   s.config.MaxRawFindingBytes,
+		ConfigTimeout:        s.config.HTTPTimeout,
+		BlobTimeout:          s.config.BlobTimeout,
 		TagPageSize:          s.config.TagPageSize,
 		MaxRepositoryTags:    s.config.MaxRepositoryTags,
 		MaxRepositoryTargets: s.config.MaxRepositoryTargets,
+		AllTags:              request.AllTags,
 		Progress:             request.Progress,
 	})
+	if !s.config.PersistRawSecrets {
+		findings.StripRawSecrets(result.DetailedFindings)
+		findings.StripRawSecrets(result.SuppressedDetailedFindings)
+	}
 	outcome := Outcome{Result: result}
 
 	if s.store == nil || s.store.Name() == "noop" {
 		return outcome, wrapScanError(scanErr)
+	}
+	if ctx != nil && ctx.Err() != nil {
+		if scanErr != nil {
+			return outcome, wrapScanError(scanErr)
+		}
+		return outcome, wrapScanError(ctx.Err())
 	}
 
 	if request.BeforeSave != nil {
@@ -125,25 +147,27 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 }
 
 func (s *Service) registryClient(ref manifest.Reference) *registry.Client {
-	if s.newRegistryClient != nil {
-		return s.newRegistryClient()
-	}
-
 	baseURL := s.config.RegistryBaseURL
 	if baseURL == "" {
 		baseURL = registry.BaseURLForRegistry(ref.Registry)
 	}
 
-	return registry.NewClient(registry.Options{
-		BaseURL:             baseURL,
-		AuthURL:             s.config.RegistryAuthURL,
-		MaxTagResponseBytes: s.config.MaxTagResponseBytes,
-		HTTPClient: &http.Client{
-			Timeout: s.config.HTTPTimeout,
-		},
-		RequestAttempts:  s.config.RegistryRequestAttempts,
-		MaxManifestBytes: s.config.MaxManifestBytes,
-	})
+	options := registry.Options{
+		BaseURL:                     baseURL,
+		AuthURL:                     s.config.RegistryAuthURL,
+		RequestTimeout:              s.config.HTTPTimeout,
+		MaxTagResponseBytes:         s.config.MaxTagResponseBytes,
+		MaxAuthResponseBytes:        s.config.MaxAuthResponseBytes,
+		MaxRedirects:                s.config.RegistryMaxRedirects,
+		AllowedPrivateRegistryHosts: s.config.AllowedPrivateRegistryHosts,
+		AllowedPrivateAuthHosts:     s.config.AllowedPrivateAuthHosts,
+		RequestAttempts:             s.config.RegistryRequestAttempts,
+		MaxManifestBytes:            s.config.MaxManifestBytes,
+	}
+	if s.newRegistryClient != nil {
+		return s.newRegistryClient(options)
+	}
+	return registry.NewClient(options)
 }
 
 func wrapScanError(err error) error {

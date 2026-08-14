@@ -123,6 +123,13 @@ func TestDefaultSetScan(t *testing.T) {
 			wantDetector: "digitalocean_pat",
 		},
 		{
+			name: "digitalocean oauth token",
+			input: ScanInput{
+				Content: "DO_TOKEN=doo_v1_" + strings.Repeat("0", 64),
+			},
+			wantDetector: "digitalocean_pat",
+		},
+		{
 			name: "mailchimp api key",
 			input: ScanInput{
 				Content: "MC_API_KEY=" + strings.Repeat("0", 32) + "-us1",
@@ -397,6 +404,76 @@ func TestDefaultSetScan(t *testing.T) {
 			wantDetector: "fly_api_token",
 		},
 		{
+			name: "circleci personal api token",
+			input: ScanInput{
+				Content: "CIRCLECI_TOKEN=CCI" + "PAT_AbCdEfGhIjKlMnOpQrStUv_" + strings.Repeat("a", 40),
+			},
+			wantDetector: "circleci_personal_api_token",
+		},
+		{
+			name: "openrouter api key",
+			input: ScanInput{
+				Content: "OPENROUTER_API_KEY=sk-" + "or-v1-" + strings.Repeat("a", 64),
+			},
+			wantDetector: "openrouter_api_key",
+		},
+		{
+			name: "sentry user token",
+			input: ScanInput{
+				Content: "SENTRY_TOKEN=snt" + "ryu_" + strings.Repeat("a", 64),
+			},
+			wantDetector: "sentry_user_token",
+		},
+		{
+			name: "cloudflare prefixed api token",
+			input: ScanInput{
+				Content: "TOKEN=cf" + "ut_" + strings.Repeat("A", 40) + strings.Repeat("a", 8),
+			},
+			wantDetector: "cloudflare_api_token",
+		},
+		{
+			name: "sonarcloud token",
+			input: ScanInput{
+				Content: "SONAR_TOKEN=sq" + "co_" + strings.Repeat("A", 59),
+			},
+			wantDetector: "sonarcloud_token",
+		},
+		{
+			name: "google oauth access token",
+			input: ScanInput{
+				Content: "GOOGLE_TOKEN=ya" + "29." + strings.Repeat("a", 48),
+			},
+			wantDetector: "google_oauth_access_token",
+		},
+		{
+			name: "netlify personal access token",
+			input: ScanInput{
+				Content: "NETLIFY_TOKEN=nf" + "p_" + strings.Repeat("A", 36),
+			},
+			wantDetector: "netlify_personal_access_token",
+		},
+		{
+			name: "prefect api key",
+			input: ScanInput{
+				Content: "PREFECT_API_KEY=pn" + "u_" + strings.Repeat("A", 36),
+			},
+			wantDetector: "prefect_api_key",
+		},
+		{
+			name: "nightfall api key",
+			input: ScanInput{
+				Content: "NIGHTFALL_API_KEY=N" + "F-" + strings.Repeat("A", 32),
+			},
+			wantDetector: "nightfall_api_key",
+		},
+		{
+			name: "tailscale key",
+			input: ScanInput{
+				Content: "TAILSCALE_KEY=ts" + "key-api-abcdef_123456-ABCDEF_123456",
+			},
+			wantDetector: "tailscale_key",
+		},
+		{
 			name: "cloudflare api token",
 			input: ScanInput{
 				Key:     "CF_API_TOKEN",
@@ -411,6 +488,29 @@ func TestDefaultSetScan(t *testing.T) {
 				Content: "VERCEL_TOKEN=AbCdEfGhIjKlMnOpQrStUvWx",
 			},
 			wantDetector: "vercel_access_token",
+		},
+		{
+			name: "heroku api key",
+			input: ScanInput{
+				Key:     "HEROKU_API_KEY",
+				Content: "HEROKU_API_KEY=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			},
+			wantDetector: "heroku_api_key",
+		},
+		{
+			name: "heroku prefixed oauth token",
+			input: ScanInput{
+				Content: "Authorization: Bearer HRKU-" + strings.Repeat("a", 32),
+			},
+			wantDetector: "heroku_api_key",
+		},
+		{
+			name: "snyk api token",
+			input: ScanInput{
+				Key:     "SNYK_TOKEN",
+				Content: "SNYK_TOKEN=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+			},
+			wantDetector: "snyk_api_token",
 		},
 	}
 
@@ -598,6 +698,17 @@ func TestDefaultSetDiscardsPlaceholderBasicAuthURL(t *testing.T) {
 	}
 }
 
+func TestDefaultSetKeepsCredentialsWithPlaceholderPrefix(t *testing.T) {
+	set := Default()
+	matches := set.Scan(ScanInput{Content: "https://admin:passwordREALSECRET@db.internal/config"})
+	for _, match := range matches {
+		if match.Detector == "basic_auth_url" {
+			return
+		}
+	}
+	t.Fatalf("expected basic_auth_url match in %#v", matches)
+}
+
 func TestDefaultSetDiscardsPlaceholderNetrcPassword(t *testing.T) {
 	set := Default()
 	matches := set.Scan(ScanInput{
@@ -644,7 +755,6 @@ domain: "nonprod-test.cloud.databricks.com"
 `,
 	})
 
-	// The native databricks_token detector takes precedence over trufflehog.
 	match, ok := findDetectorMatch(matches, "databricks_token")
 	if !ok {
 		t.Fatalf("expected databricks_token detector in %#v", matches)
@@ -743,29 +853,6 @@ func TestTerraformCredentialsDetectorFindsToken(t *testing.T) {
 	}
 }
 
-func TestDefaultSetUsesMediumBaseConfidenceForTrufflehogMatches(t *testing.T) {
-	set := Default()
-	matches := set.Scan(ScanInput{
-		Content: `
-secret: "dapib8a799e452bf722cb28874cee50a7abf"
-domain: "nonprod-test.cloud.databricks.com"
-`,
-	})
-
-	// Trufflehog emits its own databricks_token match with medium base confidence
-	// alongside the native high-confidence match. Verify at least one medium match exists.
-	foundMedium := false
-	for _, m := range matches {
-		if m.Detector == "databricks_token" && m.Confidence == ConfidenceMedium {
-			foundMedium = true
-			break
-		}
-	}
-	if !foundMedium {
-		t.Fatalf("expected a databricks_token match with ConfidenceMedium from trufflehog in %#v", matches)
-	}
-}
-
 func TestDefaultSetDeduplicatesOverlappingGithubDetectors(t *testing.T) {
 	set := Default()
 	matches := set.Scan(ScanInput{
@@ -781,6 +868,54 @@ func TestDefaultSetDeduplicatesOverlappingGithubDetectors(t *testing.T) {
 
 	if count != 1 {
 		t.Fatalf("github_token count = %d, matches = %#v", count, matches)
+	}
+}
+
+func TestContextualServiceTokensRequireServiceContext(t *testing.T) {
+	set := Default()
+	value := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	for _, input := range []ScanInput{
+		{Content: "request_id=" + value},
+		{Key: "REQUEST_ID", Content: value},
+	} {
+		for _, match := range set.Scan(input) {
+			if match.Detector == "heroku_api_key" || match.Detector == "snyk_api_token" {
+				t.Fatalf("unexpected contextual token match for %#v: %#v", input, match)
+			}
+		}
+	}
+}
+
+func TestDefaultSetContainsOnlyNativeRules(t *testing.T) {
+	if got := Default().Len(); got != 80 {
+		t.Fatalf("Default().Len() = %d, want 80", got)
+	}
+}
+
+func TestSelfIdentifyingTokenRulesRequireExactShapes(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		detector string
+	}{
+		{name: "short circleci token", content: "CCIPAT_" + strings.Repeat("A", 21) + "_" + strings.Repeat("a", 40), detector: "circleci_personal_api_token"},
+		{name: "non-hex openrouter token", content: "sk-or-v1-" + strings.Repeat("z", 64), detector: "openrouter_api_key"},
+		{name: "non-hex sentry token", content: "sntryu_" + strings.Repeat("z", 64), detector: "sentry_user_token"},
+		{name: "short cloudflare token", content: "cfut_" + strings.Repeat("A", 39) + strings.Repeat("a", 8), detector: "cloudflare_api_token"},
+		{name: "short sonarcloud token", content: "sqco_" + strings.Repeat("A", 58), detector: "sonarcloud_token"},
+		{name: "short google oauth token", content: "ya29." + strings.Repeat("a", 9), detector: "google_oauth_access_token"},
+		{name: "short netlify token", content: "nfp_" + strings.Repeat("A", 35), detector: "netlify_personal_access_token"},
+	}
+
+	set := Default()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, match := range set.Scan(ScanInput{Content: tt.content}) {
+				if match.Detector == tt.detector {
+					t.Fatalf("unexpected %s match: %#v", tt.detector, match)
+				}
+			}
+		})
 	}
 }
 

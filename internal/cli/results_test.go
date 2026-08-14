@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brumbelow/layerleak/internal/findings"
@@ -91,6 +92,56 @@ func TestWriteResultFileUsesConfiguredDirectory(t *testing.T) {
 	}
 	if dirInfo.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("directory permissions = %o", dirInfo.Mode().Perm())
+	}
+}
+
+func TestWriteResultFilePublishesConcurrentResultsWithoutCollisions(t *testing.T) {
+	const writers = 16
+	findingsDir := t.TempDir()
+	result := jobs.Result{
+		RequestedDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+
+	paths := make(chan string, writers)
+	errors := make(chan error, writers)
+	var group sync.WaitGroup
+	for range writers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			path, err := writeResultFile(findingsDir, false, result)
+			if err != nil {
+				errors <- err
+				return
+			}
+			paths <- path
+		}()
+	}
+	group.Wait()
+	close(errors)
+	close(paths)
+
+	for err := range errors {
+		t.Fatalf("writeResultFile() error = %v", err)
+	}
+	unique := make(map[string]struct{})
+	for path := range paths {
+		unique[path] = struct{}{}
+	}
+	if len(unique) != writers {
+		t.Fatalf("unique result paths = %d, want %d", len(unique), writers)
+	}
+	entries, err := os.ReadDir(findingsDir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != writers {
+		t.Fatalf("result files = %d, want %d", len(entries), writers)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".layerleak-result-") {
+			t.Fatalf("temporary result file was left behind: %s", entry.Name())
+		}
 	}
 }
 

@@ -30,6 +30,8 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int)
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
 	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT registry, repository, first_seen_at, last_seen_at
@@ -61,6 +63,8 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repos
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
 	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
 
 	registry = normalizeRegistryFilter(registry)
 	repository = strings.TrimSpace(repository)
@@ -84,6 +88,7 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repos
 			sr.target_count,
 			sr.completed_target_count,
 			sr.failed_target_count,
+			sr.partial_target_count,
 			sr.manifest_count,
 			sr.completed_manifest_count,
 			sr.failed_manifest_count,
@@ -121,6 +126,8 @@ func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, re
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
 	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
 
 	disposition = normalizeFindingDispositionFilter(disposition)
 	registry = normalizeRegistryFilter(registry)
@@ -180,6 +187,8 @@ func (s *PostgresStore) GetScanRun(ctx context.Context, id int64) (ScanRunDetail
 	if s == nil || s.db == nil {
 		return ScanRunDetail{}, fmt.Errorf("postgres store is not initialized")
 	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
@@ -199,6 +208,7 @@ func (s *PostgresStore) GetScanRun(ctx context.Context, id int64) (ScanRunDetail
 			sr.target_count,
 			sr.completed_target_count,
 			sr.failed_target_count,
+			sr.partial_target_count,
 			sr.manifest_count,
 			sr.completed_manifest_count,
 			sr.failed_manifest_count,
@@ -232,6 +242,7 @@ func (s *PostgresStore) GetScanRun(ctx context.Context, id int64) (ScanRunDetail
 		&item.TargetCount,
 		&item.CompletedTargetCount,
 		&item.FailedTargetCount,
+		&item.PartialTargetCount,
 		&item.ManifestCount,
 		&item.CompletedManifestCount,
 		&item.FailedManifestCount,
@@ -256,6 +267,8 @@ func (s *PostgresStore) GetFinding(ctx context.Context, id int64) (FindingDetail
 	if s == nil || s.db == nil {
 		return FindingDetail{}, fmt.Errorf("postgres store is not initialized")
 	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
@@ -379,6 +392,7 @@ func scanScanRunSummary(scanner rowScanner) (ScanRunSummary, error) {
 		&item.TargetCount,
 		&item.CompletedTargetCount,
 		&item.FailedTargetCount,
+		&item.PartialTargetCount,
 		&item.ManifestCount,
 		&item.CompletedManifestCount,
 		&item.FailedManifestCount,

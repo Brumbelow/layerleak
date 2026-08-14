@@ -3,6 +3,7 @@ package manifest
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -72,6 +73,11 @@ type ImageConfigPayload struct {
 	OnBuild      []string               `json:"OnBuild,omitempty"`
 	ExposedPorts map[string]interface{} `json:"ExposedPorts,omitempty"`
 	Volumes      map[string]interface{} `json:"Volumes,omitempty"`
+	Healthcheck  Healthcheck            `json:"Healthcheck,omitempty"`
+}
+
+type Healthcheck struct {
+	Test []string `json:"Test,omitempty"`
 }
 
 type ImageConfig struct {
@@ -102,6 +108,10 @@ type Document struct {
 	Manifest ImageManifest
 	Index    ImageIndex
 }
+
+var platformComponentPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._+-]*$`)
+
+const MaxPlatformComponentBytes = 128
 
 func ParseDocument(mediaType string, body []byte) (Document, error) {
 	type probe struct {
@@ -156,29 +166,57 @@ func ParseImageConfig(body []byte) (ImageConfig, error) {
 }
 
 func ParsePlatformSelector(raw string) (Platform, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
+	if raw == "" {
 		return Platform{}, fmt.Errorf("platform selector is required")
 	}
+	if raw != strings.TrimSpace(raw) {
+		return Platform{}, fmt.Errorf("platform selector must not include surrounding whitespace")
+	}
 
-	parts := strings.Split(value, "/")
+	parts := strings.Split(raw, "/")
 	if len(parts) < 2 || len(parts) > 3 {
 		return Platform{}, fmt.Errorf("platform selector must be os/arch or os/arch/variant")
 	}
 
 	platform := Platform{
-		OS:           strings.TrimSpace(parts[0]),
-		Architecture: strings.TrimSpace(parts[1]),
+		OS:           parts[0],
+		Architecture: parts[1],
 	}
 	if len(parts) == 3 {
-		platform.Variant = strings.TrimSpace(parts[2])
+		platform.Variant = parts[2]
 	}
 
-	if platform.OS == "" || platform.Architecture == "" {
-		return Platform{}, fmt.Errorf("platform selector must include os and architecture")
+	if err := ValidatePlatform(platform, true); err != nil {
+		return Platform{}, err
 	}
 
 	return platform, nil
+}
+
+func ValidatePlatform(platform Platform, requireOSAndArchitecture bool) error {
+	if requireOSAndArchitecture && (platform.OS == "" || platform.Architecture == "") {
+		return fmt.Errorf("platform selector must include os and architecture")
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "os", value: platform.OS},
+		{name: "architecture", value: platform.Architecture},
+		{name: "variant", value: platform.Variant},
+	} {
+		name, value := field.name, field.value
+		if value == "" {
+			continue
+		}
+		if len(value) > MaxPlatformComponentBytes {
+			return fmt.Errorf("platform %s exceeds %d bytes", name, MaxPlatformComponentBytes)
+		}
+		if value != strings.TrimSpace(value) || !platformComponentPattern.MatchString(value) {
+			return fmt.Errorf("platform %s contains invalid characters", name)
+		}
+	}
+	return nil
 }
 
 func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) {
@@ -190,7 +228,7 @@ func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) 
 		if len(selected) == 0 {
 			return nil, fmt.Errorf("image index does not contain supported image manifests")
 		}
-		return selected, nil
+		return uniqueDescriptors(selected)
 	}
 
 	platform, err := ParsePlatformSelector(selector)
@@ -212,7 +250,28 @@ func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) 
 		return nil, fmt.Errorf("platform %s not found in manifest index", platform.String())
 	}
 
-	return matches, nil
+	return uniqueDescriptors(matches)
+}
+
+func uniqueDescriptors(items []Descriptor) ([]Descriptor, error) {
+	selected := make([]Descriptor, 0, len(items))
+	seen := make(map[string]Descriptor, len(items))
+	for _, item := range items {
+		if previous, ok := seen[item.Digest]; ok {
+			if previous.MediaType != item.MediaType || previous.Size != item.Size || previous.Platform != item.Platform {
+				return nil, &IntegrityError{
+					Kind:     IntegrityInvalidDocument,
+					Subject:  item.Digest,
+					Expected: "one consistent descriptor per digest",
+					Actual:   "conflicting descriptors",
+				}
+			}
+			continue
+		}
+		seen[item.Digest] = item
+		selected = append(selected, item)
+	}
+	return selected, nil
 }
 
 func (p Platform) Matches(other Platform) bool {
@@ -360,6 +419,7 @@ func ConfigFields(cfg ImageConfig) []ConfigField {
 	appendSliceField("config.entrypoint", cfg.Config.Entrypoint)
 	appendSliceField("config.shell", cfg.Config.Shell)
 	appendSliceField("config.onbuild", cfg.Config.OnBuild)
+	appendSliceField("config.healthcheck.test", cfg.Config.Healthcheck.Test)
 	appendMapKeys("config.exposed_ports", cfg.Config.ExposedPorts)
 	appendMapKeys("config.volumes", cfg.Config.Volumes)
 	appendStringField("container_config.hostname", cfg.ContainerConfig.Hostname)
@@ -370,6 +430,7 @@ func ConfigFields(cfg ImageConfig) []ConfigField {
 	appendSliceField("container_config.entrypoint", cfg.ContainerConfig.Entrypoint)
 	appendSliceField("container_config.shell", cfg.ContainerConfig.Shell)
 	appendSliceField("container_config.onbuild", cfg.ContainerConfig.OnBuild)
+	appendSliceField("container_config.healthcheck.test", cfg.ContainerConfig.Healthcheck.Test)
 	appendMapKeys("container_config.exposed_ports", cfg.ContainerConfig.ExposedPorts)
 	appendMapKeys("container_config.volumes", cfg.ContainerConfig.Volumes)
 

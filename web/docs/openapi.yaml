@@ -1,0 +1,1093 @@
+openapi: 3.1.0
+info:
+  title: Layerleak API
+  version: 1.1.0
+  summary: PostgreSQL-backed API for redacted OCI image secret-scan results
+  description: |
+    Layerleak scans public OCI images synchronously and stores redacted results
+    in PostgreSQL. The API has no built-in authentication or authorization.
+    Deploy it only on a private network or behind an authenticated gateway.
+
+    Every response includes `X-Request-ID`. Findings and result snapshots stay
+    redacted even when the scanner has been configured to persist raw material.
+  license:
+    name: MIT
+    identifier: MIT
+  contact:
+    name: Layerleak security reports
+    email: admin@brumbelow.org
+externalDocs:
+  description: Layerleak documentation
+  url: https://brumbelow.github.io/layerleak/docs/
+servers:
+  - url: http://127.0.0.1:8080
+    description: Default local API
+tags:
+  - name: Health
+  - name: Scans
+  - name: Repositories
+  - name: Findings
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Check process liveness
+      description: Returns success while the API process is running, without checking PostgreSQL readiness.
+      operationId: getHealth
+      responses:
+        "200":
+          $ref: "#/components/responses/Liveness"
+  /livez:
+    get:
+      tags: [Health]
+      summary: Check process liveness using the Kubernetes-style path
+      description: Returns the same process liveness status as `/health` for Kubernetes probes.
+      operationId: getLiveness
+      responses:
+        "200":
+          $ref: "#/components/responses/Liveness"
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Check database and schema readiness
+      description: Returns success only when PostgreSQL responds and the installed schema is exactly version 0004.
+      operationId: getReadiness
+      responses:
+        "200":
+          description: Database and schema are ready.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/scans:
+    post:
+      tags: [Scans]
+      summary: Run and persist a synchronous image scan
+      description: Resolves and scans an OCI image, then persists and returns the redacted result.
+      operationId: createScan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanRequest"
+            examples:
+              singlePlatform:
+                value:
+                  reference: alpine:3.20
+                  platform: linux/amd64
+              repositorySweep:
+                value:
+                  reference: library/alpine
+                  all_tags: true
+      responses:
+        "200":
+          description: The scan completed and its redacted result was persisted.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/IncompleteScan"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+
+  /api/v1/scans/{id}:
+    get:
+      tags: [Scans]
+      summary: Read one persisted scan run
+      description: Returns one persisted scan run and its redacted result snapshot by numeric identifier.
+      operationId: getScan
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Persisted scan and redacted result snapshot.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanDetailResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/repositories:
+    get:
+      tags: [Repositories]
+      summary: List persisted repositories
+      description: Returns repositories with persisted scan history using offset-based pagination.
+      operationId: listRepositories
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Paginated repositories.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoriesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/repositories/{repository}/scans:
+    get:
+      tags: [Repositories, Scans]
+      summary: List scan history for one repository
+      description: Returns persisted scan summaries for a repository and optional registry host.
+      operationId: listRepositoryScans
+      parameters:
+        - $ref: "#/components/parameters/Repository"
+        - $ref: "#/components/parameters/Registry"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Paginated scan summaries.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoryScansResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/repositories/{repository}/findings:
+    get:
+      tags: [Repositories, Findings]
+      summary: List deduplicated findings for one repository
+      description: Returns redacted, deduplicated findings for a repository and optional registry host.
+      operationId: listRepositoryFindings
+      parameters:
+        - $ref: "#/components/parameters/Repository"
+        - $ref: "#/components/parameters/Registry"
+        - $ref: "#/components/parameters/Disposition"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Paginated redacted finding summaries.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepositoryFindingsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /api/v1/findings/{id}:
+    get:
+      tags: [Findings]
+      summary: Read one finding and its redacted occurrences
+      description: Returns one persisted finding and its redacted occurrence history by numeric identifier.
+      operationId: getFinding
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Finding detail.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingDetailResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  headers:
+    RequestID:
+      description: Correlation identifier generated by or accepted from the request.
+      schema:
+        type: string
+        minLength: 1
+
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    Repository:
+      name: repository
+      in: path
+      required: true
+      description: Repository path, for example `library/alpine`. Percent-encode path separators as `%2F` in request URLs.
+      schema:
+        type: string
+        minLength: 1
+    Registry:
+      name: registry
+      in: query
+      required: false
+      description: OCI registry host. Defaults to docker.io.
+      schema:
+        type: string
+        default: docker.io
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Disposition:
+      name: disposition
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [actionable, suppressed, all]
+        default: actionable
+
+  responses:
+    Liveness:
+      description: Process is serving HTTP.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Health"
+    BadRequest:
+      description: Invalid path, query, reference, platform, or JSON body.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RequestTooLarge:
+      description: Request exceeded the configured body limit.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RequestTimeout:
+      description: The request was canceled before the bounded scan completed.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    UnsupportedMediaType:
+      description: A non-empty scan request did not use `application/json`.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    IncompleteScan:
+      description: |
+        The scan exceeded a configured resource limit (`scan_limit_exceeded`)
+        or could not cover every selected manifest (`scan_incomplete`). When
+        useful work completed, `scan_run_id` and a persisted redacted `result`
+        accompany the error.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ScanResponse"
+          examples:
+            limitExceeded:
+              value:
+                scan_run_id: 42
+                result:
+                  result_schema_version: 1
+                  status: partial
+                  requested_reference: library/app:latest
+                  repository: library/app
+                  mode: reference
+                  target_count: 1
+                  completed_target_count: 0
+                  failed_target_count: 0
+                  partial_target_count: 1
+                  manifest_count: 2
+                  completed_manifest_count: 1
+                  failed_manifest_count: 1
+                  targets: []
+                  findings: []
+                  total_findings: 0
+                  unique_fingerprints: 0
+                  coverage:
+                    complete: false
+                    layers_seen: 1
+                    layers_completed: 1
+                    files_seen: 0
+                    files_scanned: 0
+                    files_skipped_oversize: 0
+                    files_excluded_binary: 0
+                    entries_skipped_unsafe: 0
+                    metadata_values_scanned: 0
+                    expanded_layer_bytes: 0
+                    retained_bytes: 0
+                    detector_input_bytes_scanned: 0
+                error:
+                  code: scan_limit_exceeded
+                  message: a configured scan limit was exceeded
+                  request_id: 4d349d31694459fb
+    TooManyRequests:
+      description: The configured in-process scan concurrency is exhausted.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Retry-After:
+          description: Suggested retry delay in seconds.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: The requested stored resource was not found.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: Internal scan, storage, or response failure.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ServiceUnavailable:
+      description: Database/schema readiness or another required service is unavailable.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Timeout:
+      description: The bounded API scan exceeded its deadline.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    BadGateway:
+      description: The upstream registry scan failed before a usable result was produced.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready]
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/Error"
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          examples: [invalid_request]
+        message:
+          type: string
+        request_id:
+          type: string
+
+    ScanRequest:
+      type: object
+      additionalProperties: false
+      required: [reference]
+      properties:
+        reference:
+          type: string
+          minLength: 1
+          examples: [alpine:3.20]
+        platform:
+          type: string
+          description: >-
+            Platform selector in `os/architecture` or
+            `os/architecture/variant` form. Each component is limited to 128
+            bytes and surrounding whitespace is ignored.
+          pattern: '^\s*[a-z0-9][a-z0-9._+-]*/[a-z0-9][a-z0-9._+-]*(?:/[a-z0-9][a-z0-9._+-]*)?\s*$'
+          examples: [linux/amd64]
+        all_tags:
+          type: boolean
+          default: false
+          description: Requires a bare repository reference and explicitly scans every public tag.
+    ScanResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        scan_run_id:
+          type: integer
+          format: int64
+          minimum: 1
+        result:
+          $ref: "#/components/schemas/ScanResult"
+        error:
+          $ref: "#/components/schemas/Error"
+      anyOf:
+        - required: [result]
+        - required: [error]
+
+    ScanResult:
+      type: object
+      description: Stable redacted result schema. Additive result fields may be introduced within API v1.
+      required:
+        - result_schema_version
+        - status
+        - requested_reference
+        - repository
+        - mode
+        - target_count
+        - completed_target_count
+        - failed_target_count
+        - partial_target_count
+        - manifest_count
+        - completed_manifest_count
+        - failed_manifest_count
+        - targets
+        - findings
+        - total_findings
+        - unique_fingerprints
+        - coverage
+      properties:
+        result_schema_version:
+          type: integer
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/ResultStatus"
+        requested_reference:
+          type: string
+        repository:
+          type: string
+        mode:
+          type: string
+          enum: [reference, repository]
+        resolved_reference:
+          type: string
+        requested_digest:
+          type: string
+        tags_enumerated:
+          type: integer
+          minimum: 0
+        tags_resolved:
+          type: integer
+          minimum: 0
+        tags_failed:
+          type: integer
+          minimum: 0
+        target_count:
+          type: integer
+          minimum: 0
+        completed_target_count:
+          type: integer
+          minimum: 0
+        failed_target_count:
+          type: integer
+          minimum: 0
+        partial_target_count:
+          type: integer
+          minimum: 0
+        manifest_count:
+          type: integer
+          minimum: 0
+        completed_manifest_count:
+          type: integer
+          minimum: 0
+        failed_manifest_count:
+          type: integer
+          minimum: 0
+        tag_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagResult"
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/TargetResult"
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicFinding"
+        suppressed_findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicFinding"
+        total_findings:
+          type: integer
+          minimum: 0
+        unique_fingerprints:
+          type: integer
+          minimum: 0
+        suppressed_findings_count:
+          type: integer
+          minimum: 0
+        suppressed_unique_fingerprints:
+          type: integer
+          minimum: 0
+        coverage:
+          $ref: "#/components/schemas/Coverage"
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Diagnostic"
+
+    ResultStatus:
+      type: string
+      enum: [completed, partial, failed]
+    TagResult:
+      type: object
+      additionalProperties: false
+      required: [tag, status]
+      properties:
+        tag:
+          type: string
+        root_digest:
+          type: string
+        target_reference:
+          type: string
+        status:
+          type: string
+        error:
+          type: string
+    TargetResult:
+      type: object
+      additionalProperties: false
+      required: [status, reference, manifest_count, completed_manifest_count, failed_manifest_count, findings_count]
+      properties:
+        status:
+          $ref: "#/components/schemas/ResultStatus"
+        reference:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        resolved_reference:
+          type: string
+        requested_digest:
+          type: string
+        manifest_count:
+          type: integer
+          minimum: 0
+        completed_manifest_count:
+          type: integer
+          minimum: 0
+        failed_manifest_count:
+          type: integer
+          minimum: 0
+        platform_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformResult"
+        findings_count:
+          type: integer
+          minimum: 0
+        error:
+          type: string
+
+    PlatformResult:
+      type: object
+      additionalProperties: false
+      required: [status, manifest_digest, findings_count, coverage]
+      properties:
+        status:
+          $ref: "#/components/schemas/ResultStatus"
+        platform:
+          $ref: "#/components/schemas/Platform"
+        manifest_digest:
+          type: string
+        findings_count:
+          type: integer
+          minimum: 0
+        error:
+          type: string
+        coverage:
+          $ref: "#/components/schemas/Coverage"
+        diagnostics:
+          type: array
+          items:
+            $ref: "#/components/schemas/Diagnostic"
+
+    Platform:
+      type: object
+      additionalProperties: false
+      properties:
+        os:
+          type: string
+          maxLength: 128
+          pattern: '^[a-z0-9][a-z0-9._+-]*$'
+        architecture:
+          type: string
+          maxLength: 128
+          pattern: '^[a-z0-9][a-z0-9._+-]*$'
+        variant:
+          type: string
+          maxLength: 128
+          pattern: '^[a-z0-9][a-z0-9._+-]*$'
+
+    Coverage:
+      type: object
+      additionalProperties: false
+      required:
+        - complete
+        - layers_seen
+        - layers_completed
+        - files_seen
+        - files_scanned
+        - files_skipped_oversize
+        - files_excluded_binary
+        - entries_skipped_unsafe
+        - metadata_values_scanned
+        - expanded_layer_bytes
+        - retained_bytes
+        - detector_input_bytes_scanned
+      properties:
+        complete:
+          type: boolean
+        layers_seen:
+          type: integer
+          minimum: 0
+        layers_completed:
+          type: integer
+          minimum: 0
+        files_seen:
+          type: integer
+          minimum: 0
+        files_scanned:
+          type: integer
+          minimum: 0
+        files_skipped_oversize:
+          type: integer
+          minimum: 0
+        files_excluded_binary:
+          type: integer
+          minimum: 0
+        entries_skipped_unsafe:
+          type: integer
+          minimum: 0
+        metadata_values_scanned:
+          type: integer
+          minimum: 0
+        expanded_layer_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        retained_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        detector_input_bytes_scanned:
+          type: integer
+          format: int64
+          minimum: 0
+
+    Diagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        scope:
+          type: string
+        subject:
+          type: string
+        message:
+          type: string
+        limit:
+          type: integer
+          format: int64
+        observed:
+          type: integer
+          format: int64
+
+    PublicFinding:
+      type: object
+      description: Redacted public finding shape from scan results.
+      additionalProperties: false
+      required:
+        - detector_name
+        - confidence
+        - disposition
+        - source_type
+        - manifest_digest
+        - redacted_value
+        - fingerprint
+        - context_snippet
+        - match_start
+        - match_end
+        - present_in_final_image
+      properties:
+        detector_name:
+          type: string
+        confidence:
+          type: string
+        disposition:
+          type: string
+          enum: [actionable, example]
+        disposition_reason:
+          type: string
+        source_type:
+          type: string
+        manifest_digest:
+          type: string
+        platform:
+          $ref: "#/components/schemas/Platform"
+        file_path:
+          type: string
+          maxLength: 512
+        layer_digest:
+          type: string
+        key:
+          type: string
+          maxLength: 512
+        line_number:
+          type: integer
+          minimum: 0
+        fingerprint:
+          type: string
+        redacted_value:
+          type: string
+        context_snippet:
+          type: string
+          description: Redacted context only.
+        match_start:
+          type: integer
+          minimum: 0
+        match_end:
+          type: integer
+          minimum: 0
+        present_in_final_image:
+          type: boolean
+
+    RepositoriesResponse:
+      type: object
+      additionalProperties: false
+      required: [repositories, limit, offset]
+      properties:
+        repositories:
+          type: array
+          items:
+            $ref: "#/components/schemas/Repository"
+        limit:
+          type: integer
+        offset:
+          type: integer
+    Repository:
+      type: object
+      additionalProperties: false
+      required: [registry, repository, first_seen_at, last_seen_at]
+      properties:
+        registry:
+          type: string
+        repository:
+          type: string
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+
+    RepositoryScansResponse:
+      type: object
+      additionalProperties: false
+      required: [repository, scans, limit, offset]
+      properties:
+        repository:
+          type: string
+        scans:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScanSummary"
+        limit:
+          type: integer
+        offset:
+          type: integer
+    ScanSummary:
+      type: object
+      additionalProperties: true
+      required: [id, requested_reference, mode, status, scanned_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        requested_reference:
+          type: string
+        resolved_reference:
+          type: string
+        requested_digest:
+          type: string
+        mode:
+          type: string
+        status:
+          type: string
+        error_message:
+          type: string
+        scanned_at:
+          type: string
+          format: date-time
+    ScanDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [scan]
+      properties:
+        scan:
+          allOf:
+            - $ref: "#/components/schemas/ScanSummary"
+            - type: object
+              required: [registry, repository, result]
+              properties:
+                registry:
+                  type: string
+                repository:
+                  type: string
+                result:
+                  $ref: "#/components/schemas/ScanResult"
+
+    RepositoryFindingsResponse:
+      type: object
+      additionalProperties: false
+      required: [repository, findings, disposition, limit, offset]
+      properties:
+        repository:
+          type: string
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/FindingSummary"
+        disposition:
+          type: string
+          enum: [actionable, suppressed, all]
+        limit:
+          type: integer
+        offset:
+          type: integer
+    FindingSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - manifest_digest
+        - fingerprint
+        - redacted_value
+        - first_seen_at
+        - last_seen_at
+        - occurrence_count
+        - actionable_occurrence_count
+        - suppressed_occurrence_count
+        - detectors
+      properties:
+        id:
+          type: integer
+          format: int64
+        manifest_digest:
+          type: string
+        fingerprint:
+          type: string
+        redacted_value:
+          type: string
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        occurrence_count:
+          type: integer
+          minimum: 0
+        actionable_occurrence_count:
+          type: integer
+          minimum: 0
+        suppressed_occurrence_count:
+          type: integer
+          minimum: 0
+        detectors:
+          type: array
+          items:
+            type: string
+    FindingDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [finding]
+      properties:
+        finding:
+          allOf:
+            - $ref: "#/components/schemas/FindingSummary"
+            - type: object
+              required: [occurrences]
+              properties:
+                occurrences:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/FindingOccurrence"
+    FindingOccurrence:
+      type: object
+      additionalProperties: false
+      required:
+        - detector_name
+        - confidence
+        - disposition
+        - source_type
+        - context_snippet
+        - source_location
+        - match_start
+        - match_end
+        - present_in_final_image
+        - first_seen_at
+        - last_seen_at
+      properties:
+        detector_name:
+          type: string
+        confidence:
+          type: string
+        disposition:
+          type: string
+          enum: [actionable, example]
+        disposition_reason:
+          type: string
+        source_type:
+          type: string
+        platform:
+          $ref: "#/components/schemas/Platform"
+        file_path:
+          type: string
+          maxLength: 512
+        layer_digest:
+          type: string
+        key:
+          type: string
+          maxLength: 512
+        line_number:
+          type: integer
+          minimum: 0
+        context_snippet:
+          type: string
+          description: Redacted context only.
+        source_location:
+          type: string
+          maxLength: 512
+        match_start:
+          type: integer
+          minimum: 0
+        match_end:
+          type: integer
+          minimum: 0
+        present_in_final_image:
+          type: boolean
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time

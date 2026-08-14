@@ -1,52 +1,48 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.25-bookworm AS build
+# Keep the readable tag next to the immutable multi-platform digest so dependency
+# updates remain reviewable.
+FROM golang:1.25.13-bookworm@sha256:e401dae1bf814e29204a8cb7915682e1780951e609ca0dd8865ee1937f510c48 AS build
 
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+	go mod download
 
 COPY . .
 
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-	go build -trimpath -ldflags="-s -w" -o /out/layerleak-api ./cmd/api
+RUN --mount=type=cache,target=/go/pkg/mod \
+	--mount=type=cache,target=/root/.cache/go-build \
+	CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-api ./cmd/api \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-migrate-up ./cmd/migrate \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-purge-raw-secrets ./cmd/purge \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-healthcheck ./cmd/healthcheck \
+	&& install -d -m 1777 /out/rootfs/tmp
 
-FROM ubuntu:24.04
+FROM scratch
 
-ARG MIN_PGDG_CLIENT_VERSION=16.13-1.pgdg24.04+1
-
-RUN apt-get update \
-	&& apt-get install --yes --no-install-recommends ca-certificates curl gnupg \
-	&& install -d -m 0755 /etc/apt/keyrings \
-	&& curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg \
-	&& chmod a+r /etc/apt/keyrings/postgresql.gpg \
-	&& echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
-	&& apt-get update \
-	&& apt-get install --yes --no-install-recommends postgresql-client-16 \
-	&& client_version="$(dpkg-query --showformat='${Version}' --show postgresql-client-16)" \
-	&& case "$client_version" in *.pgdg24.04+*) ;; *) echo "unexpected postgresql-client-16 lineage: $client_version" >&2; exit 1 ;; esac \
-	&& dpkg --compare-versions "$client_version" ge "$MIN_PGDG_CLIENT_VERSION" \
-	&& rm -rf /var/lib/apt/lists/*
-
-RUN useradd --uid 10001 --home-dir /app --shell /usr/sbin/nologin --create-home layerleak
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/layerleak-api /usr/local/bin/layerleak-api
+COPY --from=build /out/layerleak-migrate-up /usr/local/bin/layerleak-migrate-up
+COPY --from=build /out/layerleak-purge-raw-secrets /usr/local/bin/layerleak-purge-raw-secrets
+COPY --from=build /out/layerleak-healthcheck /usr/local/bin/layerleak-healthcheck
+COPY --from=build --chown=10001:10001 /out/rootfs/tmp /tmp
+COPY migrations /app/migrations
 
 WORKDIR /app
 
-COPY --from=build /out/layerleak-api /usr/local/bin/layerleak-api
-COPY migrations /app/migrations
-COPY scripts/layerleak-migrate-up.sh /usr/local/bin/layerleak-migrate-up
-
-RUN chmod 0755 /usr/local/bin/layerleak-api /usr/local/bin/layerleak-migrate-up \
-	&& chown -R layerleak:layerleak /app
-
 ENV LAYERLEAK_API_ADDR=0.0.0.0:8080
+ENV LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings
 
 EXPOSE 8080
 
-USER layerleak
+USER 10001:10001
 
-CMD ["/usr/local/bin/layerleak-api"]
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
+	CMD ["/usr/local/bin/layerleak-healthcheck"]
+
+ENTRYPOINT ["/usr/local/bin/layerleak-api"]

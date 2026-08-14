@@ -5,7 +5,7 @@
   "key": "",
   "content": "REGISTRY_URL=https://deploy:supersecretvalue@localhost/org/repo.git",
   "expected_outcome": "suppressed",
-  "expected_detectors": ["basic_auth_url", "uri"],
+  "expected_detectors": ["basic_auth_url"],
   "expected_confidence_floor": "medium",
   "expected_reason": "example_path"
 }

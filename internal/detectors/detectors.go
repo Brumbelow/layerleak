@@ -49,7 +49,6 @@ type Set struct {
 
 const (
 	priorityEntropy    = 1
-	priorityTrufflehog = 2
 	priorityLocal      = 3
 	priorityStructured = 4
 )
@@ -63,7 +62,8 @@ func Default() Set {
 			newPathRegexDetector("docker_auth_blob", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"auth"\s*:\s*"([A-Za-z0-9+/=]{8,})"`), 1, ConfidenceHigh, looksLikeDockerAuth),
 			newPathRegexDetector("docker_config_identitytoken", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"identitytoken"\s*:\s*"([^"\s]{16,})"`), 1, ConfidenceHigh, looksLikeAssignedSensitiveValue),
 			newKeyValueDetector("assigned_sensitive_value", regexp.MustCompile(`(?i)client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token`), regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9+/=_.:-]{15,}`), ConfidenceMedium, looksLikeAssignedSensitiveValue),
-			newTrufflehogDetector(),
+			newHerokuTokenDetector(),
+			newSnykTokenDetector(),
 			newRegexDetector("pem_private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), 0, ConfidenceHigh, nil),
 			newRegexDetector("github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("gitlab_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9\-_]{20,}\b`), 0, ConfidenceHigh, nil),
@@ -84,8 +84,8 @@ func Default() Set {
 			newPathRegexDetector("netrc_password", regexp.MustCompile(`(^|/)\.netrc$`), regexp.MustCompile(`(?im)\bpassword\s+([^\s#]+)`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
 			newPathRegexDetector("pypirc_password", regexp.MustCompile(`(^|/)\.pypirc$`), regexp.MustCompile(`(?im)^\s*password\s*=\s*([^\s#;]+)\s*$`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
 			newRegexDetector("basic_auth_url", regexp.MustCompile(`https?://[^/\s:@]+:[^/\s@]+@[^/\s]+`), 0, ConfidenceHigh, looksLikeBasicAuthURL),
-			newRegexDetector("huggingface_token", regexp.MustCompile(`\bhf_[A-Za-z0-9]{34,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("digitalocean_pat", regexp.MustCompile(`\bdop_v1_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("huggingface_token", regexp.MustCompile(`\b(?:hf_|api_org_)[A-Za-z0-9]{34,}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("digitalocean_pat", regexp.MustCompile(`\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("mailchimp_api_key", regexp.MustCompile(`\b[0-9a-f]{32}-us[0-9]{1,2}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("hashicorp_vault_token", regexp.MustCompile(`\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("anthropic_api_key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{30,}\b`), 0, ConfidenceHigh, nil),
@@ -126,9 +126,19 @@ func Default() Set {
 			newRegexDetector("airtable_personal_access_token", regexp.MustCompile(`\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("planetscale_token", regexp.MustCompile(`\bpscale_tkn_[A-Za-z0-9_]{43,}\b`), 0, ConfidenceHigh, nil),
 			newRegexDetector("fly_api_token", regexp.MustCompile(`\bfo1_[A-Za-z0-9._-]{43,}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("circleci_personal_api_token", regexp.MustCompile(`\bCCIPAT_[A-Za-z0-9]{22}_[A-Fa-f0-9]{40}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("openrouter_api_key", regexp.MustCompile(`\bsk-or-v1-[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("sentry_user_token", regexp.MustCompile(`\bsntryu_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("cloudflare_api_token", regexp.MustCompile(`\bcf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("sonarcloud_token", regexp.MustCompile(`\bsqco_[A-Za-z0-9]{59}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("google_oauth_access_token", regexp.MustCompile(`\b(ya29\.(?i:[a-z0-9_-]{10,}))(?:[^A-Za-z0-9_-]|$)`), 1, ConfidenceHigh, nil),
+			newRegexDetector("netlify_personal_access_token", regexp.MustCompile(`\bnfp_[A-Za-z0-9_]{36}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("prefect_api_key", regexp.MustCompile(`\bpnu_[A-Za-z0-9]{36}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("nightfall_api_key", regexp.MustCompile(`\bNF-[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
+			newRegexDetector("tailscale_key", regexp.MustCompile(`\btskey-[a-z]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\b`), 0, ConfidenceHigh, nil),
 			newKeyValueDetector("cloudflare_api_token",
 				regexp.MustCompile(`(?i)(?:cf[_-]?api[_-]?(?:token|key)|cloudflare[_-]?(?:api[_-]?(?:token|key)|token))`),
-				regexp.MustCompile(`[A-Za-z0-9_-]{37,45}`),
+				regexp.MustCompile(`(?:cf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}|\b[A-Za-z0-9_-]{37,45}\b)`),
 				ConfidenceHigh, looksLikeAssignedSensitiveValue),
 			newKeyValueDetector("vercel_access_token",
 				regexp.MustCompile(`(?i)(?:vercel|zeit)[_-]?(?:api[_-]?)?token`),

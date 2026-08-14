@@ -91,7 +91,7 @@ func TestPathReason(filePath string) string {
 }
 
 func ExampleFilenameReason(filePath string) string {
-	base := strings.ToLower(strings.TrimSpace(path.Base(strings.ReplaceAll(filePath, "\\", "/"))))
+	base := strings.ToLower(path.Base(strings.ReplaceAll(filePath, "\\", "/")))
 	if base == "" || base == "." || base == "/" {
 		return ReasonNone
 	}
@@ -106,7 +106,7 @@ func ExampleFilenameReason(filePath string) string {
 }
 
 func normalizedPathParts(filePath string) []string {
-	value := strings.TrimSpace(filePath)
+	value := filePath
 	if value == "" {
 		return nil
 	}
@@ -120,7 +120,7 @@ func normalizedPathParts(filePath string) []string {
 	parts := strings.Split(value, "/")
 	normalized := make([]string, 0, len(parts))
 	for _, part := range parts {
-		part = strings.ToLower(strings.TrimSpace(part))
+		part = strings.ToLower(part)
 		if part == "" || part == "." {
 			continue
 		}
@@ -252,7 +252,7 @@ func discardValueCandidates(value string) []string {
 }
 
 func containsDiscardPlaceholder(value string) bool {
-	lower := strings.ToLower(strings.TrimSpace(value))
+	lower := strings.ToLower(strings.Trim(strings.TrimSpace(value), "\"'`"))
 	for _, marker := range []string{
 		"foobar",
 		"foo:bar",
@@ -265,7 +265,7 @@ func containsDiscardPlaceholder(value string) bool {
 		"test:test",
 		"user:user",
 	} {
-		if strings.Contains(lower, marker) {
+		if lower == marker || lower == "user="+marker || lower == "username="+marker || lower == "credentials="+marker {
 			return true
 		}
 	}
@@ -283,14 +283,26 @@ func shouldDiscardPlaceholderURL(parsed *url.URL) bool {
 	password = strings.ToLower(strings.TrimSpace(password))
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 
-	if containsDiscardPlaceholder(username + ":" + password) {
+	if isPlaceholderCredentialPair(username, password) {
 		return true
 	}
-	if containsDiscardPlaceholder(username + "@" + host) {
+	if username == "foobar" {
+		return true
+	}
+	if (username == "user" || username == "admin" || username == "test") && host == "example.com" {
 		return true
 	}
 
 	return false
+}
+
+func isPlaceholderCredentialPair(username, password string) bool {
+	switch username + ":" + password {
+	case "foo:bar", "admin:admin", "admin:password", "root:password", "test:test", "user:user":
+		return true
+	default:
+		return false
+	}
 }
 
 func isPrintableText(value string) bool {

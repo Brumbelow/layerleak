@@ -1,42 +1,137 @@
+name: layerleak
+
 services:
   db:
-    image: postgres:16.13-alpine
+    # postgres:16.13-alpine, pinned to its multi-platform manifest digest.
+    image: postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
     environment:
       POSTGRES_DB: ${LAYERLEAK_DB_NAME:-layerleak}
       POSTGRES_USER: ${LAYERLEAK_DB_USER:-layerleak}
-      POSTGRES_PASSWORD: ${LAYERLEAK_DB_PASSWORD:-layerleak}
+      POSTGRES_PASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
     volumes:
       - layerleak_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 5s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   api:
     image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
     environment:
       LAYERLEAK_API_ADDR: 0.0.0.0:8080
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      LAYERLEAK_API_IDLE_TIMEOUT: ${LAYERLEAK_API_IDLE_TIMEOUT:-60s}
+      LAYERLEAK_API_MAX_CONCURRENT_SCANS: ${LAYERLEAK_API_MAX_CONCURRENT_SCANS:-1}
+      LAYERLEAK_API_MAX_REQUEST_BYTES: ${LAYERLEAK_API_MAX_REQUEST_BYTES:-16384}
+      LAYERLEAK_API_READINESS_TIMEOUT: ${LAYERLEAK_API_READINESS_TIMEOUT:-2s}
+      LAYERLEAK_API_READ_HEADER_TIMEOUT: ${LAYERLEAK_API_READ_HEADER_TIMEOUT:-5s}
+      LAYERLEAK_API_READ_TIMEOUT: ${LAYERLEAK_API_READ_TIMEOUT:-15s}
+      LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT: ${LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT:-30s}
+      LAYERLEAK_API_SCAN_TIMEOUT: ${LAYERLEAK_API_SCAN_TIMEOUT:-30m}
+      LAYERLEAK_API_SHUTDOWN_TIMEOUT: ${LAYERLEAK_API_SHUTDOWN_TIMEOUT:-30s}
+      LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS: "${LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS:-}"
+      LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS: "${LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS:-}"
+      LAYERLEAK_BLOB_TIMEOUT: ${LAYERLEAK_BLOB_TIMEOUT:-10m}
+      LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME: ${LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME:-5m}
+      LAYERLEAK_DATABASE_CONN_MAX_LIFETIME: ${LAYERLEAK_DATABASE_CONN_MAX_LIFETIME:-30m}
+      LAYERLEAK_DATABASE_MAX_IDLE_CONNS: ${LAYERLEAK_DATABASE_MAX_IDLE_CONNS:-5}
+      LAYERLEAK_DATABASE_MAX_OPEN_CONNS: ${LAYERLEAK_DATABASE_MAX_OPEN_CONNS:-10}
+      LAYERLEAK_DATABASE_QUERY_TIMEOUT: ${LAYERLEAK_DATABASE_QUERY_TIMEOUT:-10s}
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
+      LAYERLEAK_FINDINGS_DIR: ${LAYERLEAK_FINDINGS_DIR:-/tmp/layerleak/findings}
+      LAYERLEAK_HTTP_TIMEOUT: ${LAYERLEAK_HTTP_TIMEOUT:-30s}
+      LAYERLEAK_LOG_LEVEL: ${LAYERLEAK_LOG_LEVEL:-info}
+      LAYERLEAK_MAX_AUTH_RESPONSE_BYTES: ${LAYERLEAK_MAX_AUTH_RESPONSE_BYTES:-1048576}
+      LAYERLEAK_MAX_CONFIG_BYTES: ${LAYERLEAK_MAX_CONFIG_BYTES:-8388608}
+      LAYERLEAK_MAX_FILE_BYTES: ${LAYERLEAK_MAX_FILE_BYTES:-1048576}
+      LAYERLEAK_MAX_FINDINGS_PER_SCAN: ${LAYERLEAK_MAX_FINDINGS_PER_SCAN:-10000}
+      LAYERLEAK_MAX_RAW_FINDING_BYTES: ${LAYERLEAK_MAX_RAW_FINDING_BYTES:-67108864}
+      LAYERLEAK_MAX_IMAGE_ARTIFACTS: ${LAYERLEAK_MAX_IMAGE_ARTIFACTS:-250000}
+      LAYERLEAK_MAX_IMAGE_LAYER_BYTES: ${LAYERLEAK_MAX_IMAGE_LAYER_BYTES:-4294967296}
+      LAYERLEAK_MAX_IMAGE_LAYERS: ${LAYERLEAK_MAX_IMAGE_LAYERS:-512}
+      LAYERLEAK_MAX_IMAGE_MANIFESTS: ${LAYERLEAK_MAX_IMAGE_MANIFESTS:-64}
+      LAYERLEAK_MAX_LAYER_BYTES: ${LAYERLEAK_MAX_LAYER_BYTES:-536870912}
+      LAYERLEAK_MAX_LAYER_ENTRIES: ${LAYERLEAK_MAX_LAYER_ENTRIES:-50000}
+      LAYERLEAK_MAX_MANIFEST_BYTES: ${LAYERLEAK_MAX_MANIFEST_BYTES:-8388608}
+      LAYERLEAK_MAX_REPOSITORY_TAGS: ${LAYERLEAK_MAX_REPOSITORY_TAGS:-1000}
+      LAYERLEAK_MAX_REPOSITORY_TARGETS: ${LAYERLEAK_MAX_REPOSITORY_TARGETS:-250}
+      LAYERLEAK_MAX_RETAINED_BYTES: ${LAYERLEAK_MAX_RETAINED_BYTES:-1073741824}
+      LAYERLEAK_MAX_TAG_RESPONSE_BYTES: ${LAYERLEAK_MAX_TAG_RESPONSE_BYTES:-8388608}
+      LAYERLEAK_PERSIST_RAW_SECRETS: ${LAYERLEAK_PERSIST_RAW_SECRETS:-0}
+      LAYERLEAK_REGISTRY_AUTH_URL: "${LAYERLEAK_REGISTRY_AUTH_URL:-}"
+      LAYERLEAK_REGISTRY_BASE_URL: "${LAYERLEAK_REGISTRY_BASE_URL:-}"
+      LAYERLEAK_REGISTRY_MAX_REDIRECTS: ${LAYERLEAK_REGISTRY_MAX_REDIRECTS:-3}
+      LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS: ${LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS:-2}
+      LAYERLEAK_SCAN_TIMEOUT: ${LAYERLEAK_SCAN_TIMEOUT:-30m}
+      LAYERLEAK_TAG_PAGE_SIZE: ${LAYERLEAK_TAG_PAGE_SIZE:-100}
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "${LAYERLEAK_API_PORT:-8080}:8080"
+      - "${LAYERLEAK_API_HOST:-127.0.0.1}:${LAYERLEAK_API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/layerleak-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
   migrate:
     image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
+    entrypoint: ["/usr/local/bin/layerleak-migrate-up"]
     environment:
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      LAYERLEAK_MIGRATIONS_DIR: ${LAYERLEAK_MIGRATIONS_DIR:-/app/migrations}
     depends_on:
       db:
         condition: service_healthy
-    command: ["layerleak-migrate-up"]
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     profiles:
-      - manual
+      - tools
+    restart: "no"
+
+  purge-raw-secrets:
+    image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
+    entrypoint: ["/usr/local/bin/layerleak-purge-raw-secrets"]
+    environment:
+      LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME: ${LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME:-5m}
+      LAYERLEAK_DATABASE_CONN_MAX_LIFETIME: ${LAYERLEAK_DATABASE_CONN_MAX_LIFETIME:-30m}
+      LAYERLEAK_DATABASE_MAX_IDLE_CONNS: ${LAYERLEAK_DATABASE_MAX_IDLE_CONNS:-5}
+      LAYERLEAK_DATABASE_MAX_OPEN_CONNS: ${LAYERLEAK_DATABASE_MAX_OPEN_CONNS:-10}
+      LAYERLEAK_DATABASE_QUERY_TIMEOUT: ${LAYERLEAK_DATABASE_QUERY_TIMEOUT:-10s}
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    profiles:
+      - tools
     restart: "no"
 
 volumes:

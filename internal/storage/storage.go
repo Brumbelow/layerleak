@@ -26,6 +26,7 @@ type ScanRecord struct {
 	TargetCount                  int
 	CompletedTargetCount         int
 	FailedTargetCount            int
+	PartialTargetCount           int
 	ManifestCount                int
 	CompletedManifestCount       int
 	FailedManifestCount          int
@@ -111,6 +112,7 @@ type ScanRunSummary struct {
 	TargetCount                  int
 	CompletedTargetCount         int
 	FailedTargetCount            int
+	PartialTargetCount           int
 	ManifestCount                int
 	CompletedManifestCount       int
 	FailedManifestCount          int
@@ -186,13 +188,28 @@ type NoopStore struct{}
 type PostgresConfig struct {
 	DatabaseURL       string
 	PersistRawSecrets bool
+	MaxOpenConns      int
+	MaxIdleConns      int
+	ConnMaxLifetime   time.Duration
+	ConnMaxIdleTime   time.Duration
+	QueryTimeout      time.Duration
+	WriteTimeout      time.Duration
+	RequireSchema     bool
 }
+
+const (
+	defaultMaxOpenConns    = 10
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultConnMaxIdleTime = 5 * time.Minute
+	defaultQueryTimeout    = 10 * time.Second
+	defaultWriteTimeout    = 2 * time.Minute
+)
 
 func NewNoopStore() NoopStore {
 	return NoopStore{}
 }
 
-func (NoopStore) SaveScan(ctx context.Context, record ScanRecord) (int64, error) {
+func (NoopStore) SaveScan(_ context.Context, _ ScanRecord) (int64, error) {
 	return 0, nil
 }
 
@@ -201,20 +218,72 @@ func (NoopStore) Name() string {
 }
 
 func (c PostgresConfig) Validate() error {
+	c = c.withDefaults()
 	if strings.TrimSpace(c.DatabaseURL) == "" {
 		return fmt.Errorf("database url is required")
 	}
 	parsed, err := url.Parse(strings.TrimSpace(c.DatabaseURL))
 	if err != nil {
-		return fmt.Errorf("parse database url: %w", err)
+		return fmt.Errorf("database url is invalid")
+	}
+	if parsed.RawQuery != "" {
+		if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
+			return fmt.Errorf("database url is invalid")
+		}
 	}
 	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
 	case "postgres", "postgresql":
 	default:
 		return fmt.Errorf("database url must use postgres scheme")
 	}
+	if strings.TrimSpace(parsed.Hostname()) == "" {
+		return fmt.Errorf("database url host is required")
+	}
+	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
+		return fmt.Errorf("database url name is required")
+	}
+	if c.MaxOpenConns < 0 {
+		return fmt.Errorf("max open connections must be greater than zero")
+	}
+	if c.MaxIdleConns < 0 {
+		return fmt.Errorf("max idle connections must be greater than or equal to zero")
+	}
+	if c.MaxOpenConns > 0 && c.MaxIdleConns > c.MaxOpenConns {
+		return fmt.Errorf("max idle connections must not exceed max open connections")
+	}
+	if c.ConnMaxLifetime < 0 {
+		return fmt.Errorf("connection max lifetime must be greater than zero")
+	}
+	if c.ConnMaxIdleTime < 0 {
+		return fmt.Errorf("connection max idle time must be greater than zero")
+	}
+	if c.QueryTimeout < 0 {
+		return fmt.Errorf("query timeout must be greater than zero")
+	}
+	if c.WriteTimeout < 0 {
+		return fmt.Errorf("write timeout must be greater than zero")
+	}
 
 	return nil
+}
+
+func (c PostgresConfig) withDefaults() PostgresConfig {
+	if c.MaxOpenConns == 0 {
+		c.MaxOpenConns = defaultMaxOpenConns
+	}
+	if c.ConnMaxLifetime == 0 {
+		c.ConnMaxLifetime = defaultConnMaxLifetime
+	}
+	if c.ConnMaxIdleTime == 0 {
+		c.ConnMaxIdleTime = defaultConnMaxIdleTime
+	}
+	if c.QueryTimeout == 0 {
+		c.QueryTimeout = defaultQueryTimeout
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = defaultWriteTimeout
+	}
+	return c
 }
 
 func validateScanRecord(record ScanRecord) error {
@@ -232,6 +301,26 @@ func validateScanRecord(record ScanRecord) error {
 	}
 	if record.ScannedAt.IsZero() {
 		return fmt.Errorf("scan record scanned at is required")
+	}
+	for name, value := range map[string]int{
+		"tags enumerated":                record.TagsEnumerated,
+		"tags resolved":                  record.TagsResolved,
+		"tags failed":                    record.TagsFailed,
+		"target count":                   record.TargetCount,
+		"completed target count":         record.CompletedTargetCount,
+		"failed target count":            record.FailedTargetCount,
+		"partial target count":           record.PartialTargetCount,
+		"manifest count":                 record.ManifestCount,
+		"completed manifest count":       record.CompletedManifestCount,
+		"failed manifest count":          record.FailedManifestCount,
+		"total findings":                 record.TotalFindings,
+		"unique fingerprints":            record.UniqueFingerprints,
+		"suppressed findings count":      record.SuppressedFindingsCount,
+		"suppressed unique fingerprints": record.SuppressedUniqueFingerprints,
+	} {
+		if value < 0 {
+			return fmt.Errorf("scan record %s must be greater than or equal to zero", name)
+		}
 	}
 
 	for _, item := range record.Tags {
@@ -268,7 +357,7 @@ func validateScanRecord(record ScanRecord) error {
 
 func isValidScanStatus(value string) bool {
 	switch strings.TrimSpace(value) {
-	case "scanned", "failed":
+	case "scanned", "partial", "failed":
 		return true
 	default:
 		return false

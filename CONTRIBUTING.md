@@ -1,105 +1,181 @@
 # Contributing to layerleak
 
-## Purpose
+Layerleak scans adversarial container content. Contributions should preserve
+correctness, redaction, bounded resource use, OCI integrity, and predictable
+operation before adding convenience.
 
-This project is an OCI image secret scanner for public images on any OCI-compliant registry.
+## Before you start
 
-Contributions should keep the scanner:
+- Use Go 1.25.13 or newer.
+- Read [README.md](./README.md) and [SECURITY.md](./SECURITY.md).
+- Check existing issues and pull requests before duplicating work.
+- Keep changes focused and match existing package boundaries and test style.
+Do not include live credentials, private registry URLs, customer data, or
+unredacted scan output in issues, fixtures, tests, screenshots, or logs.
 
-- correct
-- secret-safe
-- layer-aware
-- predictable to test and operate
-
-## Before You Start
-
-- Use Go 1.25.7 or newer.
-- Read [README.md](./README.md).
-- Ensure you tag any AI assisted commit or PR as such. AI assisted commits not tagged will be rejected.
-
-## Local Setup
-
-Build the CLI:
+## Local setup
 
 ```bash
+go mod download
 go build -o layerleak .
-```
-
-Run the test suite:
-
-```bash
-go test ./...
-```
-
-For a fast local pass that skips Postgres integration coverage, run:
-
-```bash
 go test -short ./...
+go run . scan alpine:latest --progress plain
 ```
 
-Run the scanner against a single tag:
+The module root is the public CLI. `go run ./cmd/scanner` remains a development
+entrypoint. Administrative binaries live under `cmd/api`, `cmd/migrate`,
+`cmd/purge`, and `cmd/healthcheck`.
+
+To run PostgreSQL integration tests:
 
 ```bash
-go run . scan redis:latest
+export LAYERLEAK_TEST_DATABASE_URL='postgres://layerleak:password@127.0.0.1:5432/layerleak_test?sslmode=disable'
+go test ./... -count=1
 ```
 
-The explicit scanner entrypoint `go run ./cmd/scanner ...` remains available for development, but the module root is the canonical user-facing CLI entrypoint.
+Integration tests may reset the configured database. Never point
+`LAYERLEAK_TEST_DATABASE_URL` at a database containing useful data.
 
-Run the scanner against an entire public repository:
+## Required verification
+
+Run the checks that match `.github/workflows/verify.yml`:
 
 ```bash
-go run . scan mongo
+git diff --check
+test -z "$(gofmt -l .)"
+go mod verify
+go mod tidy -diff
+go vet ./...
+go test -short ./... -count=1
+go test -short -race ./... -count=1
+go test ./... -count=1 # with LAYERLEAK_TEST_DATABASE_URL
+LAYERLEAK_DB_PASSWORD=test docker compose config --quiet
+LAYERLEAK_DB_PASSWORD=test docker compose --profile tools config --quiet
 ```
 
-Use an explicit tag or digest when you want to limit scope.
+Install smoke:
 
-## Versioning And Install Path
+```bash
+install_bin="$(mktemp -d)"
+GOBIN="${install_bin}" go install .
+"${install_bin}/layerleak" --help
+"${install_bin}/layerleak" scan --help
+"${install_bin}/layerleak" --version
+```
 
-- The canonical user install path is `go install github.com/brumbelow/layerleak@latest`.
-- The module root must remain the installable CLI entrypoint.
-- For the current module path `github.com/brumbelow/layerleak`, publish only `v1.x.y` release tags. `v1.0.0` is already published; the next root-module release continues that sequence (for example, `v1.1.0`).
-- Do not publish new `v2+` tags from the root module unless the module path first changes to `github.com/brumbelow/layerleak/vN`. Historical `v2.x` GitHub Releases are not module-major releases and are not picked up by `go install @latest`.
-- Before cutting a release tag, verify `go test ./... -count=1`, `GOBIN=/tmp/layerleak-bin go install .`, and that `layerleak --help`, `layerleak scan --help`, and `layerleak --version` all run on the installed binary.
+When Docker and Buildx are available, build both supported image platforms:
 
-## Contribution Rules
+```bash
+docker buildx build --platform linux/amd64 --load -t layerleak:test .
+docker buildx build --platform linux/arm64 --load -t layerleak:test-arm64 .
+```
 
-- Keep changes small and focused.
-- Preserve provenance for findings and scan results.
-- Prefer immutable digests internally over mutable tags.
-- Do not add private registry support, secret verification, or unrelated platform features unless explicitly requested.
-- Do not rewrite unrelated files while implementing a focused change.
+CI also runs real PostgreSQL migration/idempotence checks, the native purge
+confirmation guard, both image architectures under emulation, API readiness,
+`govulncheck`, a linked-dependency license gate and inventory, dependency
+review, CodeQL, and image configuration validation.
 
-## Testing Expectations
+## Coding expectations
 
-Add or update tests for non-trivial changes.
-
-Prioritize tests for:
-
-- tag and digest resolution
-- manifest parsing
-- multi-arch selection
-- whiteout handling
-- deleted-layer recovery
-- detector accuracy
-- false-positive regressions
-- finding normalization and redaction
-- saved result behavior
-
-Prefer deterministic unit tests with mocked registry responses over live network tests.
-
-## Code Style
-
-- Run `gofmt` on changed Go files.
-- Keep package boundaries clear.
 - Prefer explicit errors and narrow interfaces.
-- Use table-driven tests where they improve clarity.
-- Keep logging structured and free of sensitive values.
+- Preserve immutable digests and source provenance across every layer.
+- Treat registry responses, redirects, compressed streams, tar metadata, and
+  API bodies as hostile input.
+- Bound reads before allocation or decompression.
+- Check cancellation in long loops and before persistence.
+- Keep output deterministic; sort map-derived data before serialization.
+- Keep logs and errors free of tokens, credentials, raw secrets, and raw auth
+  endpoints.
+- Use table-driven tests when they make boundary cases clearer.
+- Do not weaken limits or private-network protections without an explicit
+  security review.
 
-## Documentation
+High-value regression areas include:
 
-Update docs when behavior changes:
+- reference, platform, and digest validation;
+- manifest-list and attestation-manifest selection;
+- digest mismatch and decompression failure handling;
+- whiteouts, path traversal, links, and deleted-layer recovery;
+- detector precedence, normalization, suppression, and redaction;
+- complete/partial/failed coverage accounting and exit codes;
+- redirect and registry/auth destination policy;
+- migration drift, dirty state, legacy adoption, and concurrency;
+- API request limits, request IDs, concurrency, timeouts, and readiness;
+- raw-secret purge scope and confirmation.
 
-- `README.md` for user-facing behavior
-- `CONTRIBUTING.md` for contributor workflow
-- `RELEASING.md` for release/install procedure
-- tests when command behavior, result shape, or detector logic changes
+Prefer deterministic HTTP fixtures and in-memory OCI documents over live
+registry tests.
+
+## API and result compatibility
+
+The CLI JSON result has an explicit `result_schema_version`. Additive fields are
+preferred. Removing or renaming fields, changing exit codes, changing API paths,
+or changing defaults requires an intentional compatibility decision and release
+note.
+
+When API behavior changes, update together:
+
+- handler and integration tests;
+- [README.md](./README.md);
+- [`web/docs/openapi.yaml`](./web/docs/openapi.yaml);
+- [`web/docs/index.html`](./web/docs/index.html);
+- [CHANGELOG.md](./CHANGELOG.md).
+
+API errors must retain a stable machine-readable code and a request ID. API and
+persistence responses must never expose stored raw values.
+
+## Database changes
+
+- Add paired `NNNN_name.up.sql` and `NNNN_name.down.sql` files.
+- Never edit a migration after it has shipped; checksums make drift a hard
+  error.
+- Prefer additive schema changes and explicit indexes/constraints.
+- Update `CurrentSchemaVersion`, migration tests, Compose smoke coverage, and
+  readiness expectations in the same change.
+- Verify migration from an empty database and from the last supported schema,
+  then run the migration command twice.
+- Keep destructive data maintenance behind a dedicated, confirmation-gated
+  command.
+
+## Dependencies and workflows
+
+Explain why a new dependency is necessary. Run `go mod tidy -diff` and update
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) when dependency licensing
+changes.
+
+All GitHub Actions references are pinned to full commit SHAs with a readable
+version comment. Container bases and service images are pinned to multi-platform
+manifest digests. Dependabot proposes reviewed updates; do not replace immutable
+pins with moving tags.
+
+Workflow changes affect the release trust boundary. Keep permissions job-local,
+avoid privileged pull-request triggers, and preserve the order: verify, stage,
+scan, attest/sign, smoke, protected approval, tag, promote, release.
+
+## Versioning
+
+The canonical install path is:
+
+```text
+go install github.com/brumbelow/layerleak@latest
+```
+
+The module path has no major suffix, so releases must remain on v1. Historical
+v2.x GitHub/container tags are not valid v2 Go module releases. Do not create or
+push release tags manually. Maintainers use the protected workflow described in
+[RELEASING.md](./RELEASING.md), which creates an immutable v1 tag only after all
+release gates pass.
+
+## Documentation and pull requests
+
+Update user documentation whenever flags, environment variables, defaults,
+result fields, endpoints, migrations, container behavior, or operational risks
+change. Keep examples safe to paste and use placeholders instead of secrets.
+
+Pull requests should explain:
+
+- the user or operator problem;
+- the smallest behavior change that solves it;
+- security and compatibility impact;
+- tests run, including any checks that could not run locally;
+- documentation, migration, or deployment follow-up.

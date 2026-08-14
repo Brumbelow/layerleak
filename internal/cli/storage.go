@@ -15,5 +15,12 @@ func newStore(cfg config.Config) (storage.Store, error) {
 	return storage.NewPostgresStore(storage.PostgresConfig{
 		DatabaseURL:       cfg.DatabaseURL,
 		PersistRawSecrets: cfg.PersistRawSecrets,
+		MaxOpenConns:      cfg.DatabaseMaxOpenConns,
+		MaxIdleConns:      cfg.DatabaseMaxIdleConns,
+		ConnMaxLifetime:   cfg.DatabaseConnMaxLifetime,
+		ConnMaxIdleTime:   cfg.DatabaseConnMaxIdleTime,
+		QueryTimeout:      cfg.DatabaseQueryTimeout,
+		WriteTimeout:      cfg.DatabaseWriteTimeout,
+		RequireSchema:     true,
 	})
 }

@@ -34,6 +34,15 @@ const layerLeakLogo = `
 const progressBlockLines = 8
 const defaultProgressWidth = 80
 
+type progressMode string
+
+const (
+	progressModeAuto  progressMode = "auto"
+	progressModeTTY   progressMode = "tty"
+	progressModePlain progressMode = "plain"
+	progressModeOff   progressMode = "off"
+)
+
 type progressSnapshot struct {
 	repository       string
 	tagsCompleted    int
@@ -53,15 +62,23 @@ type progressSnapshot struct {
 
 type progressRenderer struct {
 	out        io.Writer
+	mode       progressMode
 	dynamic    bool
+	plain      bool
+	disabled   bool
 	started    bool
 	rendered   bool
+	lastPlain  string
 	terminalFD int
 	widthFn    func() int
 	state      progressSnapshot
 }
 
 func newProgressRenderer(out io.Writer) *progressRenderer {
+	return newProgressRendererWithMode(out, progressModeAuto)
+}
+
+func newProgressRendererWithMode(out io.Writer, mode progressMode) *progressRenderer {
 	terminalFD, ok := terminalFileDescriptor(out)
 	if !ok {
 		terminalFD = -1
@@ -69,19 +86,52 @@ func newProgressRenderer(out io.Writer) *progressRenderer {
 
 	renderer := &progressRenderer{
 		out:        out,
-		dynamic:    terminalFD >= 0 && term.IsTerminal(terminalFD),
+		mode:       mode,
 		terminalFD: terminalFD,
+	}
+	isTerminal := terminalFD >= 0 && term.IsTerminal(terminalFD)
+	switch mode {
+	case progressModeTTY:
+		renderer.dynamic = true
+	case progressModePlain:
+		renderer.plain = true
+	case progressModeOff:
+		renderer.disabled = true
+	default:
+		renderer.dynamic = isTerminal
+		renderer.plain = !isTerminal
 	}
 	renderer.widthFn = renderer.currentWidth
 	return renderer
 }
 
+func parseProgressMode(value string) (progressMode, error) {
+	switch progressMode(strings.ToLower(strings.TrimSpace(value))) {
+	case progressModeAuto:
+		return progressModeAuto, nil
+	case progressModeTTY:
+		return progressModeTTY, nil
+	case progressModePlain:
+		return progressModePlain, nil
+	case progressModeOff:
+		return progressModeOff, nil
+	default:
+		return "", fmt.Errorf("unsupported progress mode %q: use auto, tty, plain, or off", value)
+	}
+}
+
 func (r *progressRenderer) Start(state progressSnapshot) error {
+	if r.disabled {
+		return nil
+	}
 	if r.started {
 		return nil
 	}
 	r.started = true
 	r.state = state
+	if r.plain {
+		return r.renderPlain()
+	}
 	if _, err := fmt.Fprint(r.out, layerLeakLogo); err != nil {
 		return err
 	}
@@ -111,18 +161,44 @@ func (r *progressRenderer) UpdateFromJob(update jobs.ProgressUpdate) error {
 }
 
 func (r *progressRenderer) Update(state progressSnapshot) error {
+	if r.disabled {
+		return nil
+	}
 	if !r.started {
 		return r.Start(state)
 	}
 	r.state = state
+	if r.plain {
+		return r.renderPlain()
+	}
 	return r.render()
 }
 
 func (r *progressRenderer) Finish() error {
-	if !r.started {
+	if !r.started || r.disabled || r.plain {
 		return nil
 	}
 	_, err := fmt.Fprintln(r.out)
+	return err
+}
+
+func (r *progressRenderer) renderPlain() error {
+	phase := progressValue(r.state.phase, "Starting")
+	message := progressValue(r.state.message, "Preparing scan")
+	completed, total := progressCounts(r.state)
+	line := fmt.Sprintf("layerleak: %s: %s", phase, message)
+	if total > 0 {
+		line += fmt.Sprintf(" (%d/%d, %d findings)", completed, total, r.state.findingsFound)
+	}
+	if current := currentTargetLabel(r.state); current != "waiting" {
+		line += " [" + current + "]"
+	}
+	line = sanitizeProgressValue(line)
+	if line == r.lastPlain {
+		return nil
+	}
+	r.lastPlain = line
+	_, err := fmt.Fprintln(r.out, line)
 	return err
 }
 

@@ -8,8 +8,8 @@ import (
 
 	"github.com/brumbelow/layerleak/internal/findings"
 	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/scanner"
 	"github.com/brumbelow/layerleak/internal/storage"
 )
 
@@ -20,7 +20,7 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		scannedAt = scannedAt.UTC()
 	}
 
-	publicResult := normalizedPublicResult(reference, result)
+	publicResult := sanitizeStoredResult(normalizedPublicResult(reference, result))
 	resultJSON, err := json.Marshal(publicResult)
 	if err != nil {
 		return storage.ScanRecord{}, err
@@ -39,6 +39,7 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		TargetCount:                  publicResult.TargetCount,
 		CompletedTargetCount:         publicResult.CompletedTargetCount,
 		FailedTargetCount:            publicResult.FailedTargetCount,
+		PartialTargetCount:           publicResult.PartialTargetCount,
 		ManifestCount:                publicResult.ManifestCount,
 		CompletedManifestCount:       publicResult.CompletedManifestCount,
 		FailedManifestCount:          publicResult.FailedManifestCount,
@@ -56,8 +57,8 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		)),
 	}
 
-	record.Targets = make([]storage.TargetRecord, 0, len(result.Targets))
-	for _, item := range result.Targets {
+	record.Targets = make([]storage.TargetRecord, 0, len(publicResult.Targets))
+	for _, item := range publicResult.Targets {
 		requestedDigest := strings.TrimSpace(item.RequestedDigest)
 		if requestedDigest == "" {
 			requestedDigest = digestFromTargetReference(item.Reference)
@@ -73,14 +74,10 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		}
 
 		if len(item.PlatformResults) == 0 && requestedDigest != "" {
-			status := "scanned"
-			if target.Error != "" {
-				status = "failed"
-			}
 			target.Manifests = append(target.Manifests, storage.ManifestRecord{
 				Digest:     requestedDigest,
 				RootDigest: requestedDigest,
-				Status:     status,
+				Status:     storedScanStatus(string(item.Status), target.Error),
 				Error:      target.Error,
 			})
 		}
@@ -91,17 +88,13 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 				manifestDigest = requestedDigest
 			}
 
-			status := "scanned"
 			errorMessage := strings.TrimSpace(manifestResult.Error)
-			if errorMessage != "" {
-				status = "failed"
-			}
 
 			target.Manifests = append(target.Manifests, storage.ManifestRecord{
 				Digest:     manifestDigest,
 				RootDigest: firstNonEmpty(requestedDigest, manifestDigest),
 				Platform:   manifestResult.Platform,
-				Status:     status,
+				Status:     storedScanStatus(string(manifestResult.Status), errorMessage),
 				Error:      errorMessage,
 			})
 		}
@@ -109,7 +102,7 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		record.Targets = append(record.Targets, target)
 	}
 
-	record.Tags = buildTagRecords(result.TagResults, record.Targets)
+	record.Tags = buildTagRecords(publicResult.TagResults, record.Targets)
 
 	return record, nil
 }
@@ -205,6 +198,19 @@ func statusFromError(value string) string {
 	return "scanned"
 }
 
+func storedScanStatus(value, errorMessage string) string {
+	switch strings.TrimSpace(value) {
+	case "completed", "scanned":
+		return "scanned"
+	case "partial":
+		return "partial"
+	case "failed":
+		return "failed"
+	default:
+		return statusFromError(errorMessage)
+	}
+}
+
 func digestFromTargetReference(value string) string {
 	reference, err := manifest.ParseReference(value)
 	if err != nil {
@@ -224,6 +230,9 @@ func firstNonEmpty(values ...string) string {
 
 func normalizedPublicResult(reference manifest.Reference, result jobs.Result) jobs.Result {
 	publicResult := result
+	if publicResult.ResultSchemaVersion <= 0 {
+		publicResult.ResultSchemaVersion = 1
+	}
 	if strings.TrimSpace(publicResult.RequestedReference) == "" {
 		publicResult.RequestedReference = reference.Original
 	}
@@ -243,15 +252,61 @@ func normalizedPublicResult(reference manifest.Reference, result jobs.Result) jo
 	return publicResult
 }
 
-func scanRunStatus(result jobs.Result, scanErr error) storage.ScanRunStatus {
-	if scanErr != nil {
-		if limits.IsExceeded(scanErr) {
-			return storage.ScanRunStatusPartial
+func sanitizeStoredResult(result jobs.Result) jobs.Result {
+	result.TagResults = slices.Clone(result.TagResults)
+	for index := range result.TagResults {
+		result.TagResults[index].Error = storedErrorMessage(result.TagResults[index].Error)
+	}
+
+	result.Targets = slices.Clone(result.Targets)
+	for targetIndex := range result.Targets {
+		target := &result.Targets[targetIndex]
+		target.Tags = slices.Clone(target.Tags)
+		target.Error = storedErrorMessage(target.Error)
+		target.PlatformResults = slices.Clone(target.PlatformResults)
+		for platformIndex := range target.PlatformResults {
+			platformResult := &target.PlatformResults[platformIndex]
+			platformResult.Error = storedErrorMessage(platformResult.Error)
+			platformResult.Diagnostics = sanitizedDiagnostics(platformResult.Diagnostics)
 		}
+	}
+	result.Diagnostics = sanitizedDiagnostics(result.Diagnostics)
+	return result
+}
+
+func sanitizedDiagnostics(items []scanner.Diagnostic) []scanner.Diagnostic {
+	items = slices.Clone(items)
+	for index := range items {
+		if strings.TrimSpace(items[index].Message) != "" {
+			items[index].Message = "scan step failed"
+		}
+	}
+	return items
+}
+
+func storedErrorMessage(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return "scan step failed"
+}
+
+func scanRunStatus(result jobs.Result, scanErr error) storage.ScanRunStatus {
+	switch result.Status {
+	case jobs.ResultStatusCompleted:
+		if scanErr == nil {
+			return storage.ScanRunStatusCompleted
+		}
+	case jobs.ResultStatusPartial:
+		return storage.ScanRunStatusPartial
+	case jobs.ResultStatusFailed:
 		return storage.ScanRunStatusFailed
 	}
-	if result.TagsFailed > 0 || result.FailedTargetCount > 0 || result.FailedManifestCount > 0 {
+	if result.CompletedManifestCount > 0 && (scanErr != nil || result.TagsFailed > 0 || result.FailedTargetCount > 0 || result.PartialTargetCount > 0 || result.FailedManifestCount > 0) {
 		return storage.ScanRunStatusPartial
+	}
+	if scanErr != nil {
+		return storage.ScanRunStatusFailed
 	}
 	return storage.ScanRunStatusCompleted
 }
@@ -260,5 +315,5 @@ func scanRunErrorMessage(scanErr error) string {
 	if scanErr == nil {
 		return ""
 	}
-	return strings.TrimSpace(scanErr.Error())
+	return "scan did not complete successfully"
 }

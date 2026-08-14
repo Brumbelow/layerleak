@@ -21,11 +21,11 @@ func Run() int {
 		}
 		if errors.As(err, &coded) {
 			if err.Error() != "" {
-				fmt.Fprintln(os.Stderr, err)
+				fmt.Fprintln(os.Stderr, sanitizeProgressValue(err.Error()))
 			}
 			return coded.ExitCode()
 		}
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, sanitizeProgressValue(err.Error()))
 		return 1
 	}
 

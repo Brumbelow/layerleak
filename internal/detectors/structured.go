@@ -10,7 +10,85 @@ import (
 var (
 	awsSharedCredentialsPathExpression = regexp.MustCompile(`(^|/)\.aws/(credentials|config)$`)
 	gitCredentialsPathExpression       = regexp.MustCompile(`(^|/)\.git-credentials$`)
+	uuidTokenExpression                = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	uuidTokenCandidateExpression       = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 )
+
+type contextualTokenDetector struct {
+	name               string
+	keyExpression      *regexp.Regexp
+	assignedExpression *regexp.Regexp
+	prefixedExpression *regexp.Regexp
+}
+
+func newHerokuTokenDetector() Detector {
+	return contextualTokenDetector{
+		name:               "heroku_api_key",
+		keyExpression:      regexp.MustCompile(`(?i)^heroku(?:[_-]?api)?[_-]?(?:key|token)$`),
+		assignedExpression: regexp.MustCompile(`(?im)\bheroku(?:[_-]?api)?[_-]?(?:key|token)\b\s*(?:=|:|=>)\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`),
+		prefixedExpression: regexp.MustCompile(`\bHRKU-[A-Za-z0-9_-]{20,}\b`),
+	}
+}
+
+func newSnykTokenDetector() Detector {
+	return contextualTokenDetector{
+		name:               "snyk_api_token",
+		keyExpression:      regexp.MustCompile(`(?i)^snyk(?:[_-]?api)?[_-]?(?:key|token)$`),
+		assignedExpression: regexp.MustCompile(`(?im)\bsnyk(?:[_-]?api)?[_-]?(?:key|token)\b\s*(?:=|:|=>)\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`),
+	}
+}
+
+func (d contextualTokenDetector) Name() string {
+	return d.name
+}
+
+func (d contextualTokenDetector) Scan(input ScanInput) []Match {
+	matches := make([]Match, 0, 2)
+	appendIndexes := func(expression *regexp.Regexp, group int) {
+		if expression == nil {
+			return
+		}
+		for _, indexes := range expression.FindAllStringSubmatchIndex(input.Content, -1) {
+			start, end := indexes[0], indexes[1]
+			if group > 0 && len(indexes) >= (group+1)*2 {
+				start, end = indexes[group*2], indexes[group*2+1]
+			}
+			if start < 0 || end <= start || end > len(input.Content) {
+				continue
+			}
+			matches = append(matches, Match{
+				Detector:   d.name,
+				Value:      input.Content[start:end],
+				Start:      start,
+				End:        end,
+				Confidence: adjustConfidence(ConfidenceHigh, input.Path, input.Key, input.Content[start:end]),
+				Priority:   priorityLocal,
+			})
+		}
+	}
+
+	appendIndexes(d.assignedExpression, 1)
+	appendIndexes(d.prefixedExpression, 0)
+
+	if d.keyExpression.MatchString(strings.TrimSpace(input.Key)) {
+		for _, indexes := range uuidTokenCandidateExpression.FindAllStringIndex(input.Content, -1) {
+			value := input.Content[indexes[0]:indexes[1]]
+			if !uuidTokenExpression.MatchString(value) {
+				continue
+			}
+			matches = append(matches, Match{
+				Detector:   d.name,
+				Value:      value,
+				Start:      indexes[0],
+				End:        indexes[1],
+				Confidence: ConfidenceHigh,
+				Priority:   priorityLocal,
+			})
+		}
+	}
+
+	return matches
+}
 
 func newTerraformCredentialsDetector() Detector {
 	return newPathRegexDetector(

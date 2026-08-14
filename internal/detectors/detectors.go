@@ -607,10 +607,10 @@ func looksLikeAWSSecretAccessKey(value string) bool {
 	return hasLower && hasUpper
 }
 
-func hasMinPrintableLength(min int) func(string) bool {
+func hasMinPrintableLength(minLength int) func(string) bool {
 	return func(value string) bool {
 		trimmed := strings.TrimSpace(value)
-		return len(trimmed) >= min && isPrintableText(trimmed)
+		return len(trimmed) >= minLength && isPrintableText(trimmed)
 	}
 }
 

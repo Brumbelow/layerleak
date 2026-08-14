@@ -29,7 +29,7 @@ func TestReplayTracksDeletedArtifacts(t *testing.T) {
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:one", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
 		{Digest: "sha256:two", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
-	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(_ context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
 		switch descriptor.Digest {
 		case "sha256:one":
 			return io.NopCloser(bytes.NewReader(layerOne)), nil
@@ -125,7 +125,7 @@ func TestReplayTracksOverwrittenFilesAndOpaqueWhiteout(t *testing.T) {
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:one", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
 		{Digest: "sha256:two", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
-	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(_ context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
 		switch descriptor.Digest {
 		case "sha256:one":
 			return io.NopCloser(bytes.NewReader(layerOne)), nil
@@ -158,7 +158,7 @@ func TestReplaySupportsZstd(t *testing.T) {
 
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:zstd", MediaType: manifest.MediaTypeOCIImageLayerZstd},
-	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(_ context.Context, _ manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err != nil {
@@ -373,7 +373,7 @@ func TestReplayClassifiesRegularFilesBeforeScanning(t *testing.T) {
 
 	result, err := Replay(context.Background(), []manifest.Descriptor{
 		{Digest: "sha256:classified", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
-	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(_ context.Context, _ manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err != nil {
@@ -429,7 +429,7 @@ func TestReplayReturnsPartialResultWhenGzipLayerByteLimitExceeded(t *testing.T) 
 	}, ReplayOptions{
 		MaxFileBytes:  1 << 20,
 		MaxLayerBytes: 1536,
-	}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, OpenFunc(func(_ context.Context, _ manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err == nil {
@@ -462,7 +462,7 @@ func TestReplayReturnsPartialResultWhenZstdLayerByteLimitExceeded(t *testing.T) 
 	}, ReplayOptions{
 		MaxFileBytes:  1 << 20,
 		MaxLayerBytes: 1536,
-	}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, OpenFunc(func(_ context.Context, _ manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err == nil {
@@ -573,7 +573,7 @@ func TestReplayReturnsPartialResultWhenLayerEntryLimitExceeded(t *testing.T) {
 	}, ReplayOptions{
 		MaxFileBytes:    1 << 20,
 		MaxLayerEntries: 1,
-	}, OpenFunc(func(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+	}, OpenFunc(func(_ context.Context, _ manifest.Descriptor) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(layer)), nil
 	}))
 	if err == nil {

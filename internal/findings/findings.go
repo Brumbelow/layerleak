@@ -646,15 +646,6 @@ func validUTF8Prefix(value string, maxBytes int) string {
 	return value[:end]
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func isValidSourceType(value SourceType) bool {
 	switch value {
 	case SourceTypeFileFinal, SourceTypeFileDeletedLayer, SourceTypeEnv, SourceTypeLabel, SourceTypeHistory, SourceTypeConfig:

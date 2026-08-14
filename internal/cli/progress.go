@@ -74,10 +74,6 @@ type progressRenderer struct {
 	state      progressSnapshot
 }
 
-func newProgressRenderer(out io.Writer) *progressRenderer {
-	return newProgressRendererWithMode(out, progressModeAuto)
-}
-
 func newProgressRendererWithMode(out io.Writer, mode progressMode) *progressRenderer {
 	terminalFD, ok := terminalFileDescriptor(out)
 	if !ok {

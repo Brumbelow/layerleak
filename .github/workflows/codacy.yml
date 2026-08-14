@@ -3,13 +3,14 @@
 # separate terms of service, privacy policy, and support
 # documentation.
 
-# This workflow checks out code, performs a Codacy security scan
-# and integrates the results with the
-# GitHub Advanced Security code scanning feature.  For more information on
-# the Codacy security scan action usage and parameters, see
+# This workflow performs a Codacy security scan, integrates the results with
+# GitHub Advanced Security code scanning, and uploads Go test coverage to
+# Codacy. For more information on the Codacy security scan action, see
 # https://github.com/codacy/codacy-analysis-cli-action.
 # For more information on Codacy Analysis CLI in general, see
 # https://github.com/codacy/codacy-analysis-cli.
+# For more information on Codacy Coverage Reporter, see
+# https://docs.codacy.com/coverage-reporter/.
 
 name: Codacy Security Scan
 
@@ -81,3 +82,61 @@ jobs:
           sarif_file: results-combined.sarif
           category: Codacy
           wait-for-processing: true
+
+  codacy-coverage:
+    name: Codacy Coverage
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GOFLAGS: -mod=readonly
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Generate Go coverage report
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -short ./... -count=1 -covermode=atomic -coverprofile=unit.coverage.out
+          test -s unit.coverage.out
+
+      - name: Upload coverage to Codacy
+        shell: bash
+        env:
+          CODACY_PROJECT_TOKEN: ${{ secrets.CODACY_PROJECT_TOKEN }}
+          CODACY_REPORTER_VERSION: "14.1.3"
+          CODACY_REPORTER_SHA512: 73a6c93fc5db509fd0423d6e545759c3f61d8360ee12054e32a9277daab6add0da6c6639248f6ed6c0042366440293ebc0b6144325aef52c5d3d4b230d65eb17
+          COVERAGE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CODACY_PROJECT_TOKEN}" ]]; then
+            echo "CODACY_PROJECT_TOKEN is required for coverage uploads." >&2
+            exit 1
+          fi
+
+          reporter="${RUNNER_TEMP}/codacy-coverage-reporter"
+          curl --fail --location --silent --show-error \
+            --output "${reporter}" \
+            "https://github.com/codacy/codacy-coverage-reporter/releases/download/${CODACY_REPORTER_VERSION}/codacy-coverage-reporter-linux"
+          echo "${CODACY_REPORTER_SHA512}  ${reporter}" | sha512sum --check
+          chmod +x "${reporter}"
+          "${reporter}" report \
+            --commit-uuid "${COVERAGE_COMMIT}" \
+            --force-coverage-parser go \
+            -r unit.coverage.out

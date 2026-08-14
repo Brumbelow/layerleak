@@ -12,7 +12,7 @@ require (
 
 require golang.org/x/sys v0.47.0 // indirect
 
-require github.com/klauspost/compress v1.19.1
+require github.com/klauspost/compress v1.19.2
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

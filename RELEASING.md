@@ -51,9 +51,10 @@ Complete these settings before the first RC:
 
 The workflow uses only `GITHUB_TOKEN` and GitHub's OIDC token. It does not
 require a Cosign private key, registry password, PAT, or custom release secret.
-The public-repository GitHub code-scanning workflow runs without a
-`CODACY_PROJECT_TOKEN`; configure the optional secret only when the scan must
-retrieve remote Codacy project settings.
+The public-repository GitHub code-scanning workflow can run without a
+`CODACY_PROJECT_TOKEN`, but the Codacy coverage job requires that repository
+secret to upload Go coverage reports. The analysis job also uses it to retrieve
+remote Codacy project settings.
 `GITHUB_TOKEN` cannot read repository Administration settings, so enabling
 immutable releases remains a required setup step. The workflow checks every
 existing candidate/release and verifies `isImmutable` plus the GitHub release

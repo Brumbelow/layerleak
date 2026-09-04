@@ -76,7 +76,7 @@ jobs:
           )' results.sarif > results-combined.sarif
 
       - name: Upload SARIF results file
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         if: hashFiles('results-combined.sarif') != ''
         with:
           sarif_file: results-combined.sarif

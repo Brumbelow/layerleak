@@ -247,7 +247,7 @@ jobs:
 
       - name: Set up QEMU
         if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -426,7 +426,7 @@ jobs:
       - name: Scan all critical vulnerabilities
         id: critical
         continue-on-error: true
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_PLATFORM: ${{ matrix.platform }}
         with:
@@ -442,7 +442,7 @@ jobs:
       - name: Scan fixable high vulnerabilities
         id: fixable_high
         continue-on-error: true
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
         env:
           GRYPE_PLATFORM: ${{ matrix.platform }}
         with:
@@ -767,7 +767,7 @@ jobs:
             suffix: arm64
     steps:
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -376,13 +375,6 @@ func progressCounts(state progressSnapshot) (int, int) {
 		return state.tagsCompleted + state.tagsFailed, state.tagsTotal
 	}
 	return 0, 0
-}
-
-func savedResultMessage(path string) string {
-	if strings.TrimSpace(path) == "" {
-		return "Saved findings result"
-	}
-	return "Saved " + filepath.Base(path)
 }
 
 func renderProgressLine(label, value string, maxWidth int) string {

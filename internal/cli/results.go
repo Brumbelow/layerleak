@@ -44,14 +44,6 @@ type persistedFinding struct {
 
 const persistedLowConfidenceGroupCap = 3
 
-func writeResultFile(configuredDir string, persistRawSecrets bool, result jobs.Result) (string, error) {
-	findingsDir, err := resolveFindingsDir(configuredDir)
-	if err != nil {
-		return "", err
-	}
-	return publishResultJSON(findingsDir, uniqueResultFileName(result), buildPersistedFindings(result, persistRawSecrets))
-}
-
 func uniqueResultFileName(result jobs.Result) string {
 	return strings.TrimSuffix(buildResultFileName(result), ".json") + "-" + rand.Text() + ".json"
 }

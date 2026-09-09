@@ -73,94 +73,109 @@ func TestDocumentedScanResponsesMatchHandler(t *testing.T) {
 	}
 }
 
+const contractDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func contractResult(status jobs.ResultStatus) jobs.Result {
-	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	complete := status == jobs.ResultStatusCompleted
-	completedTargets, partialTargets, failedTargets := 0, 0, 0
-	manifestCount, completedManifests, failedManifests := 1, 0, 1
-	layersSeen, layersCompleted, filesScanned := 1, 0, 0
-	switch status {
-	case jobs.ResultStatusCompleted:
-		completedTargets = 1
-		completedManifests = 1
-		failedManifests = 0
-		layersCompleted = 1
-		filesScanned = 2
-	case jobs.ResultStatusPartial:
-		partialTargets = 1
-		manifestCount = 2
-		completedManifests = 1
-		layersSeen = 2
-		layersCompleted = 1
-		filesScanned = 1
-	case jobs.ResultStatusFailed:
-		failedTargets = 1
-	}
+	target := contractTargetResult(status)
 	result := jobs.Result{
 		ResultSchemaVersion:    1,
 		Status:                 status,
 		RequestedReference:     "library/example:latest",
 		Repository:             "library/example",
 		Mode:                   "reference",
-		ResolvedReference:      "docker.io/library/example@" + digest,
-		RequestedDigest:        digest,
+		ResolvedReference:      "docker.io/library/example@" + contractDigest,
+		RequestedDigest:        contractDigest,
 		TargetCount:            1,
-		CompletedTargetCount:   completedTargets,
-		PartialTargetCount:     partialTargets,
-		FailedTargetCount:      failedTargets,
-		ManifestCount:          manifestCount,
-		CompletedManifestCount: completedManifests,
-		FailedManifestCount:    failedManifests,
-		Targets: []jobs.TargetResult{{
-			Status:                 status,
-			Reference:              "docker.io/library/example@" + digest,
-			ResolvedReference:      "docker.io/library/example@" + digest,
-			RequestedDigest:        digest,
-			ManifestCount:          manifestCount,
-			CompletedManifestCount: completedManifests,
-			FailedManifestCount:    failedManifests,
-			FindingsCount:          0,
-		}},
-		Findings: []findings.Finding{},
-		Coverage: scanner.Coverage{
-			Complete:                  complete,
-			LayersSeen:                layersSeen,
-			LayersCompleted:           layersCompleted,
-			FilesSeen:                 2,
-			FilesScanned:              filesScanned,
-			MetadataValuesScanned:     1,
-			ExpandedLayerBytes:        128,
-			RetainedBytes:             64,
-			DetectorInputBytesScanned: 32,
-		},
+		ManifestCount:          target.ManifestCount,
+		CompletedManifestCount: target.CompletedManifestCount,
+		FailedManifestCount:    target.FailedManifestCount,
+		Targets:                []jobs.TargetResult{target},
+		Findings:               []findings.Finding{},
+		Coverage:               contractCoverage(status),
+	}
+	switch status {
+	case jobs.ResultStatusCompleted:
+		result.CompletedTargetCount = 1
+	case jobs.ResultStatusPartial:
+		result.PartialTargetCount = 1
+	case jobs.ResultStatusFailed:
+		result.FailedTargetCount = 1
 	}
 	if status != jobs.ResultStatusFailed {
-		result.Findings = []findings.Finding{{
-			DetectorName:        "github_token",
-			Confidence:          "high",
-			Disposition:         findings.DispositionActionable,
-			SourceType:          findings.SourceTypeEnv,
-			ManifestDigest:      digest,
-			RedactedValue:       "ghp********************************56",
-			Fingerprint:         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-			ContextSnippet:      "GH_TOKEN=ghp********************************56",
-			MatchStart:          9,
-			MatchEnd:            49,
-			PresentInFinalImage: true,
-		}}
-		result.Targets[0].FindingsCount = 1
+		result.Findings = []findings.Finding{contractFinding()}
 		result.TotalFindings = 1
 		result.UniqueFingerprints = 1
 	}
-	if !complete {
+	if !result.Coverage.Complete {
 		result.Diagnostics = []scanner.Diagnostic{{
 			Code:    "manifest_scan_failed",
 			Scope:   "manifest",
-			Subject: digest,
+			Subject: contractDigest,
 			Message: "one selected manifest could not be scanned",
 		}}
 	}
 	return result
+}
+
+func contractTargetResult(status jobs.ResultStatus) jobs.TargetResult {
+	target := jobs.TargetResult{
+		Status:              status,
+		Reference:           "docker.io/library/example@" + contractDigest,
+		ResolvedReference:   "docker.io/library/example@" + contractDigest,
+		RequestedDigest:     contractDigest,
+		ManifestCount:       1,
+		FailedManifestCount: 1,
+		FindingsCount:       1,
+	}
+	switch status {
+	case jobs.ResultStatusCompleted:
+		target.CompletedManifestCount = 1
+		target.FailedManifestCount = 0
+	case jobs.ResultStatusPartial:
+		target.ManifestCount = 2
+		target.CompletedManifestCount = 1
+	case jobs.ResultStatusFailed:
+		target.FindingsCount = 0
+	}
+	return target
+}
+
+func contractCoverage(status jobs.ResultStatus) scanner.Coverage {
+	coverage := scanner.Coverage{
+		Complete:                  status == jobs.ResultStatusCompleted,
+		LayersSeen:                1,
+		FilesSeen:                 2,
+		MetadataValuesScanned:     1,
+		ExpandedLayerBytes:        128,
+		RetainedBytes:             64,
+		DetectorInputBytesScanned: 32,
+	}
+	switch status {
+	case jobs.ResultStatusCompleted:
+		coverage.LayersCompleted = 1
+		coverage.FilesScanned = 2
+	case jobs.ResultStatusPartial:
+		coverage.LayersSeen = 2
+		coverage.LayersCompleted = 1
+		coverage.FilesScanned = 1
+	}
+	return coverage
+}
+
+func contractFinding() findings.Finding {
+	return findings.Finding{
+		DetectorName:        "github_token",
+		Confidence:          "high",
+		Disposition:         findings.DispositionActionable,
+		SourceType:          findings.SourceTypeEnv,
+		ManifestDigest:      contractDigest,
+		RedactedValue:       "ghp********************************56",
+		Fingerprint:         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ContextSnippet:      "GH_TOKEN=ghp********************************56",
+		MatchStart:          9,
+		MatchEnd:            49,
+		PresentInFinalImage: true,
+	}
 }
 
 func assertContractFixture(t *testing.T, name string, actual []byte) {

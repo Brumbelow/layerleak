@@ -4,24 +4,34 @@
 import argparse
 import base64
 import binascii
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import re
-import subprocess
+import shutil
+import subprocess  # Reviewed allowlisted executables and shell=False in run().  # nosec B404
 import sys
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 GH_VERSION = '2.100.0'
 SOURCE_FINGERPRINT = '2B6DF408BD973740052925DC894C75E1B1D05EA2'
 VERSION = r'v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
 MAX_TAG_INPUT = 16384
+RELEASE_TOOLS = frozenset({'gh', 'cosign', 'grype', 'docker', 'git', 'gpg', 'jq', 'curl'})
 
 
-def run(args, **kwargs):
-    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, timeout=60, **kwargs)
+def run(args, *, input_text=None, env=None):
+    if not args or args[0] not in RELEASE_TOOLS:
+        raise ValueError('unsupported release tool')
+    # The operator configures PATH for reviewed tools; never search the current directory.
+    search_path = os.pathsep.join(path for path in os.get_exec_path(env) if os.path.isabs(path))
+    executable = shutil.which(args[0], path=search_path)
+    if executable is None:
+        raise ValueError(f'command unavailable: {args[0]}')
+    # Only allowlisted absolute executables run; tag bytes use stdin and operands stay separate.
+    return subprocess.run([executable, *args[1:]], check=False, shell=False,  # nosec B603
+                          capture_output=True, text=True, timeout=60, input=input_text, env=env)
 
 
 def require_command(args, required):
@@ -71,11 +81,7 @@ def check_tools(full):
             require_command(command, [])
 
 
-def decode_tag(payload, version, source):
-    if not re.fullmatch(VERSION + r'(-rc\.[1-9][0-9]*)?', version):
-        raise ValueError('invalid canonical v1 version')
-    if not re.fullmatch(r'[0-9a-f]{40}', source):
-        raise ValueError('source must be a full lowercase commit SHA')
+def decode_tag_bytes(payload):
     if not payload or len(payload) > MAX_TAG_INPUT:
         raise ValueError('source_tag must contain at most 16384 base64 characters')
     try:
@@ -85,6 +91,10 @@ def decode_tag(payload, version, source):
         raise ValueError('source_tag must be canonical base64 of a UTF-8 tag object') from error
     if base64.b64encode(raw).decode() != payload or '\x00' in value or '\r' in value:
         raise ValueError('source_tag has invalid encoding')
+    return raw, value
+
+
+def validate_tag_object(value, version, source):
     header, separator, message = value.partition('\n\n')
     lines = header.split('\n')
     if (not separator or len(lines) != 4 or lines[:3] != [
@@ -94,6 +104,15 @@ def decode_tag(payload, version, source):
     if (message.count('-----BEGIN PGP SIGNATURE-----') != 1 or
             not message.endswith('-----END PGP SIGNATURE-----\n')):
         raise ValueError('source_tag requires a complete verification envelope')
+
+
+def decode_tag(payload, version, source):
+    if not re.fullmatch(VERSION + r'(-rc\.[1-9][0-9]*)?', version):
+        raise ValueError('invalid canonical v1 version')
+    if not re.fullmatch(r'[0-9a-f]{40}', source):
+        raise ValueError('source must be a full lowercase commit SHA')
+    raw, value = decode_tag_bytes(payload)
+    validate_tag_object(value, version, source)
     return raw
 
 
@@ -105,13 +124,13 @@ def verify_tag(payload, version, source, existing=None):
         imported = run(['gpg', '--batch', '--import', str(key)], env=env)
         if imported.returncode:
             raise ValueError('source-tag verification key could not be loaded')
-        result = run(['git', 'hash-object', '-t', 'tag', '-w', '--stdin'], input=raw.decode())
+        result = run(['git', 'hash-object', '-t', 'tag', '-w', '--stdin'], input_text=raw.decode())
         object_id = result.stdout.strip()
         if result.returncode or not re.fullmatch(r'[0-9a-f]{40}', object_id):
             raise ValueError('source_tag could not be imported')
         if existing and object_id != existing:
             raise ValueError('existing source tag does not match the supplied object')
-        verified = run(['git', 'verify-tag', '--raw', object_id], env=env)
+        verified = run(['git', 'verify-tag', '--raw', '--', object_id], env=env)
         valid = re.search(r'^\[GNUPG:\] VALIDSIG ([A-F0-9]{40}) ', verified.stderr, re.MULTILINE)
         if verified.returncode or not valid or valid.group(1) != SOURCE_FINGERPRINT:
             raise ValueError('source-tag verification failed')

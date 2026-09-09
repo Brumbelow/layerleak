@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-from html.parser import HTMLParser
 import json
-from pathlib import Path, PurePosixPath
 import sys
+from html.parser import HTMLParser
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
+import yaml
 from openapi_schema_validator import OAS31Validator
 from openapi_spec_validator import validate as validate_openapi
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
-import yaml
 
 
 class ValidationFailure(Exception):
@@ -49,7 +49,9 @@ class _LocalReferenceParser(HTMLParser):
 def _format_json_path(parts) -> str:
     if not parts:
         return "$"
-    return "$" + "".join(f"[{part}]" if isinstance(part, int) else f".{part}" for part in parts)
+    return "$" + "".join(
+        f"[{part}]" if isinstance(part, int) else f".{part}" for part in parts
+    )
 
 
 def _validate_instance(spec, schema, instance, label):
@@ -63,10 +65,15 @@ def _validate_instance(spec, schema, instance, label):
         _resolver=registry.resolver(base_uri),
         format_checker=OAS31Validator.FORMAT_CHECKER,
     )
-    errors = sorted(validator.iter_errors(instance), key=lambda error: [str(part) for part in error.absolute_path])
+    errors = sorted(
+        validator.iter_errors(instance),
+        key=lambda error: [str(part) for part in error.absolute_path],
+    )
     if errors:
         error = errors[0]
-        raise ValidationFailure(f"{label} {_format_json_path(error.absolute_path)}: {error.message}")
+        raise ValidationFailure(
+            f"{label} {_format_json_path(error.absolute_path)}: {error.message}"
+        )
 
 
 def _resolve_local_ref(spec, value):
@@ -88,7 +95,8 @@ def _response_schema(spec, path, method, status, media_type):
         return response["content"][media_type]["schema"]
     except KeyError as error:
         raise ValidationFailure(
-            f"OpenAPI response is missing {method.upper()} {path} {status} {media_type}: {error}"
+            f"OpenAPI response is missing {method.upper()} {path} "
+            f"{status} {media_type}: {error}"
         ) from error
 
 
@@ -104,19 +112,20 @@ def validate_contract_fixtures(root: Path, spec):
         relative_fixture = case["fixture"]
         fixture_path = root / relative_fixture
         instance = json.loads(fixture_path.read_text(encoding="utf-8"))
-        schema = _response_schema(spec, case["path"], case["method"], str(case["status"]), case["media_type"])
+        schema = _response_schema(
+            spec, case["path"], case["method"], str(case["status"]), case["media_type"]
+        )
         _validate_instance(spec, schema, instance, relative_fixture)
         fixture_values[relative_fixture] = instance
     if seen_outcomes != required_outcomes:
         raise ValidationFailure(
-            "contract fixtures must cover completed, partial, failed, and storage_error outcomes"
+            "contract fixtures must cover completed, partial, failed, "
+            "and storage_error outcomes"
         )
     return fixture_values
 
 
-def validate_documented_examples(root: Path, spec, fixture_values):
-    spec_directory = root / "web" / "docs"
-    example_count = 0
+def _documented_response_media(spec):
     for path, path_item in spec.get("paths", {}).items():
         for method in ("get", "post", "put", "patch", "delete"):
             operation = path_item.get(method)
@@ -124,39 +133,100 @@ def validate_documented_examples(root: Path, spec, fixture_values):
                 continue
             for status, raw_response in operation.get("responses", {}).items():
                 response = _resolve_local_ref(spec, raw_response)
-                for media_type, media in response.get("content", {}).items():
-                    schema = media.get("schema")
-                    for name, example in media.get("examples", {}).items():
-                        if "value" in example:
-                            example_value = example["value"]
-                        elif "externalValue" in example:
-                            external_path = (spec_directory / example["externalValue"]).resolve()
-                            try:
-                                external_path.relative_to(root.resolve())
-                            except ValueError as error:
-                                raise ValidationFailure(
-                                    f"documented example {name} points outside the repository"
-                                ) from error
-                            example_value = json.loads(external_path.read_text(encoding="utf-8"))
-                        else:
-                            continue
-                        label = f"documented example {method.upper()} {path} {status} {name}"
-                        _validate_instance(spec, schema, example_value, label)
-                        fixture_reference = example.get("x-contract-fixture")
-                        if fixture_reference:
-                            fixture_path = (spec_directory / fixture_reference).resolve()
-                            try:
-                                relative_fixture = fixture_path.relative_to(root.resolve()).as_posix()
-                            except ValueError as error:
-                                raise ValidationFailure(f"{label} points outside the repository") from error
-                            expected = fixture_values.get(relative_fixture)
-                            if expected is None:
-                                raise ValidationFailure(f"{label} references an unregistered fixture")
-                            if example_value != expected:
-                                raise ValidationFailure(f"{label} differs from {relative_fixture}")
-                        example_count += 1
+                for media in response.get("content", {}).values():
+                    yield f"documented example {method.upper()} {path} {status}", media
+
+
+def _resolve_repository_path(root: Path, directory: Path, reference, label):
+    path = (directory / reference).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as error:
+        raise ValidationFailure(f"{label} points outside the repository") from error
+    return path
+
+
+def _load_documented_example(root: Path, spec_directory: Path, name, example):
+    if "value" in example:
+        return example["value"]
+    external_path = _resolve_repository_path(
+        root, spec_directory, example["externalValue"], f"documented example {name}"
+    )
+    return json.loads(external_path.read_text(encoding="utf-8"))
+
+
+def _validate_example_fixture(
+    root: Path, example, example_value, fixture_values, label
+):
+    fixture_reference = example.get("x-contract-fixture")
+    if not fixture_reference:
+        return
+    fixture_path = _resolve_repository_path(
+        root, root / "web" / "docs", fixture_reference, label
+    )
+    relative_fixture = fixture_path.relative_to(root.resolve()).as_posix()
+    expected = fixture_values.get(relative_fixture)
+    if expected is None:
+        raise ValidationFailure(f"{label} references an unregistered fixture")
+    if example_value != expected:
+        raise ValidationFailure(f"{label} differs from {relative_fixture}")
+
+
+def validate_documented_examples(root: Path, spec, fixture_values):
+    spec_directory = root / "web" / "docs"
+    example_count = 0
+    for response_label, media in _documented_response_media(spec):
+        schema = media.get("schema")
+        for name, example in media.get("examples", {}).items():
+            if "value" not in example and "externalValue" not in example:
+                continue
+            example_value = _load_documented_example(
+                root, spec_directory, name, example
+            )
+            label = f"{response_label} {name}"
+            _validate_instance(spec, schema, example_value, label)
+            _validate_example_fixture(
+                root, example, example_value, fixture_values, label
+            )
+            example_count += 1
     if example_count < 4:
         raise ValidationFailure("OpenAPI must document at least four response examples")
+
+
+def _local_target_path(root: Path, html_path: Path, attribute, reference, parsed):
+    web_root = root / "web"
+    target_path = (
+        html_path if not parsed.path else html_path.parent / unquote(parsed.path)
+    )
+    if parsed.path.endswith("/") or target_path.is_dir():
+        target_path /= "index.html"
+    try:
+        target_path.resolve().relative_to(web_root.resolve())
+    except ValueError as error:
+        raise ValidationFailure(
+            f"{html_path.relative_to(root)} {attribute} "
+            f"points outside web/: {reference}"
+        ) from error
+    if not target_path.exists():
+        raise ValidationFailure(
+            f"{html_path.relative_to(root)} has missing local target: {reference}"
+        )
+    return target_path
+
+
+def _validate_local_reference(root: Path, html_path: Path, attribute, reference):
+    parsed = urlsplit(reference)
+    if parsed.scheme or parsed.netloc or reference.startswith(("mailto:", "tel:")):
+        return
+    target_path = _local_target_path(root, html_path, attribute, reference, parsed)
+    if parsed.fragment:
+        fragment_parser = _LocalReferenceParser()
+        fragment_parser.feed(target_path.read_text(encoding="utf-8"))
+        if unquote(parsed.fragment) not in fragment_parser.ids:
+            raise ValidationFailure(
+                f"{html_path.relative_to(root)} "
+                f"has missing fragment target: {reference}"
+            )
 
 
 def validate_local_references(root: Path):
@@ -165,68 +235,83 @@ def validate_local_references(root: Path):
         parser = _LocalReferenceParser()
         parser.feed(html_path.read_text(encoding="utf-8"))
         for attribute, reference in parser.references:
-            parsed = urlsplit(reference)
-            if parsed.scheme or parsed.netloc or reference.startswith(("mailto:", "tel:")):
-                continue
-            target_path = html_path if not parsed.path else html_path.parent / unquote(parsed.path)
-            if parsed.path.endswith("/"):
-                target_path /= "index.html"
-            elif target_path.is_dir():
-                target_path /= "index.html"
-            try:
-                target_path.resolve().relative_to(web_root.resolve())
-            except ValueError as error:
-                raise ValidationFailure(f"{html_path.relative_to(root)} {attribute} points outside web/: {reference}") from error
-            if not target_path.exists():
-                raise ValidationFailure(f"{html_path.relative_to(root)} has missing local target: {reference}")
-            if parsed.fragment:
-                fragment_parser = _LocalReferenceParser()
-                fragment_parser.feed(target_path.read_text(encoding="utf-8"))
-                if unquote(parsed.fragment) not in fragment_parser.ids:
-                    raise ValidationFailure(
-                        f"{html_path.relative_to(root)} has missing fragment target: {reference}"
-                    )
+            _validate_local_reference(root, html_path, attribute, reference)
+
+
+def _validate_demo_run_result(run_result):
+    if run_result.get("raw_storage_enabled") is not False:
+        raise ValidationFailure("demo-data.json raw_storage_enabled must be false")
+    if run_result.get("status") not in {"completed", "partial", "failed"}:
+        raise ValidationFailure("demo-data.json run_result.status is invalid")
+    if run_result.get("coverage", {}).get("complete") != (
+        run_result["status"] == "completed"
+    ):
+        raise ValidationFailure(
+            "demo-data.json coverage.complete conflicts with status"
+        )
+    artifacts = run_result.get("artifacts", {})
+    if set(artifacts) != {"findings", "scan_record"}:
+        raise ValidationFailure(
+            "demo-data.json must name findings and scan_record artifacts"
+        )
+    if PurePosixPath(artifacts["scan_record"]).parent.name != "scans":
+        raise ValidationFailure(
+            "demo-data.json scan_record artifact must be under scans/"
+        )
+
+
+def _validate_demo_table(table_name, table):
+    columns = table.get("columns", [])
+    if not columns or len(columns) != len(set(columns)):
+        raise ValidationFailure(
+            f"demo-data.json table {table_name} has invalid columns"
+        )
+    for row in table.get("rows", []):
+        if set(row) != set(columns):
+            raise ValidationFailure(
+                f"demo-data.json table {table_name} row does not match columns"
+            )
+        for raw_field in ("value", "raw_snippet"):
+            if raw_field in row and row[raw_field] is not None:
+                raise ValidationFailure(
+                    f"demo-data.json table {table_name} {raw_field} "
+                    "must be null when raw storage is disabled"
+                )
 
 
 def validate_demo(root: Path):
     fixture_path = root / "web" / "assets" / "demo-data.json"
     demo = json.loads(fixture_path.read_text(encoding="utf-8"))
-    required_top_level = {"version", "synthetic", "command", "run_result", "stats", "frames", "table_order", "tables"}
+    required_top_level = {
+        "version",
+        "synthetic",
+        "command",
+        "run_result",
+        "stats",
+        "frames",
+        "table_order",
+        "tables",
+    }
     missing = sorted(required_top_level - demo.keys())
     if missing:
         raise ValidationFailure(f"demo-data.json missing fields: {', '.join(missing)}")
     if demo["synthetic"] is not True:
         raise ValidationFailure("demo-data.json synthetic must be true")
-    run_result = demo["run_result"]
-    if run_result.get("raw_storage_enabled") is not False:
-        raise ValidationFailure("demo-data.json raw_storage_enabled must be false")
-    if run_result.get("status") not in {"completed", "partial", "failed"}:
-        raise ValidationFailure("demo-data.json run_result.status is invalid")
-    if run_result.get("coverage", {}).get("complete") != (run_result["status"] == "completed"):
-        raise ValidationFailure("demo-data.json coverage.complete conflicts with status")
-    artifacts = run_result.get("artifacts", {})
-    if set(artifacts) != {"findings", "scan_record"}:
-        raise ValidationFailure("demo-data.json must name findings and scan_record artifacts")
-    if PurePosixPath(artifacts["scan_record"]).parent.name != "scans":
-        raise ValidationFailure("demo-data.json scan_record artifact must be under scans/")
+    _validate_demo_run_result(demo["run_result"])
     table_order = demo["table_order"]
     tables = demo["tables"]
     if len(table_order) != len(set(table_order)) or set(table_order) != set(tables):
-        raise ValidationFailure("demo-data.json table_order must list every table exactly once")
+        raise ValidationFailure(
+            "demo-data.json table_order must list every table exactly once"
+        )
     for table_name, table in tables.items():
-        columns = table.get("columns", [])
-        if not columns or len(columns) != len(set(columns)):
-            raise ValidationFailure(f"demo-data.json table {table_name} has invalid columns")
-        for row in table.get("rows", []):
-            if set(row) != set(columns):
-                raise ValidationFailure(f"demo-data.json table {table_name} row does not match columns")
-            for raw_field in ("value", "raw_snippet"):
-                if raw_field in row and row[raw_field] is not None:
-                    raise ValidationFailure(
-                        f"demo-data.json table {table_name} {raw_field} must be null when raw storage is disabled"
-                    )
-    if not demo["frames"] or any(not isinstance(frame.get("terminal"), str) for frame in demo["frames"]):
-        raise ValidationFailure("demo-data.json frames must contain terminal transcripts")
+        _validate_demo_table(table_name, table)
+    if not demo["frames"] or any(
+        not isinstance(frame.get("terminal"), str) for frame in demo["frames"]
+    ):
+        raise ValidationFailure(
+            "demo-data.json frames must contain terminal transcripts"
+        )
 
 
 def validate_repository(root: Path):
@@ -252,7 +337,9 @@ def main() -> int:
     except (ValidationFailure, OSError, json.JSONDecodeError, yaml.YAMLError) as error:
         print(f"documentation validation failed: {error}", file=sys.stderr)
         return 1
-    print("OpenAPI contract, response examples, local links, and synthetic demo are valid")
+    print(
+        "OpenAPI contract, response examples, local links, and synthetic demo are valid"
+    )
     return 0
 
 

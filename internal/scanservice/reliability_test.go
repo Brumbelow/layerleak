@@ -70,27 +70,42 @@ func TestScanAndSaveSeparatesCoverageAndPersistenceOutcomes(t *testing.T) {
 				service := outcomeTestService(t, store, status)
 				ref, _ := manifest.ParseReference("library/app:latest")
 				outcome, err := service.ScanAndSave(context.Background(), Request{Reference: ref, BeforeSave: func(jobs.Result) error { return io.ErrClosedPipe }})
-				if outcome.Result.Status != status || len(store.records) != 1 || string(store.records[0].Status) != string(status) {
-					t.Fatalf("coverage lost: outcome=%+v records=%+v err=%v", outcome, store.records, err)
-				}
-				if (outcome.ScanError != nil) != (status != jobs.ResultStatusCompleted) || (outcome.SaveError != nil) != saveFails {
-					t.Fatalf("errors not separate: scan=%v save=%v", outcome.ScanError, outcome.SaveError)
-				}
-				if saveFails {
-					if outcome.ScanRunID != 0 || !IsSaveError(err) || !errors.Is(err, outcome.SaveError) {
-						t.Fatalf("save outcome=%+v err=%v", outcome, err)
-					}
-				} else if outcome.ScanRunID != 12 || IsSaveError(err) {
-					t.Fatalf("save outcome=%+v err=%v", outcome, err)
-				}
-				if outcome.ScanError != nil && !errors.Is(err, outcome.ScanError) {
-					t.Fatalf("scan error lost: %v", err)
-				}
-				if outcome.ScanError == nil && outcome.SaveError == nil && err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
+				assertStoredCoverage(t, outcome, store.records, status, err)
+				assertSeparateOutcomeErrors(t, outcome, err, status, saveFails)
+				assertPersistenceOutcome(t, outcome, err, saveFails)
 			})
 		}
+	}
+}
+
+func assertStoredCoverage(t *testing.T, outcome Outcome, records []storage.ScanRecord, status jobs.ResultStatus, err error) {
+	t.Helper()
+	if outcome.Result.Status != status || len(records) != 1 || string(records[0].Status) != string(status) {
+		t.Fatalf("coverage lost: outcome=%+v records=%+v err=%v", outcome, records, err)
+	}
+}
+
+func assertSeparateOutcomeErrors(t *testing.T, outcome Outcome, err error, status jobs.ResultStatus, saveFails bool) {
+	t.Helper()
+	if (outcome.ScanError != nil) != (status != jobs.ResultStatusCompleted) || (outcome.SaveError != nil) != saveFails {
+		t.Fatalf("errors not separate: scan=%v save=%v", outcome.ScanError, outcome.SaveError)
+	}
+	if outcome.ScanError != nil && !errors.Is(err, outcome.ScanError) {
+		t.Fatalf("scan error lost: %v", err)
+	}
+	if outcome.ScanError == nil && outcome.SaveError == nil && err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func assertPersistenceOutcome(t *testing.T, outcome Outcome, err error, saveFails bool) {
+	t.Helper()
+	if saveFails {
+		if outcome.ScanRunID != 0 || !IsSaveError(err) || !errors.Is(err, outcome.SaveError) {
+			t.Fatalf("save outcome=%+v err=%v", outcome, err)
+		}
+	} else if outcome.ScanRunID != 12 || IsSaveError(err) {
+		t.Fatalf("save outcome=%+v err=%v", outcome, err)
 	}
 }
 

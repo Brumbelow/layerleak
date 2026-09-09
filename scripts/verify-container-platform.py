@@ -3,11 +3,12 @@
 
 import argparse
 import json
-from pathlib import Path
+import os
+import shutil
 import struct
-import subprocess
+import subprocess  # Only resolved Docker runs with separate arguments and shell=False.  # nosec B404
 import tempfile
-
+from pathlib import Path
 
 MACHINES = {'amd64': 62, 'arm64': 183}
 EXECUTABLES = ('layerleak-api', 'layerleak-migrate-up',
@@ -23,8 +24,14 @@ def verify_elf_header(header, architecture):
 
 
 def docker(*arguments):
-    result = subprocess.run(['docker', *arguments], check=True, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    # The operator configures PATH for Docker; never search the current directory.
+    search_path = os.pathsep.join(path for path in os.get_exec_path() if os.path.isabs(path))
+    executable = shutil.which('docker', path=search_path)
+    if executable is None:
+        raise ValueError('docker executable unavailable')
+    # The executable is fixed Docker; callers separate image/container operands with --.
+    result = subprocess.run([executable, *arguments], check=True, shell=False, text=True,  # nosec B603
+                            capture_output=True, timeout=120)
     return result.stdout.strip()
 
 
@@ -38,14 +45,14 @@ def verify_image(image, platform):
         with tempfile.TemporaryDirectory(prefix='layerleak-platform-') as directory:
             for executable in EXECUTABLES:
                 local_file = Path(directory) / executable
-                docker('cp', f'{container}:/usr/local/bin/{executable}', str(local_file))
+                docker('cp', '--', f'{container}:/usr/local/bin/{executable}', str(local_file))
                 with local_file.open('rb') as stream:
                     try:
                         verify_elf_header(stream.read(64), architecture)
                     except ValueError as error:
                         raise ValueError(f'{executable}: {error}') from error
     finally:
-        docker('rm', container)
+        docker('rm', '--', container)
 
 
 def main():

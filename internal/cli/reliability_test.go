@@ -172,66 +172,76 @@ func TestScanCommandOutputFailureRemainsVisibleAfterSave(t *testing.T) {
 }
 
 func TestScanCommandCoverageAndSaveFailureExitCodes(t *testing.T) {
-	for _, status := range []jobs.ResultStatus{jobs.ResultStatusCompleted, jobs.ResultStatusPartial, jobs.ResultStatusFailed} {
-		for _, saveFails := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/save_fails=%v", status, saveFails), func(t *testing.T) {
-				installReliableCommandFixture(t, status)
-				dir := t.TempDir()
-				t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
-				store := &commandOutcomeStore{fail: saveFails}
-				command := newScanCmdWithStore(func(config.Config) (storage.Store, error) { return store, nil })
-				command.SilenceUsage = true
-				var stdout bytes.Buffer
-				command.SetOut(&stdout)
-				command.SetErr(brokenWriter{})
-				command.SetArgs([]string{"library/app:latest", "--format", "json", "--allow-partial", "--progress", "plain"})
-				err := command.Execute()
-				code := 0
-				if err != nil {
-					code = 1
-					var coded interface{ ExitCode() int }
-					if errors.As(err, &coded) {
-						code = coded.ExitCode()
-					}
-				}
-				want := 0
-				if saveFails || status == jobs.ResultStatusFailed {
-					want = 1
-				}
-				if code != want || store.calls != 1 {
-					t.Fatalf("exit=%d want=%d saves=%d err=%v", code, want, store.calls, err)
-				}
-				paths, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-				if status == jobs.ResultStatusFailed {
-					if len(paths) != 0 || stdout.Len() != 0 {
-						t.Fatalf("failed scan publication behavior changed: files=%v stdout=%s", paths, stdout.String())
-					}
-					return
-				}
-				if len(paths) != 1 {
-					t.Fatalf("record lost: %v", paths)
-				}
-				var result jobs.Result
-				if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
-					t.Fatal(decodeErr)
-				}
-				if result.Status != status {
-					t.Fatalf("status=%s want=%s", result.Status, status)
-				}
-				body, _ := os.ReadFile(paths[0])
-				var record localScanRecord
-				if err := json.Unmarshal(body, &record); err != nil {
-					t.Fatal(err)
-				}
-				if saveFails {
-					if record.Persistence.Status != "failed" || record.Persistence.ScanRunID != 0 {
-						t.Fatalf("persistence=%+v", record.Persistence)
-					}
-				} else if record.Persistence.Status != "saved" || record.Persistence.ScanRunID != 17 {
-					t.Fatalf("persistence=%+v", record.Persistence)
-				}
-			})
+	tests := []struct {
+		status          jobs.ResultStatus
+		saveFails       bool
+		wantCode        int
+		wantPersistence string
+		wantScanRunID   int64
+	}{
+		{jobs.ResultStatusCompleted, false, 0, "saved", 17},
+		{jobs.ResultStatusCompleted, true, 1, "failed", 0},
+		{jobs.ResultStatusPartial, false, 0, "saved", 17},
+		{jobs.ResultStatusPartial, true, 1, "failed", 0},
+		{jobs.ResultStatusFailed, false, 1, "", 0},
+		{jobs.ResultStatusFailed, true, 1, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s/save_fails=%v", tt.status, tt.saveFails), func(t *testing.T) {
+			installReliableCommandFixture(t, tt.status)
+			dir := t.TempDir()
+			t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
+			store := &commandOutcomeStore{fail: tt.saveFails}
+			command := newScanCmdWithStore(func(config.Config) (storage.Store, error) { return store, nil })
+			command.SilenceUsage = true
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(brokenWriter{})
+			command.SetArgs([]string{"library/app:latest", "--format", "json", "--allow-partial", "--progress", "plain"})
+			err := command.Execute()
+			assertCommandExitAndSave(t, err, tt.wantCode, store.calls)
+			assertCommandCoveragePublication(t, dir, stdout.Bytes(), tt.status, tt.wantPersistence, tt.wantScanRunID)
+		})
+	}
+}
+
+func assertCommandExitAndSave(t *testing.T, err error, wantCode, saves int) {
+	t.Helper()
+	code := 0
+	if err != nil {
+		code = 1
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) {
+			code = coded.ExitCode()
 		}
+	}
+	if code != wantCode || saves != 1 {
+		t.Fatalf("exit=%d want=%d saves=%d err=%v", code, wantCode, saves, err)
+	}
+}
+
+func assertCommandCoveragePublication(t *testing.T, dir string, stdout []byte, status jobs.ResultStatus, persistence string, scanRunID int64) {
+	t.Helper()
+	paths, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
+	if status == jobs.ResultStatusFailed {
+		if len(paths) != 0 || len(stdout) != 0 {
+			t.Fatalf("failed scan publication behavior changed: files=%v stdout=%s", paths, stdout)
+		}
+		return
+	}
+	if len(paths) != 1 {
+		t.Fatalf("record lost: %v", paths)
+	}
+	var result jobs.Result
+	if err := json.Unmarshal(stdout, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != status {
+		t.Fatalf("status=%s want=%s", result.Status, status)
+	}
+	record := readLocalScanRecord(t, paths[0])
+	if record.Persistence.Status != persistence || record.Persistence.ScanRunID != scanRunID {
+		t.Fatalf("persistence=%+v", record.Persistence)
 	}
 }
 

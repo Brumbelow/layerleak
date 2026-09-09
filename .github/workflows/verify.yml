@@ -123,7 +123,10 @@ jobs:
         run: npm ci --prefix scripts/tests
 
       - name: Install test browser
-        run: scripts/tests/node_modules/.bin/playwright install --with-deps chromium
+        run: |
+          # Playwright downloads Chromium itself; the runner's Chrome APT source is unrelated.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*.list /etc/apt/sources.list.d/google-chrome*.sources
+          scripts/tests/node_modules/.bin/playwright install --with-deps chromium
 
       - name: Test synthetic demo rendering
         run: npm test --prefix scripts/tests

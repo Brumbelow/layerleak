@@ -823,6 +823,62 @@ func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 	}
 }
 
+func TestPostgresStoreListRepositoriesPaginatesTiedRegistries(t *testing.T) {
+	db := openMigratedIntegrationDB(t)
+	defer db.Close()
+
+	scannedAt := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		registry   string
+		repository string
+		seenAt     time.Time
+	}{
+		{"z.example", "library/app", scannedAt},
+		{"m.example", "library/app", scannedAt},
+		{"a.example", "library/app", scannedAt},
+		{"z.example", "library/aaa", scannedAt},
+		{"a.example", "library/older", scannedAt.Add(-time.Hour)},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO repositories (registry, repository, first_seen_at, last_seen_at)
+			VALUES ($1, $2, $3, $3)
+		`, item.registry, item.repository, item.seenAt); err != nil {
+			t.Fatalf("insert repository: %v", err)
+		}
+	}
+
+	store, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
+	if err != nil {
+		t.Fatalf("NewPostgresStore() error = %v", err)
+	}
+	defer store.Close()
+
+	want := []string{
+		"z.example/library/aaa",
+		"a.example/library/app",
+		"m.example/library/app",
+		"z.example/library/app",
+		"a.example/library/older",
+	}
+	for _, pageSize := range []int{1, 2, 3, 5} {
+		t.Run(fmt.Sprintf("page_size_%d", pageSize), func(t *testing.T) {
+			var got []string
+			for offset := 0; offset <= len(want); offset += pageSize {
+				items, err := store.ListRepositories(context.Background(), pageSize, offset)
+				if err != nil {
+					t.Fatalf("ListRepositories(limit=%d, offset=%d): %v", pageSize, offset, err)
+				}
+				for _, item := range items {
+					got = append(got, item.Registry+"/"+item.Repository)
+				}
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("repository pages = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestPostgresStoreListRepositoryScansOrdersByScannedAt(t *testing.T) {
 	db := openIntegrationDB(t)
 	defer db.Close()

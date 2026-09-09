@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "outcome": "completed",
+      "fixture": "web/testdata/api/scan-completed.json",
+      "path": "/api/v1/scans",
+      "method": "post",
+      "status": 200,
+      "media_type": "application/json"
+    },
+    {
+      "outcome": "partial",
+      "fixture": "web/testdata/api/scan-partial.json",
+      "path": "/api/v1/scans",
+      "method": "post",
+      "status": 422,
+      "media_type": "application/json"
+    },
+    {
+      "outcome": "failed",
+      "fixture": "web/testdata/api/scan-failed.json",
+      "path": "/api/v1/scans",
+      "method": "post",
+      "status": 502,
+      "media_type": "application/json"
+    },
+    {
+      "outcome": "storage_error",
+      "fixture": "web/testdata/api/scan-storage-error.json",
+      "path": "/api/v1/scans",
+      "method": "post",
+      "status": 503,
+      "media_type": "application/json"
+    }
+  ]
+}

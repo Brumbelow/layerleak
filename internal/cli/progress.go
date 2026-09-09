@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -67,6 +66,7 @@ type progressRenderer struct {
 	plain      bool
 	disabled   bool
 	started    bool
+	finished   bool
 	rendered   bool
 	lastPlain  string
 	terminalFD int
@@ -117,7 +117,7 @@ func parseProgressMode(value string) (progressMode, error) {
 }
 
 func (r *progressRenderer) Start(state progressSnapshot) error {
-	if r.disabled {
+	if r.disabled || r.finished {
 		return nil
 	}
 	if r.started {
@@ -157,7 +157,7 @@ func (r *progressRenderer) UpdateFromJob(update jobs.ProgressUpdate) error {
 }
 
 func (r *progressRenderer) Update(state progressSnapshot) error {
-	if r.disabled {
+	if r.disabled || r.finished {
 		return nil
 	}
 	if !r.started {
@@ -171,6 +171,10 @@ func (r *progressRenderer) Update(state progressSnapshot) error {
 }
 
 func (r *progressRenderer) Finish() error {
+	if r.finished {
+		return nil
+	}
+	r.finished = true
 	if !r.started || r.disabled || r.plain {
 		return nil
 	}
@@ -371,13 +375,6 @@ func progressCounts(state progressSnapshot) (int, int) {
 		return state.tagsCompleted + state.tagsFailed, state.tagsTotal
 	}
 	return 0, 0
-}
-
-func savedResultMessage(path string) string {
-	if strings.TrimSpace(path) == "" {
-		return "Saved findings result"
-	}
-	return "Saved " + filepath.Base(path)
 }
 
 func renderProgressLine(label, value string, maxWidth int) string {

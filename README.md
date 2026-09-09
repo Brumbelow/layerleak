@@ -19,6 +19,13 @@ PostgreSQL for the bundled API.
 - [Security policy](./SECURITY.md)
 - [Contributing](./CONTRIBUTING.md)
 
+This development tree documents the planned v1.1 line. The currently
+published canonical stable release is v1.0.0. A v1.1 release-candidate command
+shown below becomes installable only after that exact tag is published. The
+v1.1 version labels in the changelog and OpenAPI document are intentionally
+frozen so an accepted release candidate can be promoted from the same source
+commit.
+
 ## Security model
 
 Layerleak scans untrusted image content, so its defaults are intentionally
@@ -57,8 +64,11 @@ go install github.com/brumbelow/layerleak@v1.0.0
 go install github.com/brumbelow/layerleak@v1.1.0-rc.1
 ```
 
-Go deliberately excludes prereleases from `@latest` while a stable version is
-available. Local checkout builds report `dev`; module-installed binaries report
+Today, `@latest` selects the published v1.0.0 stable release. Go deliberately
+excludes prereleases from `@latest` while a stable version is available, so the
+planned RC command works only after v1.1.0-rc.1 is published and must be selected
+explicitly. Checkout builds can report `dev` or a VCS-derived development
+version, including a dirty-worktree marker. Release-installed binaries report
 the resolved module version through `layerleak --version`.
 
 Build from source:
@@ -69,6 +79,14 @@ cd layerleak
 go build -o layerleak .
 ./layerleak --help
 ```
+
+The supported distribution paths are the module root above for the CLI and
+`ghcr.io/brumbelow/layerleak:<published-version>` for the API plus its bundled
+migration, purge, and healthcheck commands. The `cmd/*` packages are source
+build targets for development, not separately versioned install paths. Before
+starting a PostgreSQL-backed API version, run its matching
+`layerleak-migrate-up` binary or container entrypoint and wait for migration
+success; the API will remain unready on an older schema.
 
 ## Scan images
 
@@ -130,9 +148,22 @@ suppressed findings and do not drive exit code `2`.
 
 ## Results and secret handling
 
-Each scan writes JSON under `LAYERLEAK_FINDINGS_DIR`. If it is unset, the CLI
-uses `findings/` beside the nearest `go.mod`, then falls back to the current
+For each usable scan result, Layerleak writes two JSON artifacts with the same
+generated basename under `LAYERLEAK_FINDINGS_DIR`. If it is unset, the CLI uses
+`findings/` beside the nearest `go.mod`, then falls back to the current
 directory.
+
+- `findings/<basename>.json` remains the compatible findings array.
+- `findings/scans/<basename>.json` is a versioned, always-redacted scan record
+  containing image identity, status, coverage, diagnostics, counts, creation
+  time, and the PostgreSQL persistence outcome.
+
+The two files are published independently. If either write fails, Layerleak
+reports an operational error and retains an artifact that was already
+published. A database-save failure also returns exit code `1`, records a
+neutral `storage_unavailable` persistence error, and still attempts to publish
+available redacted results locally. No scan ID is recorded unless persistence
+succeeded.
 
 Finding records include:
 
@@ -145,9 +176,10 @@ Finding records include:
 Raw values and raw context snippets are omitted unless
 `LAYERLEAK_PERSIST_RAW_SECRETS=1`. That setting increases breach impact and
 should normally remain disabled. API responses and the `scan_runs` snapshot
-remain redacted even when raw storage is enabled. Turning the setting back off
-prevents new raw writes but does not erase historical raw material; use the
-confirmation-gated purge command below for that explicit operation.
+remain redacted even when raw storage is enabled, as does the companion scan
+record. Turning the setting back off prevents new raw writes but does not erase
+historical raw material; use the confirmation-gated purge command below for
+that explicit operation.
 
 ## Configuration
 
@@ -343,6 +375,12 @@ Every response includes `X-Request-ID`. Error bodies use this shape:
   }
 }
 ```
+
+When a scan produced a usable redacted result but PostgreSQL persistence
+failed, `POST /api/v1/scans` returns HTTP 503 with `storage_unavailable`, the
+neutral message `the scan result could not be stored`, and the available
+result. It does not invent a `scan_run_id`. Failed and incomplete responses
+retain their actual `status`, coverage, and sanitized diagnostics.
 
 Unknown request fields and extra JSON values are rejected. Request size,
 concurrency, database work, and scan duration are bounded by configuration. See

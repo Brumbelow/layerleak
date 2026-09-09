@@ -164,3 +164,28 @@ func TestProgressRendererSanitizesControlCharacters(t *testing.T) {
 		t.Fatalf("status line not sanitized as expected: %q", statusLine)
 	}
 }
+
+func TestProgressFinishDoesNotRedrawAfterDurableOutput(t *testing.T) {
+	var buffer bytes.Buffer
+	renderer := newProgressRendererWithMode(&buffer, progressModeTTY)
+	if err := renderer.Start(progressSnapshot{message: "Scanning"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := renderer.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	buffer.WriteString("Findings: /tmp/complete/path.json\n")
+	finished := buffer.String()
+	if err := renderer.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if buffer.String() != finished {
+		t.Fatalf("second Finish changed durable output: %q", buffer.String())
+	}
+	if err := renderer.Update(progressSnapshot{message: "Late progress"}); err != nil {
+		t.Fatal(err)
+	}
+	if buffer.String() != finished {
+		t.Fatalf("late update redrew durable output: %q", buffer.String())
+	}
+}

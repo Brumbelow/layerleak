@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Verify image metadata and packaged executables match a release platform."""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess  # Only resolved Docker runs with separate arguments and shell=False.  # nosec B404
+import tempfile
+from pathlib import Path
+
+MACHINES = {'amd64': 62, 'arm64': 183}
+EXECUTABLES = ('layerleak-api', 'layerleak-migrate-up',
+               'layerleak-purge-raw-secrets', 'layerleak-healthcheck')
+
+
+def verify_elf_header(header, architecture):
+    if len(header) < 64 or header[:6] != b'\x7fELF\x02\x01':
+        raise ValueError('expected a 64-bit little-endian ELF executable')
+    machine = struct.unpack_from('<H', header, 18)[0]
+    if machine != MACHINES[architecture]:
+        raise ValueError(f'executable machine {machine} does not match {architecture}')
+
+
+def docker(*arguments):
+    # The operator configures PATH for Docker; never search the current directory.
+    search_path = os.pathsep.join(path for path in os.get_exec_path() if os.path.isabs(path))
+    executable = shutil.which('docker', path=search_path)
+    if executable is None:
+        raise ValueError('docker executable unavailable')
+    # Fixed Docker, shell=False, and -- keep validated operands as data; the rule requires a literal executable.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
+    result = subprocess.run([executable, *arguments], check=True, shell=False, text=True,  # nosec B603
+                            capture_output=True, timeout=120)
+    return result.stdout.strip()
+
+
+def verify_image(image, platform):
+    # Bound release input characters and size; Docker validates the complete reference grammar.
+    if re.fullmatch(r'[A-Za-z0-9\[][A-Za-z0-9._:/@+\[\]-]{0,1023}', image) is None:
+        raise ValueError('image reference must use at most 1024 ASCII reference characters')
+    if platform not in ('linux/amd64', 'linux/arm64'):
+        raise ValueError(f'unsupported platform: {platform}')
+    operating_system, architecture = platform.split('/')
+    metadata = json.loads(docker('image', 'inspect', '--', image))[0]
+    if metadata['Os'] != operating_system or metadata['Architecture'] != architecture:
+        raise ValueError(f'image metadata does not match {platform}')
+    container = docker('create', '--platform', platform, '--', image)
+    if re.fullmatch(r'[a-f0-9]{64}', container) is None:
+        raise ValueError('docker create returned an invalid container ID')
+    try:
+        with tempfile.TemporaryDirectory(prefix='layerleak-platform-') as directory:
+            for executable in EXECUTABLES:
+                local_file = Path(directory) / executable
+                docker('cp', '--', f'{container}:/usr/local/bin/{executable}', str(local_file))
+                with local_file.open('rb') as stream:
+                    try:
+                        verify_elf_header(stream.read(64), architecture)
+                    except ValueError as error:
+                        raise ValueError(f'{executable}: {error}') from error
+    finally:
+        docker('rm', '--', container)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('image')
+    parser.add_argument('platform', choices=('linux/amd64', 'linux/arm64'))
+    arguments = parser.parse_args()
+    try:
+        verify_image(arguments.image, arguments.platform)
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'Container platform verification failed: {error}\n')
+    print(f'Verified {arguments.platform}: {len(EXECUTABLES)} packaged executables')
+
+
+if __name__ == '__main__':
+    main()

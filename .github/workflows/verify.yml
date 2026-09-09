@@ -73,6 +73,61 @@ jobs:
           "${install_bin}/layerleak" scan --help
           "${install_bin}/layerleak" --version
 
+  documentation:
+    name: OpenAPI and static documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-docs.lock
+
+      - name: Install pinned documentation validators
+        run: python -m pip install --require-hashes -r requirements-docs.lock
+
+      - name: Verify handler-backed API examples are current
+        run: go test ./internal/api -run '^TestDocumentedScanResponsesMatchHandler$' -count=1
+
+      - name: Test documentation validation failures
+        run: python -m unittest scripts/test_validate_docs.py
+
+      - name: Validate OpenAPI and static documentation
+        run: python scripts/validate_docs.py
+
+      - name: Test release and container validation
+        run: python3 -m unittest discover -s scripts/tests -v
+
+      - name: Set up Node for browser tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: scripts/tests/package-lock.json
+
+      - name: Install browser test dependencies
+        run: npm ci --prefix scripts/tests
+
+      - name: Install test browser
+        run: scripts/tests/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Test synthetic demo rendering
+        run: npm test --prefix scripts/tests
+
   licenses:
     name: Linked dependency licenses
     runs-on: ubuntu-24.04
@@ -231,6 +286,9 @@ jobs:
           pull: true
           tags: layerleak-ci:${{ matrix.suffix }}
 
+      - name: Verify image platform metadata and binaries
+        run: python3 scripts/verify-container-platform.py layerleak-ci:${{ matrix.suffix }} ${{ matrix.platform }}
+
       - name: Exercise migration and API runtime
         shell: bash
         env:
@@ -267,7 +325,7 @@ jobs:
           done
 
           database_url='postgres://layerleak:layerleak-test-only@'"${database}"':5432/layerleak?sslmode=disable'
-          for pass in 1 2; do
+          for _ in 1 2; do
             docker run --rm --platform "${TEST_PLATFORM}" --network "${network}" \
               --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
               -e LAYERLEAK_DATABASE_URL="${database_url}" \

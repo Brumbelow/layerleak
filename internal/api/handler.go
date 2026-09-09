@@ -723,7 +723,7 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 func classifyScanError(err error) (int, string, string) {
 	switch {
 	case scanservice.IsSaveError(err):
-		return http.StatusServiceUnavailable, "storage_unavailable", "the scan completed, but its result could not be stored"
+		return http.StatusServiceUnavailable, "storage_unavailable", "the scan result could not be stored"
 	case jobs.IsIncomplete(err):
 		var incomplete *jobs.IncompleteError
 		if errors.As(err, &incomplete) && incomplete != nil {

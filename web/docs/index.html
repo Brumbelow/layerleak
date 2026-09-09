@@ -43,6 +43,11 @@
               <a class="button-primary" href="#quickstart">Install</a>
               <a class="button-secondary" href="demo/">Open simulated demo</a>
             </div>
+            <p class="muted">
+              This development copy documents the planned v1.1 line. The currently published
+              canonical stable CLI is v1.0.0. The v1.1 changelog and OpenAPI version remain frozen
+              so an accepted release candidate can be promoted from the same source commit.
+            </p>
           </div>
 
           <div class="layer-map" role="img" aria-label="layerleak scan flow: registry manifest and config feed layer extraction, then redacted JSON output and optional Postgres persistence">
@@ -121,7 +126,9 @@ go build -o layerleak .
                 To pin a published release, replace <code>@latest</code> with the
                 <code>v1.x.y</code> tag you want. The module path is
                 <code>github.com/brumbelow/layerleak</code>, so <code>@latest</code> resolves to the
-                highest published <code>v1.x.y</code> tag. Module-installed binaries report that
+                highest published <code>v1.x.y</code> tag, currently <code>v1.0.0</code>. A planned
+                command such as <code>go install github.com/brumbelow/layerleak@v1.1.0-rc.1</code>
+                becomes available only after that tag is published. Module-installed binaries report that
                 version through <code>layerleak --version</code>; local checkout builds report the
                 version Go embeds for the checkout, falling back to <code>dev</code> when no module
                 version is available.
@@ -263,9 +270,13 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=
                 <code>total_findings</code>.
               </p>
               <p>
-                A scan saves a JSON file under <code>LAYERLEAK_FINDINGS_DIR</code>. If unset, it
-                defaults to <code>findings/</code> beside the nearest <code>go.mod</code>, falling
-                back to the current working directory.
+                Each usable scan result produces two JSON artifacts with the same generated
+                basename under <code>LAYERLEAK_FINDINGS_DIR</code>. The compatible findings array remains at
+                <code>findings/&lt;basename&gt;.json</code>. A versioned, always-redacted record at
+                <code>findings/scans/&lt;basename&gt;.json</code> adds image identity, status, coverage,
+                diagnostics, counts, creation time, and the PostgreSQL persistence outcome. If the
+                directory is unset, it defaults to <code>findings/</code> beside the nearest
+                <code>go.mod</code>, falling back to the current working directory.
               </p>
               <p>
                 Every result reports <code>status</code> as <code>completed</code>,
@@ -303,7 +314,9 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=
                 Saved files and Postgres writes default to redacted values and redacted context
                 snippets. Raw secret values and raw snippets are written only when
                 <code>LAYERLEAK_PERSIST_RAW_SECRETS=1</code>. API responses stay redacted even if a
-                writer persisted raw values.
+                writer persisted raw values; the companion scan record is always redacted. The two
+                local files are published independently, so a write failure retains any artifact
+                already published and returns an operational error.
               </p>
             </section>
 
@@ -376,6 +389,12 @@ go run ./cmd/migrate</code></pre>
                 exists.
               </p>
               <p>
+                If a usable redacted result exists but PostgreSQL persistence fails, the endpoint
+                returns HTTP 503 with <code>storage_unavailable</code>, neutral public wording, and
+                the actual result status and coverage. It omits <code>scan_run_id</code> unless
+                persistence succeeded.
+              </p>
+              <p>
                 Repository scan and finding list endpoints accept an optional
                 <code>?registry=</code> query parameter (defaults to <code>docker.io</code>),
                 plus <code>?limit=</code> and <code>?offset=</code> pagination
@@ -435,7 +454,9 @@ curl --fail http://127.0.0.1:8080/readyz</code></pre>
               <p>
                 The Pages demo is fully static. It replays a fixed transcript and renders a
                 synthetic Postgres-style snapshot from versioned fixture data in the repository.
-                Nothing is sent to any registry or database.
+                Raw-value columns are empty to match default storage, and the transcript shows the
+                current result status, coverage, findings-array path, and companion scan-record
+                path. Nothing is sent to any registry or database.
               </p>
               <pre><code>layerleak scan vulnerableHost:latest --platform linux/amd64</code></pre>
               <p><a class="button-primary" href="demo/">Open the simulated demo</a></p>

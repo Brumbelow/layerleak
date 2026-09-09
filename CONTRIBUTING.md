@@ -36,6 +36,20 @@ go test ./... -count=1
 Integration tests may reset the configured database. Never point
 `LAYERLEAK_TEST_DATABASE_URL` at a database containing useful data.
 
+To run the browser demo tests with Node.js 22 or newer:
+
+```bash
+npm ci --prefix scripts/tests
+npm exec --prefix scripts/tests -- playwright install chromium
+npm test --prefix scripts/tests
+```
+
+Playwright is a development dependency for testing the real browser DOM. The
+tests intercept every page request and use local synthetic fixtures; they do
+not contact a registry or backend. To use an existing Chromium or Chrome
+installation, set `DEMO_BROWSER_PATH` to its executable path when running
+`npm test --prefix scripts/tests` instead of installing the bundled browser.
+
 ## Required verification
 
 Run the checks that match `.github/workflows/verify.yml`:
@@ -49,6 +63,10 @@ go vet ./...
 go test -short ./... -count=1
 go test -short -race ./... -count=1
 go test ./... -count=1 # with LAYERLEAK_TEST_DATABASE_URL
+python3 -m venv .venv-docs
+.venv-docs/bin/python -m pip install --require-hashes -r requirements-docs.lock
+.venv-docs/bin/python -m unittest scripts/test_validate_docs.py
+.venv-docs/bin/python scripts/validate_docs.py
 LAYERLEAK_DB_PASSWORD=test docker compose config --quiet
 LAYERLEAK_DB_PASSWORD=test docker compose --profile tools config --quiet
 ```
@@ -73,7 +91,8 @@ docker buildx build --platform linux/arm64 --load -t layerleak:test-arm64 .
 CI also runs real PostgreSQL migration/idempotence checks, the native purge
 confirmation guard, both image architectures under emulation, API readiness,
 `govulncheck`, a linked-dependency license gate and inventory, dependency
-review, CodeQL, and image configuration validation.
+review, CodeQL, image configuration validation, pinned OpenAPI 3.1 response
+validation, local documentation-link checks, and synthetic-demo validation.
 
 ## Coding expectations
 
@@ -161,10 +180,10 @@ go install github.com/brumbelow/layerleak@latest
 ```
 
 The module path has no major suffix, so releases must remain on v1. Historical
-v2.x GitHub/container tags are not valid v2 Go module releases. Do not create or
-push release tags manually. Maintainers use the protected workflow described in
-[RELEASING.md](./RELEASING.md), which creates an immutable v1 tag only after all
-release gates pass.
+v2.x GitHub/container tags are not valid v2 Go module releases. Release source
+tags are prepared offline exactly as described in [RELEASING.md](./RELEASING.md);
+do not push them manually. The protected workflow alone pushes the prepared,
+immutable v1 tag after all release gates pass.
 
 ## Documentation and pull requests
 

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -259,27 +260,17 @@ func parseINIKeyValue(line string) (key, value string, start, end int, ok bool) 
 		return "", "", 0, 0, false
 	}
 	start = separator + 1 + len(valuePart) - len(trimmedLeft)
-	end = len(line)
+	value = strings.TrimRight(trimmedLeft, " \t")
 
-	trimmedRight := strings.TrimRight(trimmedLeft, " \t")
-	end -= len(trimmedLeft) - len(trimmedRight)
-	value = trimmedRight
-
-	if len(value) >= 2 {
-		switch {
-		case strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\""):
-			value = value[1 : len(value)-1]
-			start++
-			end--
-		case strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'"):
-			value = value[1 : len(value)-1]
-			start++
-			end--
-		}
+	if len(value) >= 2 && value[0] == value[len(value)-1] && (value[0] == '"' || value[0] == '\'') {
+		value = value[1 : len(value)-1]
+		start++
 	}
 
+	start += len(value) - len(strings.TrimLeftFunc(value, unicode.IsSpace))
 	value = strings.TrimSpace(value)
-	if value == "" || end <= start {
+	end = start + len(value)
+	if value == "" {
 		return "", "", 0, 0, false
 	}
 

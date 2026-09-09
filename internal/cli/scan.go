@@ -15,12 +15,17 @@ import (
 	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/scanservice"
+	"github.com/brumbelow/layerleak/internal/storage"
 	"github.com/spf13/cobra"
 )
 
 const repositorySweepWarning = "warning: --all-tags enumerates every public tag in the repository and may scan many distinct images"
 
 func newScanCmd() *cobra.Command {
+	return newScanCmdWithStore(newStore)
+}
+
+func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *cobra.Command {
 	var platform string
 	var format string
 	var tagPageSize int
@@ -83,7 +88,7 @@ func newScanCmd() *cobra.Command {
 
 			if allTags {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), repositorySweepWarning); err != nil {
-					return err
+					logger.Debug("progress update failed")
 				}
 			}
 
@@ -97,11 +102,11 @@ func newScanCmd() *cobra.Command {
 				phase:      "Starting",
 				message:    startingMessage,
 			}); err != nil {
-				return err
+				logger.Debug("progress update failed")
 			}
 			defer progress.Finish()
 
-			store, err := newStore(cfg)
+			store, err := openStore(cfg)
 			if err != nil {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
@@ -146,7 +151,9 @@ func newScanCmd() *cobra.Command {
 				},
 			})
 			result := outcome.Result
-			scanErr := err
+			scanErr := outcome.ScanError
+			saveErr := outcome.SaveError
+			operationErr := err
 			if scanErr == nil && result.Status != jobs.ResultStatusCompleted {
 				scanErr = &jobs.IncompleteError{
 					Status:                 result.Status,
@@ -154,16 +161,22 @@ func newScanCmd() *cobra.Command {
 					FailedManifestCount:    result.FailedManifestCount,
 				}
 			}
+			if operationErr == nil {
+				operationErr = scanErr
+			}
+			if ctx.Err() != nil {
+				operationErr = errors.Join(operationErr, ctx.Err())
+			}
 			acceptPartial := allowPartial && canAcceptPartial(ctx, result, scanErr)
-			if scanErr != nil && (!hasUsablePartialResult(result) || scanservice.IsSaveError(scanErr) || isCancellation(scanErr)) {
+			if isCancellation(scanErr) || ctx.Err() != nil || (scanErr != nil && !hasUsablePartialResult(result)) {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
-					message:    scanErr.Error(),
+					message:    operationErr.Error(),
 				}); updateErr != nil {
 					logger.Debug("progress update failed", "error", updateErr)
 				}
-				return scanErr
+				return operationErr
 			}
 			if scanErr != nil {
 				if updateErr := progress.Update(progressSnapshot{
@@ -194,11 +207,11 @@ func newScanCmd() *cobra.Command {
 				phase:            "Saving Results",
 				message:          "Writing findings file",
 			}); err != nil {
-				return err
+				logger.Debug("progress update failed")
 			}
 
-			resultPath, err := writeResultFile(cfg.FindingsDir, cfg.PersistRawSecrets, result)
-			if err != nil {
+			artifactPaths, publicationErr := writeResultArtifacts(cfg.FindingsDir, cfg.PersistRawSecrets, outcome, store.Name())
+			if publicationErr != nil {
 				if updateErr := progress.Update(progressSnapshot{
 					repository:       ref.Repository,
 					tagsCompleted:    result.TagsResolved,
@@ -209,53 +222,54 @@ func newScanCmd() *cobra.Command {
 					targetsTotal:     result.TargetCount,
 					findingsFound:    result.TotalFindings,
 					phase:            "Error",
-					message:          err.Error(),
+					message:          publicationErr.Error(),
 				}); updateErr != nil {
 					logger.Debug("progress update failed", "error", updateErr)
 				}
-				return err
 			}
 			if !cfg.PersistRawSecrets {
 				findings.StripRawSecrets(result.DetailedFindings)
 				findings.StripRawSecrets(result.SuppressedDetailedFindings)
 			}
 
-			if err := progress.Update(progressSnapshot{
-				repository:       ref.Repository,
-				tagsCompleted:    result.TagsResolved,
-				tagsFailed:       result.TagsFailed,
-				tagsTotal:        result.TagsEnumerated,
-				targetsCompleted: result.CompletedTargetCount,
-				targetsFailed:    result.FailedTargetCount,
-				targetsTotal:     result.TargetCount,
-				findingsFound:    result.TotalFindings,
-				phase:            "Saved",
-				message:          savedResultMessage(resultPath),
-			}); err != nil {
-				return err
+			if err := progress.Finish(); err != nil {
+				logger.Debug("progress update failed")
+			}
+			for _, artifact := range []struct{ label, path string }{
+				{"Findings", artifactPaths.Findings}, {"Scan record", artifactPaths.Scan},
+			} {
+				if artifact.path == "" {
+					continue
+				}
+				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", artifact.label, sanitizeProgressValue(artifact.path)); err != nil {
+					logger.Debug("artifact path reporting failed")
+				}
 			}
 
 			switch outputFormat {
 			case "json":
 				encoder := json.NewEncoder(cmd.OutOrStdout())
 				encoder.SetIndent("", "  ")
-				if err := encoder.Encode(result); err != nil {
-					return err
+				if err := encoder.Encode(scanservice.RedactedResult(result)); err != nil {
+					return errors.Join(operationErr, publicationErr, err)
 				}
 			case "summary":
 				if err := renderSummary(cmd.OutOrStdout(), result); err != nil {
-					return err
+					return errors.Join(operationErr, publicationErr, err)
 				}
 			default:
 				return fmt.Errorf("unsupported output format: %s", outputFormat)
 			}
 
+			if publicationErr != nil || saveErr != nil {
+				return errors.Join(operationErr, publicationErr)
+			}
 			if scanErr != nil && !acceptPartial {
 				return exitError{code: 1, message: scanErr.Error()}
 			}
 			if acceptPartial {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "warning: incomplete scan accepted by --allow-partial"); err != nil {
-					return err
+					logger.Debug("progress update failed")
 				}
 			}
 			if result.TotalFindings > 0 {
@@ -341,108 +355,89 @@ func applyScanScopeFlags(cmd *cobra.Command, cfg *config.Config, tagPageSize, ma
 
 func renderSummary(output io.Writer, result jobs.Result) error {
 	writer := tabwriter.NewWriter(output, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintf(writer, "Requested Reference:\t%s\n", sanitizeProgressValue(result.RequestedReference)); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Repository:\t%s\n", sanitizeProgressValue(result.Repository)); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Status:\t%s\n", result.Status); err != nil {
-		return err
-	}
-	if result.ResolvedReference != "" {
-		if _, err := fmt.Fprintf(writer, "Resolved Reference:\t%s\n", sanitizeProgressValue(result.ResolvedReference)); err != nil {
+	for _, row := range summaryRows(result) {
+		if _, err := fmt.Fprintf(writer, "%s:\t%v\n", row.label, row.value); err != nil {
 			return err
 		}
-	}
-	if result.RequestedDigest != "" {
-		if _, err := fmt.Fprintf(writer, "Requested Digest:\t%s\n", sanitizeProgressValue(result.RequestedDigest)); err != nil {
-			return err
-		}
-	}
-	if result.TagsEnumerated > 0 || result.Mode == "repository" {
-		if _, err := fmt.Fprintf(writer, "Tags Enumerated:\t%d\n", result.TagsEnumerated); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(writer, "Tags Resolved:\t%d\n", result.TagsResolved); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(writer, "Tags Failed:\t%d\n", result.TagsFailed); err != nil {
-			return err
-		}
-	}
-	if _, err := fmt.Fprintf(writer, "Targets Selected:\t%d\n", result.TargetCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Targets Completed:\t%d\n", result.CompletedTargetCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Targets Partial:\t%d\n", result.PartialTargetCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Targets Failed:\t%d\n", result.FailedTargetCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Manifests Selected:\t%d\n", result.ManifestCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Manifests Completed:\t%d\n", result.CompletedManifestCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Manifests Failed:\t%d\n", result.FailedManifestCount); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Coverage Complete:\t%t\n", result.Coverage.Complete); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Files Scanned:\t%d\n", result.Coverage.FilesScanned); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Files Skipped Oversize:\t%d\n", result.Coverage.FilesSkippedOversize); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Total Findings:\t%d\n", result.TotalFindings); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Unique Fingerprints:\t%d\n", result.UniqueFingerprints); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(writer, "Suppressed Example Findings:\t%d\n", result.SuppressedFindingsCount); err != nil {
-		return err
 	}
 	if _, err := fmt.Fprintln(writer, ""); err != nil {
 		return err
 	}
+	if err := renderSummaryTargets(writer, result); err != nil {
+		return err
+	}
+	return writer.Flush()
+}
+
+type summaryRow struct {
+	label string
+	value any
+}
+
+func summaryRows(result jobs.Result) []summaryRow {
+	rows := []summaryRow{
+		{"Requested Reference", sanitizeProgressValue(result.RequestedReference)},
+		{"Repository", sanitizeProgressValue(result.Repository)},
+		{"Status", result.Status},
+	}
+	if result.ResolvedReference != "" {
+		rows = append(rows, summaryRow{"Resolved Reference", sanitizeProgressValue(result.ResolvedReference)})
+	}
+	if result.RequestedDigest != "" {
+		rows = append(rows, summaryRow{"Requested Digest", sanitizeProgressValue(result.RequestedDigest)})
+	}
+	if result.TagsEnumerated > 0 || result.Mode == "repository" {
+		rows = append(rows,
+			summaryRow{"Tags Enumerated", result.TagsEnumerated},
+			summaryRow{"Tags Resolved", result.TagsResolved},
+			summaryRow{"Tags Failed", result.TagsFailed},
+		)
+	}
+	return append(rows,
+		summaryRow{"Targets Selected", result.TargetCount},
+		summaryRow{"Targets Completed", result.CompletedTargetCount},
+		summaryRow{"Targets Partial", result.PartialTargetCount},
+		summaryRow{"Targets Failed", result.FailedTargetCount},
+		summaryRow{"Manifests Selected", result.ManifestCount},
+		summaryRow{"Manifests Completed", result.CompletedManifestCount},
+		summaryRow{"Manifests Failed", result.FailedManifestCount},
+		summaryRow{"Coverage Complete", result.Coverage.Complete},
+		summaryRow{"Files Scanned", result.Coverage.FilesScanned},
+		summaryRow{"Files Skipped Oversize", result.Coverage.FilesSkippedOversize},
+		summaryRow{"Total Findings", result.TotalFindings},
+		summaryRow{"Unique Fingerprints", result.UniqueFingerprints},
+		summaryRow{"Suppressed Example Findings", result.SuppressedFindingsCount},
+	)
+}
+
+func renderSummaryTargets(writer io.Writer, result jobs.Result) error {
 	if result.Mode == "reference" && len(result.Targets) == 1 {
 		if _, err := fmt.Fprintln(writer, "Platform\tManifest Digest\tFindings\tStatus"); err != nil {
 			return err
 		}
 		for _, item := range result.Targets[0].PlatformResults {
-			status := "ok"
-			if item.Error != "" {
-				status = item.Error
-			}
-			if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\n", sanitizeProgressValue(item.Platform.String()), sanitizeProgressValue(item.ManifestDigest), item.FindingsCount, sanitizeProgressValue(status)); err != nil {
+			if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\n", sanitizeProgressValue(item.Platform.String()), sanitizeProgressValue(item.ManifestDigest), item.FindingsCount, summaryItemStatus(item.Error)); err != nil {
 				return err
 			}
 		}
-		return writer.Flush()
+		return nil
 	}
-
 	if _, err := fmt.Fprintln(writer, "Reference\tTags\tFindings\tStatus"); err != nil {
 		return err
 	}
 	for _, item := range result.Targets {
-		status := "ok"
-		if item.Error != "" {
-			status = item.Error
-		}
-		if _, err := fmt.Fprintf(writer, "%s\t%d\t%d\t%s\n", sanitizeProgressValue(targetReferenceLabel(item)), len(item.Tags), item.FindingsCount, sanitizeProgressValue(status)); err != nil {
+		if _, err := fmt.Fprintf(writer, "%s\t%d\t%d\t%s\n", sanitizeProgressValue(targetReferenceLabel(item)), len(item.Tags), item.FindingsCount, summaryItemStatus(item.Error)); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
-	return writer.Flush()
+func summaryItemStatus(message string) string {
+	if message == "" {
+		return "ok"
+	}
+	return sanitizeProgressValue(message)
 }
 
 func targetReferenceLabel(item jobs.TargetResult) string {

@@ -112,6 +112,22 @@ jobs:
       - name: Test release and container validation
         run: python3 -m unittest discover -s scripts/tests -v
 
+      - name: Set up Node for browser tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: scripts/tests/package-lock.json
+
+      - name: Install browser test dependencies
+        run: npm ci --prefix scripts/tests
+
+      - name: Install test browser
+        run: scripts/tests/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Test synthetic demo rendering
+        run: npm test --prefix scripts/tests
+
   licenses:
     name: Linked dependency licenses
     runs-on: ubuntu-24.04

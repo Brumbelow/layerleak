@@ -36,6 +36,20 @@ go test ./... -count=1
 Integration tests may reset the configured database. Never point
 `LAYERLEAK_TEST_DATABASE_URL` at a database containing useful data.
 
+To run the browser demo tests with Node.js 22 or newer:
+
+```bash
+npm ci --prefix scripts/tests
+npm exec --prefix scripts/tests -- playwright install chromium
+npm test --prefix scripts/tests
+```
+
+Playwright is a development dependency for testing the real browser DOM. The
+tests intercept every page request and use local synthetic fixtures; they do
+not contact a registry or backend. To use an existing Chromium or Chrome
+installation, set `DEMO_BROWSER_PATH` to its executable path when running
+`npm test --prefix scripts/tests` instead of installing the bundled browser.
+
 ## Required verification
 
 Run the checks that match `.github/workflows/verify.yml`:

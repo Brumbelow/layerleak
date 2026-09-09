@@ -1,0 +1,10 @@
+{
+  "name": "layerleak-web-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test test_demo.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

@@ -9,7 +9,8 @@
   const tableWrapEl = document.getElementById("demo-table-wrap");
   const tableMetaEl = document.getElementById("table-meta");
 
-  if (!commandEl || !startButton || !replayButton || !terminalEl || !statusEl || !statsEl || !tabsEl || !tableWrapEl || !tableMetaEl) {
+  const requiredElements = [commandEl, startButton, replayButton, terminalEl, statusEl, statsEl, tabsEl, tableWrapEl, tableMetaEl];
+  if (!requiredElements.every(Boolean)) {
     return;
   }
 
@@ -31,12 +32,12 @@
       return response.json();
     })
     .then((data) => {
-      state.data = data;
+      state.data = { ...data, tables: new Map(Object.entries(data.tables)) };
       initializeDemo();
     })
     .catch(() => {
       commandEl.textContent = "demo fixture unavailable";
-      statusEl.innerHTML = "<strong>Status:</strong> failed to load the simulation fixture";
+      renderStatus("failed to load the simulation fixture");
       tableWrapEl.innerHTML = '<div class="table-empty">The simulated demo fixture could not be loaded.</div>';
       startButton.disabled = true;
     });
@@ -71,7 +72,7 @@
     renderStatsPlaceholder("Replaying simulated scan");
     tableMetaEl.textContent = "Replay in progress";
     tableWrapEl.innerHTML = '<div class="table-empty">The fake local Postgres snapshot will appear after the replay completes.</div>';
-    statusEl.innerHTML = "<strong>Status:</strong> booting replay";
+    renderStatus("booting replay");
 
     stepFrame(0);
   }
@@ -79,7 +80,7 @@
   function stepFrame(index) {
     const frame = state.data.frames[index];
     terminalEl.textContent = frame.terminal;
-    statusEl.innerHTML = "<strong>Status:</strong> " + frame.status;
+    renderStatus(frame.status);
     terminalEl.scrollTop = terminalEl.scrollHeight;
 
     const next = index + 1;
@@ -107,6 +108,12 @@
     renderTable(initialTable);
   }
 
+  function renderStatus(text) {
+    const label = document.createElement("strong");
+    label.textContent = "Status:";
+    statusEl.replaceChildren(label, document.createTextNode(" " + text));
+  }
+
   function renderIdleState() {
     state.running = false;
     state.complete = false;
@@ -117,7 +124,7 @@
       "$ " +
       (state.data ? state.data.command : "layerleak scan vulnerableHost:latest --platform linux/amd64") +
       "\n\n# Click \"Try it out\" to replay a static layerleak run.\n# The transcript and the database rows below are simulated.";
-    statusEl.innerHTML = "<strong>Status:</strong> waiting to replay";
+    renderStatus("waiting to replay");
     renderStatsPlaceholder("Awaiting replay");
     tableMetaEl.textContent = "Run the replay to load rows";
     tableWrapEl.innerHTML = '<div class="table-empty">Run the simulated scan to load the fake Postgres snapshot.</div>';
@@ -188,7 +195,7 @@
   }
 
   function renderTable(tableName) {
-    const table = state.data.tables[tableName];
+    const table = state.data.tables.get(tableName);
     if (!table) {
       tableWrapEl.innerHTML = '<div class="table-empty">Unknown table.</div>';
       tableMetaEl.textContent = "Missing table fixture";
@@ -210,10 +217,11 @@
 
     const tbody = document.createElement("tbody");
     table.rows.forEach((row) => {
+      const cells = new Map(Object.entries(row));
       const tr = document.createElement("tr");
       table.columns.forEach((column) => {
         const td = document.createElement("td");
-        const value = formatCellValue(row[column]);
+        const value = formatCellValue(cells.get(column));
         if (value.length > 28) {
           const code = document.createElement("code");
           code.textContent = value;

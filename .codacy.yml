@@ -1,5 +1,10 @@
 ---
 engines:
+  tslint:
+    # npm metadata is strict JSON, not TypeScript with trailing commas.
+    exclude_paths:
+      - "scripts/tests/package.json"
+      - "scripts/tests/package-lock.json"
   revive:
     exclude_paths:
       - "go.sum"

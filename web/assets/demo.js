@@ -125,7 +125,7 @@
 
   function renderStatsPlaceholder(text) {
     statsEl.innerHTML = "";
-    const labels = ["Repository", "Platform", "Actionable findings", "Output file"];
+    const labels = ["Status", "Coverage", "Actionable findings", "Saved artifacts"];
     labels.forEach((label) => {
       const card = document.createElement("article");
       card.className = "stat-card";

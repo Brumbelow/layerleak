@@ -20,7 +20,7 @@ func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt
 		scannedAt = scannedAt.UTC()
 	}
 
-	publicResult := sanitizeStoredResult(normalizedPublicResult(reference, result))
+	publicResult := RedactedResult(normalizedPublicResult(reference, result))
 	resultJSON, err := json.Marshal(publicResult)
 	if err != nil {
 		return storage.ScanRecord{}, err
@@ -250,6 +250,14 @@ func normalizedPublicResult(reference manifest.Reference, result jobs.Result) jo
 		}
 	}
 	return publicResult
+}
+
+// RedactedResult applies the scan-history error policy and omits raw details.
+func RedactedResult(result jobs.Result) jobs.Result {
+	result = sanitizeStoredResult(result)
+	result.DetailedFindings = nil
+	result.SuppressedDetailedFindings = nil
+	return result
 }
 
 func sanitizeStoredResult(result jobs.Result) jobs.Result {

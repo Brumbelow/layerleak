@@ -41,6 +41,8 @@ type Error struct {
 type Outcome struct {
 	Result    jobs.Result
 	ScanRunID int64
+	ScanError error
+	SaveError error
 }
 
 func (e *Error) Error() string {
@@ -114,7 +116,7 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		findings.StripRawSecrets(result.DetailedFindings)
 		findings.StripRawSecrets(result.SuppressedDetailedFindings)
 	}
-	outcome := Outcome{Result: result}
+	outcome := Outcome{Result: result, ScanError: scanErr}
 
 	if s.store == nil || s.store.Name() == "noop" {
 		return outcome, wrapScanError(scanErr)
@@ -123,23 +125,31 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		if scanErr != nil {
 			return outcome, wrapScanError(scanErr)
 		}
+		outcome.ScanError = ctx.Err()
 		return outcome, wrapScanError(ctx.Err())
 	}
 
 	if request.BeforeSave != nil {
-		if hookErr := request.BeforeSave(result); hookErr != nil {
-			return outcome, &Error{Phase: ErrorPhaseSave, Err: hookErr}
+		if hookErr := request.BeforeSave(result); hookErr != nil && request.Logger != nil {
+			request.Logger.Debug("progress update failed")
 		}
+	}
+
+	if ctx != nil && ctx.Err() != nil {
+		outcome.ScanError = errors.Join(scanErr, ctx.Err())
+		return outcome, wrapScanError(outcome.ScanError)
 	}
 
 	scannedAt := s.now().UTC()
 	record, recordErr := BuildScanRecord(request.Reference, result, scannedAt, scanErr)
 	if recordErr != nil {
-		return outcome, &Error{Phase: ErrorPhaseSave, Err: recordErr}
+		outcome.SaveError = recordErr
+		return outcome, errors.Join(&Error{Phase: ErrorPhaseSave, Err: recordErr}, wrapScanError(scanErr))
 	}
 	scanRunID, storeErr := s.store.SaveScan(ctx, record)
 	if storeErr != nil {
-		return outcome, &Error{Phase: ErrorPhaseSave, Err: storeErr}
+		outcome.SaveError = storeErr
+		return outcome, errors.Join(&Error{Phase: ErrorPhaseSave, Err: storeErr}, wrapScanError(scanErr))
 	}
 	outcome.ScanRunID = scanRunID
 

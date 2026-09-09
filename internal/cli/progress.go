@@ -67,6 +67,7 @@ type progressRenderer struct {
 	plain      bool
 	disabled   bool
 	started    bool
+	finished   bool
 	rendered   bool
 	lastPlain  string
 	terminalFD int
@@ -117,7 +118,7 @@ func parseProgressMode(value string) (progressMode, error) {
 }
 
 func (r *progressRenderer) Start(state progressSnapshot) error {
-	if r.disabled {
+	if r.disabled || r.finished {
 		return nil
 	}
 	if r.started {
@@ -157,7 +158,7 @@ func (r *progressRenderer) UpdateFromJob(update jobs.ProgressUpdate) error {
 }
 
 func (r *progressRenderer) Update(state progressSnapshot) error {
-	if r.disabled {
+	if r.disabled || r.finished {
 		return nil
 	}
 	if !r.started {
@@ -171,6 +172,10 @@ func (r *progressRenderer) Update(state progressSnapshot) error {
 }
 
 func (r *progressRenderer) Finish() error {
+	if r.finished {
+		return nil
+	}
+	r.finished = true
 	if !r.started || r.disabled || r.plain {
 		return nil
 	}

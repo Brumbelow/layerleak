@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"github.com/brumbelow/layerleak/internal/findings"
 	"github.com/brumbelow/layerleak/internal/jobs"
 	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/internal/scanservice"
 )
 
 type persistedFinding struct {
@@ -46,51 +49,47 @@ func writeResultFile(configuredDir string, persistRawSecrets bool, result jobs.R
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(findingsDir, 0o700); err != nil {
-		return "", fmt.Errorf("create findings directory: %w", err)
-	}
-	if err := os.Chmod(findingsDir, 0o700); err != nil {
-		return "", fmt.Errorf("secure findings directory: %w", err)
-	}
+	return publishResultJSON(findingsDir, uniqueResultFileName(result), buildPersistedFindings(result, persistRawSecrets))
+}
 
-	tempFile, err := os.CreateTemp(findingsDir, ".layerleak-result-*")
+func uniqueResultFileName(result jobs.Result) string {
+	return strings.TrimSuffix(buildResultFileName(result), ".json") + "-" + rand.Text() + ".json"
+}
+
+func publishResultJSON(dir, name string, value any) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create result directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("secure result directory: %w", err)
+	}
+	file, err := os.CreateTemp(dir, ".layerleak-result-*")
 	if err != nil {
-		return "", fmt.Errorf("create findings result file: %w", err)
+		return "", fmt.Errorf("create result file: %w", err)
 	}
-	tempPath := tempFile.Name()
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			_ = os.Remove(tempPath)
-		}
-	}()
-
-	encoder := json.NewEncoder(tempFile)
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(buildPersistedFindings(result, persistRawSecrets)); err != nil {
-		_ = tempFile.Close()
-		return "", fmt.Errorf("write findings result file: %w", err)
+	if err := encoder.Encode(value); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("write result file: %w", err)
 	}
-	if err := tempFile.Sync(); err != nil {
-		_ = tempFile.Close()
-		return "", fmt.Errorf("sync findings result file: %w", err)
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("sync result file: %w", err)
 	}
-	if err := tempFile.Close(); err != nil {
-		return "", fmt.Errorf("close findings result file: %w", err)
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close result file: %w", err)
 	}
-
-	fileName := strings.TrimSuffix(buildResultFileName(result), ".json") + "-" + strings.TrimPrefix(filepath.Base(tempPath), ".layerleak-result-") + ".json"
-	filePath := filepath.Join(findingsDir, fileName)
-	if err := os.Link(tempPath, filePath); err != nil {
-		return "", fmt.Errorf("publish findings result file: %w", err)
+	path := filepath.Join(dir, name)
+	if err := os.Link(temporary, path); err != nil {
+		return "", fmt.Errorf("publish result file: %w", err)
 	}
-	if err := os.Remove(tempPath); err != nil {
-		_ = os.Remove(filePath)
-		return "", fmt.Errorf("remove temporary findings result file: %w", err)
+	if err := os.Remove(temporary); err != nil {
+		return path, fmt.Errorf("remove temporary result file: %w", err)
 	}
-	removeTemp = false
-
-	return filePath, nil
+	return path, nil
 }
 
 func buildPersistedFindings(result jobs.Result, persistRawSecrets bool) []persistedFinding {
@@ -271,4 +270,45 @@ func sanitizePathToken(value string) string {
 	}
 
 	return strings.Trim(builder.String(), "-")
+}
+
+type resultArtifactPaths struct {
+	Findings string
+	Scan     string
+}
+
+type localScanRecord struct {
+	RecordSchemaVersion int                `json:"record_schema_version"`
+	CreatedAt           time.Time          `json:"created_at"`
+	Result              jobs.Result        `json:"result"`
+	Persistence         persistenceOutcome `json:"persistence"`
+}
+
+type persistenceOutcome struct {
+	Status       string `json:"status"`
+	ScanRunID    int64  `json:"scan_run_id,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+func writeResultArtifacts(configuredDir string, persistRawSecrets bool, outcome scanservice.Outcome, storeName string) (resultArtifactPaths, error) {
+	dir, err := resolveFindingsDir(configuredDir)
+	if err != nil {
+		return resultArtifactPaths{}, err
+	}
+	name := uniqueResultFileName(outcome.Result)
+	persistence := persistenceOutcome{Status: "disabled"}
+	if outcome.SaveError != nil {
+		persistence = persistenceOutcome{Status: "failed", ErrorCode: "storage_unavailable", ErrorMessage: "the scan result could not be stored"}
+	} else if storeName != "noop" {
+		persistence = persistenceOutcome{Status: "saved", ScanRunID: outcome.ScanRunID}
+	}
+	record := localScanRecord{RecordSchemaVersion: 1, CreatedAt: time.Now().UTC(), Result: scanservice.RedactedResult(outcome.Result), Persistence: persistence}
+	return publishResultArtifacts(dir, name, buildPersistedFindings(outcome.Result, persistRawSecrets), record)
+}
+
+func publishResultArtifacts(dir, name string, legacy []persistedFinding, record localScanRecord) (resultArtifactPaths, error) {
+	findingsPath, findingsErr := publishResultJSON(dir, name, legacy)
+	scanPath, scanErr := publishResultJSON(filepath.Join(dir, "scans"), name, record)
+	return resultArtifactPaths{Findings: findingsPath, Scan: scanPath}, errors.Join(findingsErr, scanErr)
 }

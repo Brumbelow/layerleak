@@ -32,6 +32,12 @@ versioning on the canonical `github.com/brumbelow/layerleak` v1 module line.
   SBOMs, SLSA provenance, GitHub attestations, and keyless Cosign signatures.
 - Versioned OpenAPI 3.1 specification, release manifest, third-party notices,
   and release verification documentation.
+- A versioned, always-redacted companion scan record under `findings/scans/`
+  containing image identity, coverage, diagnostics, counts, creation time, and
+  PostgreSQL persistence outcome.
+- Pinned CI validation for OpenAPI 3.1, real handler response fixtures,
+  documented response examples, local documentation links, and synthetic demo
+  structure.
 
 ### Changed
 
@@ -52,8 +58,16 @@ versioning on the canonical `github.com/brumbelow/layerleak` v1 module line.
   of a package-manager-installed PostgreSQL client.
 - Compose requires an explicit database password, pins PostgreSQL by
   multi-platform digest, exposes readiness, and drops all API capabilities.
-- GitHub Actions and container bases are immutable-pinned and release tags are
-  created only after staged artifacts pass verification.
+- GitHub Actions and container bases are immutable-pinned, and prepared source
+  tags are pushed only after staged artifacts pass verification.
+- Scan and database-save failures retain separate outcomes. Available redacted
+  results are still published locally after a database failure, and progress
+  rendering cannot prevent persistence or result publication.
+- API storage failures use neutral wording while retaining the result's actual
+  completed, partial, or failed status and existing machine-readable error.
+- Multi-platform container builds now compile each binary for the requested
+  target architecture and verify the image metadata and ELF architecture
+  before runtime smoke tests.
 
 ### Security
 
@@ -75,6 +89,9 @@ versioning on the canonical `github.com/brumbelow/layerleak` v1 module line.
   differ for uncommon contextual formats.
 - Deployments must apply migration 0004 before `/readyz` returns success.
 - Compose deployments must set `LAYERLEAK_DB_PASSWORD`.
+- Existing `findings/*.json` files remain findings arrays. The new object
+  record uses the same basename under `findings/scans/`, so non-recursive
+  consumers remain compatible.
 
 ## [v2.5.0] - 2026-05-20
 

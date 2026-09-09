@@ -703,3 +703,25 @@ func newJSONScanRequest(body string) *http.Request {
 	request.Header.Set("Content-Type", "application/json")
 	return request
 }
+
+func TestHandleStorageFailureDoesNotClaimScanCompleted(t *testing.T) {
+	for _, status := range []jobs.ResultStatus{jobs.ResultStatusCompleted, jobs.ResultStatusPartial, jobs.ResultStatusFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			scanner := &stubScanner{outcome: scanservice.Outcome{Result: jobs.Result{ResultSchemaVersion: 1, Status: status, RequestedReference: "library/app:latest"}}, err: &scanservice.Error{Phase: scanservice.ErrorPhaseSave, Err: errors.New("synthetic-private-storage-detail")}}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/scans", strings.NewReader(`{"reference":"library/app:latest"}`))
+			request.Header.Set("Content-Type", "application/json")
+			NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, request)
+			body := recorder.Body.String()
+			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"storage_unavailable"`) {
+				t.Fatalf("status=%d body=%s", recorder.Code, body)
+			}
+			if strings.Contains(body, "the scan completed") || strings.Contains(body, "synthetic-private-storage-detail") {
+				t.Fatalf("misleading or unsafe storage response: %s", body)
+			}
+			if !strings.Contains(body, `"status": "`+string(status)+`"`) {
+				t.Fatalf("scan status lost: %s", body)
+			}
+		})
+	}
+}

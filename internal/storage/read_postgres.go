@@ -36,7 +36,7 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT registry, repository, first_seen_at, last_seen_at
 		FROM repositories
-		ORDER BY last_seen_at DESC, repository ASC
+		ORDER BY last_seen_at DESC, repository ASC, registry ASC
 		LIMIT $1 OFFSET $2
 	`, limit, offset)
 	if err != nil {

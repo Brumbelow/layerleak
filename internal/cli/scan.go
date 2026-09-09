@@ -15,12 +15,17 @@ import (
 	"github.com/brumbelow/layerleak/internal/limits"
 	"github.com/brumbelow/layerleak/internal/manifest"
 	"github.com/brumbelow/layerleak/internal/scanservice"
+	"github.com/brumbelow/layerleak/internal/storage"
 	"github.com/spf13/cobra"
 )
 
 const repositorySweepWarning = "warning: --all-tags enumerates every public tag in the repository and may scan many distinct images"
 
 func newScanCmd() *cobra.Command {
+	return newScanCmdWithStore(newStore)
+}
+
+func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *cobra.Command {
 	var platform string
 	var format string
 	var tagPageSize int
@@ -83,7 +88,7 @@ func newScanCmd() *cobra.Command {
 
 			if allTags {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), repositorySweepWarning); err != nil {
-					return err
+					logger.Debug("progress update failed")
 				}
 			}
 
@@ -97,11 +102,11 @@ func newScanCmd() *cobra.Command {
 				phase:      "Starting",
 				message:    startingMessage,
 			}); err != nil {
-				return err
+				logger.Debug("progress update failed")
 			}
 			defer progress.Finish()
 
-			store, err := newStore(cfg)
+			store, err := openStore(cfg)
 			if err != nil {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
@@ -146,7 +151,9 @@ func newScanCmd() *cobra.Command {
 				},
 			})
 			result := outcome.Result
-			scanErr := err
+			scanErr := outcome.ScanError
+			saveErr := outcome.SaveError
+			operationErr := err
 			if scanErr == nil && result.Status != jobs.ResultStatusCompleted {
 				scanErr = &jobs.IncompleteError{
 					Status:                 result.Status,
@@ -154,16 +161,22 @@ func newScanCmd() *cobra.Command {
 					FailedManifestCount:    result.FailedManifestCount,
 				}
 			}
+			if operationErr == nil {
+				operationErr = scanErr
+			}
+			if ctx.Err() != nil {
+				operationErr = errors.Join(operationErr, ctx.Err())
+			}
 			acceptPartial := allowPartial && canAcceptPartial(ctx, result, scanErr)
-			if scanErr != nil && (!hasUsablePartialResult(result) || scanservice.IsSaveError(scanErr) || isCancellation(scanErr)) {
+			if isCancellation(scanErr) || ctx.Err() != nil || (scanErr != nil && !hasUsablePartialResult(result)) {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
-					message:    scanErr.Error(),
+					message:    operationErr.Error(),
 				}); updateErr != nil {
 					logger.Debug("progress update failed", "error", updateErr)
 				}
-				return scanErr
+				return operationErr
 			}
 			if scanErr != nil {
 				if updateErr := progress.Update(progressSnapshot{
@@ -194,11 +207,11 @@ func newScanCmd() *cobra.Command {
 				phase:            "Saving Results",
 				message:          "Writing findings file",
 			}); err != nil {
-				return err
+				logger.Debug("progress update failed")
 			}
 
-			resultPath, err := writeResultFile(cfg.FindingsDir, cfg.PersistRawSecrets, result)
-			if err != nil {
+			artifactPaths, publicationErr := writeResultArtifacts(cfg.FindingsDir, cfg.PersistRawSecrets, outcome, store.Name())
+			if publicationErr != nil {
 				if updateErr := progress.Update(progressSnapshot{
 					repository:       ref.Repository,
 					tagsCompleted:    result.TagsResolved,
@@ -209,53 +222,54 @@ func newScanCmd() *cobra.Command {
 					targetsTotal:     result.TargetCount,
 					findingsFound:    result.TotalFindings,
 					phase:            "Error",
-					message:          err.Error(),
+					message:          publicationErr.Error(),
 				}); updateErr != nil {
 					logger.Debug("progress update failed", "error", updateErr)
 				}
-				return err
 			}
 			if !cfg.PersistRawSecrets {
 				findings.StripRawSecrets(result.DetailedFindings)
 				findings.StripRawSecrets(result.SuppressedDetailedFindings)
 			}
 
-			if err := progress.Update(progressSnapshot{
-				repository:       ref.Repository,
-				tagsCompleted:    result.TagsResolved,
-				tagsFailed:       result.TagsFailed,
-				tagsTotal:        result.TagsEnumerated,
-				targetsCompleted: result.CompletedTargetCount,
-				targetsFailed:    result.FailedTargetCount,
-				targetsTotal:     result.TargetCount,
-				findingsFound:    result.TotalFindings,
-				phase:            "Saved",
-				message:          savedResultMessage(resultPath),
-			}); err != nil {
-				return err
+			if err := progress.Finish(); err != nil {
+				logger.Debug("progress update failed")
+			}
+			for _, artifact := range []struct{ label, path string }{
+				{"Findings", artifactPaths.Findings}, {"Scan record", artifactPaths.Scan},
+			} {
+				if artifact.path == "" {
+					continue
+				}
+				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", artifact.label, sanitizeProgressValue(artifact.path)); err != nil {
+					logger.Debug("artifact path reporting failed")
+				}
 			}
 
 			switch outputFormat {
 			case "json":
 				encoder := json.NewEncoder(cmd.OutOrStdout())
 				encoder.SetIndent("", "  ")
-				if err := encoder.Encode(result); err != nil {
-					return err
+				if err := encoder.Encode(scanservice.RedactedResult(result)); err != nil {
+					return errors.Join(operationErr, publicationErr, err)
 				}
 			case "summary":
 				if err := renderSummary(cmd.OutOrStdout(), result); err != nil {
-					return err
+					return errors.Join(operationErr, publicationErr, err)
 				}
 			default:
 				return fmt.Errorf("unsupported output format: %s", outputFormat)
 			}
 
+			if publicationErr != nil || saveErr != nil {
+				return errors.Join(operationErr, publicationErr)
+			}
 			if scanErr != nil && !acceptPartial {
 				return exitError{code: 1, message: scanErr.Error()}
 			}
 			if acceptPartial {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "warning: incomplete scan accepted by --allow-partial"); err != nil {
-					return err
+					logger.Debug("progress update failed")
 				}
 			}
 			if result.TotalFindings > 0 {

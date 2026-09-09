@@ -97,6 +97,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ScanResponse"
+              examples:
+                completed:
+                  summary: Completed scan with a persisted redacted result
+                  externalValue: ../testdata/api/scan-completed.json
+                  x-contract-fixture: ../testdata/api/scan-completed.json
         "400":
           $ref: "#/components/responses/BadRequest"
         "408":
@@ -114,7 +119,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          $ref: "#/components/responses/ScanStorageUnavailable"
         "504":
           $ref: "#/components/responses/Timeout"
 
@@ -374,43 +379,10 @@ components:
           schema:
             $ref: "#/components/schemas/ScanResponse"
           examples:
-            limitExceeded:
-              value:
-                scan_run_id: 42
-                result:
-                  result_schema_version: 1
-                  status: partial
-                  requested_reference: library/app:latest
-                  repository: library/app
-                  mode: reference
-                  target_count: 1
-                  completed_target_count: 0
-                  failed_target_count: 0
-                  partial_target_count: 1
-                  manifest_count: 2
-                  completed_manifest_count: 1
-                  failed_manifest_count: 1
-                  targets: []
-                  findings: []
-                  total_findings: 0
-                  unique_fingerprints: 0
-                  coverage:
-                    complete: false
-                    layers_seen: 1
-                    layers_completed: 1
-                    files_seen: 0
-                    files_scanned: 0
-                    files_skipped_oversize: 0
-                    files_excluded_binary: 0
-                    entries_skipped_unsafe: 0
-                    metadata_values_scanned: 0
-                    expanded_layer_bytes: 0
-                    retained_bytes: 0
-                    detector_input_bytes_scanned: 0
-                error:
-                  code: scan_limit_exceeded
-                  message: a configured scan limit was exceeded
-                  request_id: 4d349d31694459fb
+            partial:
+              summary: Partial scan with a persisted redacted result
+              externalValue: ../testdata/api/scan-partial.json
+              x-contract-fixture: ../testdata/api/scan-partial.json
     TooManyRequests:
       description: The configured in-process scan concurrency is exhausted.
       headers:
@@ -452,6 +424,20 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    ScanStorageUnavailable:
+      description: The scan returned a redacted result, but it could not be persisted.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ScanResponse"
+          examples:
+            storageError:
+              summary: Usable redacted result that could not be persisted
+              externalValue: ../testdata/api/scan-storage-error.json
+              x-contract-fixture: ../testdata/api/scan-storage-error.json
     Timeout:
       description: The bounded API scan exceeded its deadline.
       headers:
@@ -462,14 +448,19 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     BadGateway:
-      description: The upstream registry scan failed before a usable result was produced.
+      description: The upstream registry scan failed. A redacted failed result is included when available.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/ErrorEnvelope"
+            $ref: "#/components/schemas/ScanResponse"
+          examples:
+            failed:
+              summary: Failed scan with redacted coverage diagnostics
+              externalValue: ../testdata/api/scan-failed.json
+              x-contract-fixture: ../testdata/api/scan-failed.json
 
   schemas:
     Health:
@@ -541,6 +532,7 @@ components:
     ScanResult:
       type: object
       description: Stable redacted result schema. Additive result fields may be introduced within API v1.
+      additionalProperties: false
       required:
         - result_schema_version
         - status

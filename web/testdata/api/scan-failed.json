@@ -1,0 +1,60 @@
+{
+  "error": {
+    "code": "scan_failed",
+    "message": "the registry scan could not be completed",
+    "request_id": "contract-scan-failed"
+  },
+  "result": {
+    "completed_manifest_count": 0,
+    "completed_target_count": 0,
+    "coverage": {
+      "complete": false,
+      "detector_input_bytes_scanned": 32,
+      "entries_skipped_unsafe": 0,
+      "expanded_layer_bytes": 128,
+      "files_excluded_binary": 0,
+      "files_scanned": 0,
+      "files_seen": 2,
+      "files_skipped_oversize": 0,
+      "layers_completed": 0,
+      "layers_seen": 1,
+      "metadata_values_scanned": 1,
+      "retained_bytes": 64
+    },
+    "diagnostics": [
+      {
+        "code": "manifest_scan_failed",
+        "message": "scan step failed",
+        "scope": "manifest",
+        "subject": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "failed_manifest_count": 1,
+    "failed_target_count": 1,
+    "findings": [],
+    "manifest_count": 1,
+    "mode": "reference",
+    "partial_target_count": 0,
+    "repository": "library/example",
+    "requested_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "requested_reference": "library/example:latest",
+    "resolved_reference": "docker.io/library/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "result_schema_version": 1,
+    "status": "failed",
+    "target_count": 1,
+    "targets": [
+      {
+        "completed_manifest_count": 0,
+        "failed_manifest_count": 1,
+        "findings_count": 0,
+        "manifest_count": 1,
+        "reference": "docker.io/library/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resolved_reference": "docker.io/library/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "failed"
+      }
+    ],
+    "total_findings": 0,
+    "unique_fingerprints": 0
+  }
+}

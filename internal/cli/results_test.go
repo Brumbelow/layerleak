@@ -2,11 +2,16 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/brumbelow/layerleak/internal/scanner"
+	"github.com/brumbelow/layerleak/internal/scanservice"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/brumbelow/layerleak/internal/findings"
 	"github.com/brumbelow/layerleak/internal/jobs"
@@ -247,5 +252,171 @@ func testDetailedFinding(snippet, location string) findings.DetailedFinding {
 		SourceLocation: location,
 		MatchStart:     1,
 		MatchEnd:       10,
+	}
+}
+
+func TestWriteResultArtifactsPreservesCoverageAndRedactsRecord(t *testing.T) {
+	for _, status := range []jobs.ResultStatus{jobs.ResultStatusCompleted, jobs.ResultStatusPartial} {
+		for _, raw := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/raw=%v", status, raw), func(t *testing.T) {
+				dir := t.TempDir()
+				result := jobs.Result{ResultSchemaVersion: 1, Status: status, RequestedReference: "library/app:latest", ResolvedReference: "library/app@sha256:abc", Repository: "library/app", Mode: "reference", ManifestCount: 2, CompletedManifestCount: 1, Coverage: scanner.Coverage{Complete: status == jobs.ResultStatusCompleted}, Diagnostics: []scanner.Diagnostic{{Code: "test_failure", Message: "synthetic-private-error"}}}
+				paths, err := writeResultArtifacts(dir, raw, scanservice.Outcome{Result: result, SaveError: errors.New("synthetic-database-detail")}, "postgres")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if filepath.Base(paths.Findings) != filepath.Base(paths.Scan) || filepath.Dir(paths.Scan) != filepath.Join(dir, "scans") {
+					t.Fatalf("paths = %+v", paths)
+				}
+				body, err := os.ReadFile(paths.Scan)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var record struct {
+					Version     int         `json:"record_schema_version"`
+					CreatedAt   time.Time   `json:"created_at"`
+					Result      jobs.Result `json:"result"`
+					Persistence struct {
+						Status    string `json:"status"`
+						ScanRunID int64  `json:"scan_run_id"`
+						ErrorCode string `json:"error_code"`
+					} `json:"persistence"`
+				}
+				if err := json.Unmarshal(body, &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Version != 1 || record.CreatedAt.IsZero() || record.Result.Status != status || record.Result.RequestedReference != "library/app:latest" || record.Result.ResolvedReference != "library/app@sha256:abc" || record.Result.CompletedManifestCount != 1 || record.Result.Coverage.Complete != (status == jobs.ResultStatusCompleted) {
+					t.Fatalf("incomplete record: %s", body)
+				}
+				if record.Persistence.Status != "failed" || record.Persistence.ScanRunID != 0 || record.Persistence.ErrorCode != "storage_unavailable" {
+					t.Fatalf("persistence = %s", body)
+				}
+				if strings.Contains(string(body), "synthetic-private-error") || strings.Contains(string(body), "synthetic-database-detail") {
+					t.Fatalf("unsafe record: %s", body)
+				}
+				legacy, _ := os.ReadFile(paths.Findings)
+				if strings.TrimSpace(string(legacy)) != "[]" {
+					t.Fatalf("legacy zero findings = %s", legacy)
+				}
+				for _, path := range []string{dir, filepath.Join(dir, "scans"), paths.Findings, paths.Scan} {
+					info, err := os.Stat(path)
+					if err != nil || info.Mode().Perm()&0o077 != 0 {
+						t.Fatalf("insecure artifact %s: %v", path, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWriteResultArtifactsRawOptInDoesNotAffectCompanion(t *testing.T) {
+	item := testDetailedFinding("synthetic-raw-context", "file:1")
+	item.Value = "synthetic-raw-value"
+	result := jobs.Result{ResultSchemaVersion: 1, Status: jobs.ResultStatusCompleted, DetailedFindings: []findings.DetailedFinding{item}, Findings: []findings.Finding{item.Finding}}
+	paths, err := writeResultArtifacts(t.TempDir(), true, scanservice.Outcome{Result: result, ScanRunID: 42}, "postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := os.ReadFile(paths.Findings)
+	companion, _ := os.ReadFile(paths.Scan)
+	if !strings.Contains(string(legacy), "synthetic-raw-value") || !strings.Contains(string(legacy), "synthetic-raw-context") {
+		t.Fatal("legacy raw opt-in lost")
+	}
+	if strings.Contains(string(companion), "synthetic-raw-value") || strings.Contains(string(companion), "synthetic-raw-context") || !strings.Contains(string(companion), `"scan_run_id": 42`) {
+		t.Fatalf("companion = %s", companion)
+	}
+}
+
+func TestWriteResultArtifactsKeepsFindingsWhenCompanionFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "scans"), []byte("obstruction"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := writeResultArtifacts(dir, false, scanservice.Outcome{Result: jobs.Result{ResultSchemaVersion: 1}}, "noop")
+	if err == nil || paths.Findings == "" || paths.Scan != "" {
+		t.Fatalf("paths=%+v err=%v", paths, err)
+	}
+	body, readErr := os.ReadFile(paths.Findings)
+	if readErr != nil || !json.Valid(body) {
+		t.Fatalf("successful artifact removed: %v", readErr)
+	}
+}
+
+func TestPublishResultArtifactsKeepsRecordWhenFindingsCannotBePublished(t *testing.T) {
+	dir := t.TempDir()
+	collision := filepath.Join(dir, "scan.json")
+	if err := os.WriteFile(collision, []byte("existing findings"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := publishResultArtifacts(dir, "scan.json", []persistedFinding{}, localScanRecord{RecordSchemaVersion: 1})
+	if err == nil || paths.Findings != "" || paths.Scan != filepath.Join(dir, "scans", "scan.json") {
+		t.Fatalf("paths=%+v err=%v", paths, err)
+	}
+	body, _ := os.ReadFile(collision)
+	if string(body) != "existing findings" {
+		t.Fatalf("existing artifact overwritten: %s", body)
+	}
+	body, readErr := os.ReadFile(paths.Scan)
+	if readErr != nil || !json.Valid(body) {
+		t.Fatalf("record not preserved: %v", readErr)
+	}
+}
+
+func TestWriteResultArtifactsConcurrentBasenames(t *testing.T) {
+	dir := t.TempDir()
+	const writers = 16
+	var group sync.WaitGroup
+	results := make(chan resultArtifactPaths, writers)
+	failures := make(chan error, writers)
+	for range writers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			paths, err := writeResultArtifacts(dir, false, scanservice.Outcome{Result: jobs.Result{ResultSchemaVersion: 1, Status: jobs.ResultStatusCompleted}}, "noop")
+			if err != nil {
+				failures <- err
+			} else {
+				results <- paths
+			}
+		}()
+	}
+	group.Wait()
+	close(results)
+	close(failures)
+	for err := range failures {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for paths := range results {
+		name := filepath.Base(paths.Findings)
+		if seen[name] || name != filepath.Base(paths.Scan) {
+			t.Fatalf("colliding or unmatched pair: %+v", paths)
+		}
+		seen[name] = true
+		body, err := os.ReadFile(paths.Scan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record localScanRecord
+		if err := json.Unmarshal(body, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Persistence.Status != "disabled" || record.Persistence.ScanRunID != 0 {
+			t.Fatalf("persistence=%+v", record.Persistence)
+		}
+	}
+	if len(seen) != writers {
+		t.Fatalf("published pairs=%d", len(seen))
+	}
+	for _, path := range []string{dir, filepath.Join(dir, "scans")} {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".layerleak-result-") {
+				t.Fatalf("temporary file left: %s", entry.Name())
+			}
+		}
 	}
 }

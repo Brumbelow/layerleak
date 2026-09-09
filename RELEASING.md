@@ -29,6 +29,90 @@ valid v2 Go module releases. Generate new release notes from v1.0.0, not the
 historical GitHub “latest” release. The stable v1.1.0 release will restore the
 GitHub latest designation to the canonical module line.
 
+## Reviewed release tools
+
+The release workflow provisions the following exact versions on Linux x86_64:
+
+| Tool | Version | Provisioning |
+| --- | --- | --- |
+| GitHub CLI | [2.100.0](https://github.com/cli/cli/releases/tag/v2.100.0) | Official archive and repository-pinned SHA-256 |
+| Cosign | [3.0.2](https://github.com/sigstore/cosign/releases/tag/v3.0.2) | Official binary and repository-pinned SHA-256 |
+| Grype | [0.99.1](https://github.com/anchore/grype/releases/tag/v0.99.1) | Official archive and repository-pinned SHA-256; scan action selects the same version |
+| Docker Buildx | [0.37.0](https://github.com/docker/buildx/releases/tag/v0.37.0) | Explicit version on every pinned setup action |
+| BuildKit | [0.33.0](https://github.com/moby/buildkit/releases/tag/v0.33.0) | Official multi-platform image pinned by digest in `BUILDKIT_IMAGE` |
+
+These pins define the reviewed capability set, not an automatic claim that a
+future release is safe. Updates require a reviewed change to the installer,
+workflow, preflight, and this table, followed by capability and regression tests.
+Do not accept arbitrary newer versions or downgrade around a failed check.
+GitHub CLI versions before 2.93.0 are unsuitable for this procedure because of
+the [verification-command credential fix](https://github.com/cli/cli/releases/tag/v2.93.0).
+The preflight accepts exactly 2.100.0, including its release-verification and
+attestation commands and the required `isImmutable` JSON field.
+
+Install the compatible GitHub CLI without changing the system installation:
+
+```bash
+release_tools="${HOME}/.local/share/layerleak/release-tools/2026-09-09"
+scripts/release-tools.sh "${release_tools}" gh
+export PATH="${release_tools}/bin:${PATH}"
+python3 scripts/release-preflight.py tools
+```
+
+The installer supports Linux x86_64 and fails explicitly on other hosts. Its
+optional `all` argument also installs Cosign and Grype. It checks downloaded
+bytes before extracting or executing tools, and a cached checksum mismatch
+fails closed. Buildx is provisioned separately by the workflow's pinned setup
+action. `python3 scripts/release-preflight.py tools --full` also checks those
+three tools, the Docker daemon, Git, GPG, jq, and curl. Use the full check only
+with the exact Buildx version available to the Docker CLI; the smaller `tools`
+check is sufficient to establish local GitHub CLI compatibility.
+
+The initial read-only workflow job runs the full preflight before image staging
+or any other publication writes. Jobs that use GitHub CLI provision it again in
+an isolated runner directory. The installer and capability checks do not
+publish a release or prove that repository permissions and external signing,
+registry, attestation, or Go proxy services will succeed. Reusable source
+verification continues to provision Go from `go.mod`; ordinary shell tools and
+the Docker daemon come from `ubuntu-24.04` and are checked before staging.
+
+## Source-tag handoff
+
+After authorization for the selected source and version, prepare the handoff
+from a clean checkout. For an RC, `source_sha` must be the current `origin/main`
+head and the workflow execution commit. For stable, use the accepted RC's exact
+commit. Prepare the tag locally; only the protected workflow publishes its ref.
+
+```bash
+version=v1.1.0-rc.1
+source_sha='<full-approved-source-sha>'
+git verify-commit "${source_sha}"
+git tag -s "${version}" "${source_sha}" -m "${version}"
+git verify-tag "${version}"
+git cat-file tag "refs/tags/${version}" | base64 -w0 > .git/release-source-tag.txt
+python3 scripts/release-preflight.py tag \
+  --version "${version}" --source "${source_sha}" < .git/release-source-tag.txt
+```
+
+Supply the single line from `.git/release-source-tag.txt` as the workflow's
+`source_tag` input. The handoff is public metadata, contains no credentials,
+and is limited to 16,384 base64 characters. Keep the exact file for retries;
+do not recreate the object, move the local tag, or push it manually.
+
+The initial gate checks the exact version, direct commit target, object
+structure, and repository verification policy before image staging. The
+protected publish job repeats verification, then publishes that exact object
+without force or a bypass. An existing remote tag is accepted only if its
+object ID is identical, even when another tag object would name the same
+commit. The workflow does not create source-tag objects or load private
+material. Changes to `scripts/release-source-key.asc` and its corresponding
+preflight policy require the same protected source review as the workflow.
+
+A final candidate commit and its handoff are required before dispatch. Local
+preparation checks do not establish a successful release rehearsal, and the
+protected environment still requires review of the run's source, image digest,
+scan results, and evidence before publication.
+
 ## One-time repository settings
 
 Complete these settings before the first RC:
@@ -44,7 +128,8 @@ Complete these settings before the first RC:
 5. Add a tag ruleset for `v1.*` that blocks updates, deletion, and non-fast-
    forward changes with no bypass. Personal repositories cannot select the
    GitHub Actions integration as a ruleset bypass actor, so leave initial tag
-   creation enabled for the protected workflow and do not create tags manually.
+   creation enabled for the protected workflow. Prepare only the local handoff
+   described above; do not push release tags manually.
 6. Enable dependency graph, Dependabot, secret scanning, push protection, code
    scanning, and artifact attestations.
 7. Make `ghcr.io/brumbelow/layerleak` public after its initial publication.
@@ -62,11 +147,12 @@ attestation immediately after publication.
 
 ## What the workflow enforces
 
-The release workflow accepts a version and full source SHA, then:
+The release workflow accepts a version, full source SHA, and source-tag handoff, then:
 
-1. validates canonical v1 semver, module identity, `main` ancestry, existing
-   tags, existing candidate/release immutability, increasing stable versions,
-   and RC/stable relationships;
+1. checks the reviewed release tools, validates the source-tag handoff,
+   canonical v1 semver, module identity, `main` ancestry, existing tags,
+   candidate/release immutability, increasing stable versions, and RC/stable
+   relationships;
 2. runs the reusable full gate: format, module integrity, vet, normal/race
    tests, linked-dependency license policy and inventory, PostgreSQL
    integration, migration idempotence, purge confirmation, Compose validation,
@@ -79,11 +165,13 @@ The release workflow accepts a version and full source SHA, then:
 6. creates source-bound GitHub artifact attestations for an RC, carries those
    exact attestations into stable, then keyless-signs and verifies the image
    index and platform manifests with Cosign;
-7. pulls the exact registry digest and repeats migration, database, liveness,
+7. pulls the exact registry digest, checks the image metadata and every
+   executable ELF architecture, and repeats migration, database, liveness,
    readiness, and restrictive-runtime smoke on both architectures;
 8. pauses at the protected `release` environment;
-9. creates the source tag, promotes the already tested digest without replacing
-   a conflicting version tag, and publishes an immutable GitHub release with
+9. publishes the verified source-tag handoff, promotes the tested digest
+   without replacing a conflicting version tag, and publishes an immutable
+   GitHub release with
    checksums and evidence;
 10. verifies the Go proxy, image tags, release immutability and attestation,
     signature, and source-bound image attestations after publication.
@@ -120,11 +208,13 @@ LAYERLEAK_DB_PASSWORD=release-check docker compose --profile tools config --quie
 git rev-parse origin/main
 ```
 
-6. In **Actions → Release → Run workflow**, select `main` and enter:
+6. Prepare the [source-tag handoff](#source-tag-handoff) for that version and
+   SHA. In **Actions → Release → Run workflow**, select `main` and enter:
 
 ```text
 version: v1.1.0-rc.1
 source_sha: <the full main SHA>
+source_tag: <the single-line handoff>
 candidate_version: <leave empty>
 ```
 
@@ -156,8 +246,9 @@ Confirm:
   attestation manifests;
 - `latest` did not move;
 - migration succeeds twice against a fresh PostgreSQL 16.13 database;
-- `/health` and `/livez` stay live, `/readyz` is unavailable before migration,
-  and `/readyz` becomes healthy after schema 0004 is installed;
+- the API refuses startup before migration; after schema 0004 is installed,
+  `/health`, `/livez`, and `/readyz` become healthy. Readiness reports later
+  database or schema degradation independently of liveness;
 - signatures and GitHub attestations verify against the exact digest and
   `container-release.yml@refs/heads/main` identity and the RC source SHA;
 - attached SBOM/provenance/checksum files match `release-manifest.json`.
@@ -171,12 +262,13 @@ failure as release-blocking. Any code or image change requires
 
 ## Promote v1.1.0
 
-Once an RC is accepted, run the same workflow from `main` with the RC's exact
-source SHA:
+Once an RC is accepted, prepare a new handoff for the stable version using the
+RC's exact source SHA, then run the same workflow from `main`:
 
 ```text
 version: v1.1.0
 source_sha: <accepted RC source SHA>
+source_tag: <the stable version handoff>
 candidate_version: v1.1.0-rc.1
 ```
 
@@ -246,7 +338,8 @@ sha256sum --check SHA256SUMS
   release exists, rerun the failed workflow run from the Actions UI with the
   same inputs. This keeps the execution commit equal to the RC source SHA while
   the release workflow definition still comes from protected `main`.
-  Validation permits an existing tag only when it points to that exact commit.
+  Validation permits an existing tag only when its object ID matches the
+  original handoff, which also identifies that exact commit.
   A version image already promoted by the failed attempt is reused only after
   its workflow identity and source-bound attestation match the requested
   commit. Its digest is recorded and rechecked; the version tag is never

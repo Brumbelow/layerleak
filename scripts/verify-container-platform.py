@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess  # Only resolved Docker runs with separate arguments and shell=False.  # nosec B404
@@ -29,18 +30,26 @@ def docker(*arguments):
     executable = shutil.which('docker', path=search_path)
     if executable is None:
         raise ValueError('docker executable unavailable')
-    # The executable is fixed Docker; callers separate image/container operands with --.
+    # Fixed Docker, shell=False, and -- keep validated operands as data; the rule requires a literal executable.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-tainted-env-args.dangerous-subprocess-use-tainted-env-args
     result = subprocess.run([executable, *arguments], check=True, shell=False, text=True,  # nosec B603
                             capture_output=True, timeout=120)
     return result.stdout.strip()
 
 
 def verify_image(image, platform):
+    # Bound release input characters and size; Docker validates the complete reference grammar.
+    if re.fullmatch(r'[A-Za-z0-9\[][A-Za-z0-9._:/@+\[\]-]{0,1023}', image) is None:
+        raise ValueError('image reference must use at most 1024 ASCII reference characters')
+    if platform not in ('linux/amd64', 'linux/arm64'):
+        raise ValueError(f'unsupported platform: {platform}')
     operating_system, architecture = platform.split('/')
     metadata = json.loads(docker('image', 'inspect', '--', image))[0]
     if metadata['Os'] != operating_system or metadata['Architecture'] != architecture:
         raise ValueError(f'image metadata does not match {platform}')
     container = docker('create', '--platform', platform, '--', image)
+    if re.fullmatch(r'[a-f0-9]{64}', container) is None:
+        raise ValueError('docker create returned an invalid container ID')
     try:
         with tempfile.TemporaryDirectory(prefix='layerleak-platform-') as directory:
             for executable in EXECUTABLES:

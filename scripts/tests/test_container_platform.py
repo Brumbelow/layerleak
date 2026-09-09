@@ -42,24 +42,63 @@ class ContainerPlatformTests(unittest.TestCase):
 
     def test_image_operands_are_separated_from_docker_options(self):
         commands = []
+        container_id = 'a1' * 32
 
         def docker(*arguments):
             commands.append(arguments)
             if arguments[:2] == ('image', 'inspect'):
                 return '[{"Os": "linux", "Architecture": "amd64"}]'
             if arguments[0] == 'create':
-                return 'container-id'
+                return container_id
             if arguments[0] == 'cp':
                 Path(arguments[-1]).write_bytes(self.header(62))
             return ''
 
-        with patch.object(self.module, 'docker', side_effect=docker):
-            self.module.verify_image('--fixture-image', 'linux/amd64')
-        self.assertEqual(commands[0], ('image', 'inspect', '--', '--fixture-image'))
-        self.assertEqual(commands[1], ('create', '--platform', 'linux/amd64', '--', '--fixture-image'))
-        for command in commands[2:-1]:
-            self.assertEqual(command[:2], ('cp', '--'))
-        self.assertEqual(commands[-1], ('rm', '--', 'container-id'))
+        images = ('layerleak-ci:amd64', 'registry.example:5000/team/layerleak:RC-1',
+                  'ghcr.io/brumbelow/layerleak@sha256:' + 'a1' * 32,
+                  '[2001:db8::1]:5000/team/layerleak:amd64')
+        for image in images:
+            with self.subTest(image=image), patch.object(self.module, 'docker', side_effect=docker):
+                commands.clear()
+                self.module.verify_image(image, 'linux/amd64')
+                self.assertEqual(commands[0], ('image', 'inspect', '--', image))
+                self.assertEqual(commands[1], ('create', '--platform', 'linux/amd64', '--', image))
+                for command in commands[2:-1]:
+                    self.assertEqual(command[:2], ('cp', '--'))
+                    self.assertTrue(command[2].startswith(container_id + ':/usr/local/bin/'))
+                self.assertEqual(commands[-1], ('rm', '--', container_id))
+
+    def test_invalid_image_is_rejected_before_docker_runs(self):
+        images = ('', '--help', 'image name', 'image;name', 'image$name', 'image\nname',
+                  'image\x00name', 'im\N{LATIN SMALL LETTER A WITH ACUTE}ge', 'a' * 1025)
+        for image in images:
+            with (self.subTest(image=image),
+                  patch.object(self.module.subprocess, 'run', side_effect=AssertionError('Docker must not run')),
+                  self.assertRaisesRegex(ValueError, 'image reference')):
+                self.module.verify_image(image, 'linux/amd64')
+
+    def test_unsupported_platform_is_rejected_before_docker_runs(self):
+        platforms = ('linux/s390x', 'darwin/amd64', 'linux/amd64/extra')
+        for platform in platforms:
+            with (self.subTest(platform=platform),
+                  patch.object(self.module.subprocess, 'run', side_effect=AssertionError('Docker must not run')),
+                  self.assertRaisesRegex(ValueError, 'unsupported platform')):
+                self.module.verify_image('layerleak-ci:amd64', platform)
+
+    def test_invalid_container_id_is_never_used_for_copy_or_removal(self):
+        invalid_ids = ('', 'a' * 12, 'a' * 63, 'a' * 65, 'A' * 64,
+                       '--help', 'a' * 64 + '\nextra', 'a' * 32 + '\n' + 'a' * 32)
+        for container_id in invalid_ids:
+            def docker(*arguments):
+                if arguments[:2] == ('image', 'inspect'):
+                    return '[{"Os": "linux", "Architecture": "amd64"}]'
+                if arguments[0] == 'create':
+                    return container_id
+                self.fail('invalid container ID reached a Docker copy or removal operation')
+
+            with (self.subTest(container_id=container_id), patch.object(self.module, 'docker', side_effect=docker),
+                  self.assertRaisesRegex(ValueError, 'invalid container ID')):
+                self.module.verify_image('layerleak-ci:amd64', 'linux/amd64')
 
     def test_matching_64_bit_executables_pass(self):
         self.module.verify_elf_header(self.header(62), 'amd64')

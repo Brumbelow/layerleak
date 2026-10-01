@@ -1,0 +1,171 @@
+package source
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+)
+
+// expiringContext reports no error for its first live Err calls and
+// context.DeadlineExceeded from then on, so a test can make a deadline pass at
+// a deterministic point inside a source operation.
+type expiringContext struct {
+	context.Context
+	live  int
+	calls int
+}
+
+func (c *expiringContext) Err() error {
+	c.calls++
+	if c.calls > c.live {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+// repeatedLayerArchive writes a docker save archive whose single image lists
+// one layer entry references times, with a layer of layerBytes bytes.
+func repeatedLayerArchive(t *testing.T, references, layerBytes int) string {
+	t.Helper()
+	layers := make([]string, references)
+	for index := range layers {
+		layers[index] = "l/layer.tar"
+	}
+	archive := filepath.Join(t.TempDir(), "repeated.tar")
+	writeFile(t, archive, tarBytes(t, []tarFile{
+		{name: "config.json", body: configJSON(t, linuxAMD64)},
+		{name: "l/layer.tar", body: []byte(strings.Repeat("x", layerBytes))},
+		{name: dockerManifestName, body: mustJSON(t, []dockerManifestEntry{{Config: "config.json", RepoTags: []string{"app:1.0"}, Layers: layers}})},
+	}))
+	return archive
+}
+
+// A manifest.json that lists one layer thousands of times must not hash the
+// layer once per reference past the scan deadline.
+func TestDockerArchiveRepeatedLayerHonoursTheDeadline(t *testing.T) {
+	archive := repeatedLayerArchive(t, 2000, 1<<20)
+	source := openSource(t, "docker-archive:"+archive, Options{})
+	ctx := &expiringContext{Context: context.Background(), live: 1}
+
+	started := time.Now()
+	_, err := source.FetchManifest(ctx, "", "app:1.0")
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchManifest() past the deadline error = %v after %s", err, elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("FetchManifest() returned %s after the deadline passed", elapsed)
+	}
+}
+
+// The deadline is also checked while one large entry is being hashed.
+func TestDockerArchiveHashingStopsMidEntryAtTheDeadline(t *testing.T) {
+	archive := repeatedLayerArchive(t, 1, 3*hashChunkBytes)
+	opened := openSource(t, "docker-archive:"+archive, Options{})
+	docker, ok := opened.(*dockerArchive)
+	if !ok {
+		t.Fatalf("Open() = %T, want *dockerArchive", opened)
+	}
+	ctx := &expiringContext{Context: context.Background(), live: 1}
+	docker.mu.Lock()
+	_, err := docker.describeEntry(ctx, "l/layer.tar", "")
+	docker.mu.Unlock()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("describeEntry() past the deadline error = %v", err)
+	}
+	if ctx.calls > 3 {
+		t.Fatalf("describeEntry() read %d chunks past the deadline", ctx.calls-1)
+	}
+}
+
+// A repeated layer reference is hashed once, across every image of the
+// archive, and the synthesised manifest still lists every reference.
+func TestDockerArchiveHashesARepeatedLayerOnce(t *testing.T) {
+	layers := make([]string, 2000)
+	for index := range layers {
+		layers[index] = "./l/layer.tar"
+	}
+	archive := filepath.Join(t.TempDir(), "shared.tar")
+	writeFile(t, archive, tarBytes(t, []tarFile{
+		{name: "one.json", body: configJSON(t, linuxAMD64, "IMAGE=one")},
+		{name: "two.json", body: configJSON(t, linuxAMD64, "IMAGE=two")},
+		{name: "l/layer.tar", body: []byte(strings.Repeat("x", 1<<20))},
+		{name: dockerManifestName, body: mustJSON(t, []dockerManifestEntry{
+			{Config: "one.json", RepoTags: []string{"app:one"}, Layers: layers},
+			{Config: "two.json", RepoTags: []string{"app:two"}, Layers: []string{"l/layer.tar"}},
+		})},
+	}))
+	opened := openSource(t, "docker-archive:"+archive, Options{})
+	docker, ok := opened.(*dockerArchive)
+	if !ok {
+		t.Fatalf("Open() = %T, want *dockerArchive", opened)
+	}
+	ctx := context.Background()
+
+	two, err := opened.FetchManifest(ctx, "", "app:two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	one, err := opened.FetchManifest(ctx, "", "app:one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := manifest.ParseDocument(one.MediaType, one.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Manifest.Layers) != len(layers) {
+		t.Fatalf("synthesised manifest lists %d layers, want %d", len(document.Manifest.Layers), len(layers))
+	}
+	if docker.hashedEntries != 3 {
+		t.Fatalf("hashed %d archive entries, want 3 (two configs and one layer)", docker.hashedEntries)
+	}
+	if _, err := opened.FetchManifest(ctx, "", two.Digest); err != nil {
+		t.Fatalf("FetchManifest(@digest) error = %v", err)
+	}
+	if docker.hashedEntries != 3 {
+		t.Fatalf("digest selection hashed again: %d entries", docker.hashedEntries)
+	}
+}
+
+// An image whose layer list is longer than MaxImageLayers is refused before a
+// byte of it is hashed, with the scanner's image_layers limit kind.
+func TestDockerArchiveBoundsTheLayerList(t *testing.T) {
+	archive := repeatedLayerArchive(t, 4, 1024)
+	opened := openSource(t, "docker-archive:"+archive, Options{MaxImageLayers: 3})
+	_, err := opened.FetchManifest(context.Background(), "", "app:1.0")
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok || exceeded.Kind != limits.Kind("image_layers") || exceeded.Limit != 3 {
+		t.Fatalf("FetchManifest() over the layer limit error = %v", err)
+	}
+	docker, ok := opened.(*dockerArchive)
+	if !ok {
+		t.Fatalf("Open() = %T, want *dockerArchive", opened)
+	}
+	if docker.hashedEntries != 0 {
+		t.Fatalf("hashed %d entries before refusing the layer list", docker.hashedEntries)
+	}
+
+	atLimit := openSource(t, "docker-archive:"+archive, Options{MaxImageLayers: 4})
+	if _, err := atLimit.FetchManifest(context.Background(), "", "app:1.0"); err != nil {
+		t.Fatalf("FetchManifest() at the layer limit error = %v", err)
+	}
+}
+
+// The synthesised manifest is a document like any other and is bounded by
+// MaxManifestBytes even when manifest.json itself fits.
+func TestDockerArchiveBoundsTheSynthesisedManifest(t *testing.T) {
+	archive := repeatedLayerArchive(t, 64, 1024)
+	opened := openSource(t, "docker-archive:"+archive, Options{MaxManifestBytes: 2048})
+	_, err := opened.FetchManifest(context.Background(), "", "app:1.0")
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok || exceeded.Kind != limits.KindManifestBytes || exceeded.Limit != 2048 {
+		t.Fatalf("FetchManifest() with an oversize synthesised manifest error = %v", err)
+	}
+}

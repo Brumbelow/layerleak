@@ -204,7 +204,7 @@ func (s *Service) blobSource(request Request) (scanner.BlobSource, func(), error
 		if !request.Credential.IsZero() {
 			return nil, nil, ErrCredentialForLocalSource
 		}
-		local, err := source.Open(request.Reference, source.Options{MaxManifestBytes: s.config.MaxManifestBytes})
+		local, err := source.Open(request.Reference, source.Options{MaxManifestBytes: s.config.MaxManifestBytes, MaxImageLayers: s.config.MaxImageLayers})
 		if err != nil {
 			return nil, nil, fmt.Errorf("open local image source: %w", err)
 		}

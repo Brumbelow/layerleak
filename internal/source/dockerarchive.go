@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
 )
@@ -21,6 +22,15 @@ import (
 const (
 	dockerManifestName     = "manifest.json"
 	dockerRepositoriesName = "repositories"
+	// hashChunkBytes is the read size while an archive entry is hashed; the
+	// context is checked before every chunk.
+	hashChunkBytes = 256 << 10
+	// minLayerDescriptorJSONBytes is a lower bound on the encoded size of one
+	// layer descriptor in a synthesised manifest: the shortest layer media
+	// type alone is 43 bytes and a sha256 digest 71. It lets a layer list
+	// whose manifest could never fit MaxManifestBytes be refused before any
+	// layer is hashed.
+	minLayerDescriptorJSONBytes = 100
 )
 
 // dockerManifestEntry is one image of a `docker save` manifest.json.
@@ -53,6 +63,20 @@ type dockerArchive struct {
 	mu     sync.Mutex
 	images map[int]*dockerImage
 	blobs  map[string]string
+	// hashed memoises the hash of every archive entry by clean name, across
+	// all images, so an entry referenced many times is read once.
+	hashed map[string]hashedEntry
+	// hashedEntries counts the entries actually read and hashed.
+	hashedEntries int
+	hashBuffer    []byte
+}
+
+// hashedEntry is what hashing an archive entry learns: its digest, its size
+// and the layer media type its first bytes indicate.
+type hashedEntry struct {
+	digest         string
+	size           int64
+	layerMediaType string
 }
 
 func openDockerArchive(archivePath string, options Options) (Source, error) {
@@ -93,7 +117,7 @@ func newDockerArchive(location string, index *tarIndex, options Options) (*docke
 		}
 	}
 
-	source := &dockerArchive{location: location, archive: index, options: options, entries: entries, images: make(map[int]*dockerImage), blobs: make(map[string]string)}
+	source := &dockerArchive{location: location, archive: index, options: options, entries: entries, images: make(map[int]*dockerImage), blobs: make(map[string]string), hashed: make(map[string]hashedEntry)}
 	if repositoriesBody, err := index.readAll(dockerRepositoriesName, options.MaxManifestBytes); err == nil {
 		// The legacy repositories map is optional; a malformed one is ignored
 		// because manifest.json is authoritative.
@@ -154,17 +178,17 @@ func normalizeImageName(name string) string {
 // selectImage resolves an identifier to a manifest.json entry: the only entry
 // for "", the entry carrying the image name, or the entry whose synthesised
 // manifest has the digest.
-func (d *dockerArchive) selectImage(identifier string) (*dockerImage, error) {
+func (d *dockerArchive) selectImage(ctx context.Context, identifier string) (*dockerImage, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		if len(d.entries) != 1 {
 			return nil, fmt.Errorf("docker archive %s holds %d images; select one with :<repo:tag> (available: %s) or @<digest>", d.location, len(d.entries), describeTags(d.allTags()))
 		}
-		return d.image(0)
+		return d.image(ctx, 0)
 	}
 	if manifest.ValidateDigest(identifier) == nil {
 		for index := range d.entries {
-			image, err := d.image(index)
+			image, err := d.image(ctx, index)
 			if err != nil {
 				return nil, err
 			}
@@ -186,7 +210,7 @@ func (d *dockerArchive) selectImage(identifier string) (*dockerImage, error) {
 	}
 	switch len(matches) {
 	case 1:
-		return d.image(matches[0])
+		return d.image(ctx, matches[0])
 	case 0:
 		return nil, fmt.Errorf("docker archive %s has no image named %q (available: %s)", d.location, identifier, describeTags(d.allTags()))
 	default:
@@ -195,21 +219,33 @@ func (d *dockerArchive) selectImage(identifier string) (*dockerImage, error) {
 }
 
 // image builds (once) the OCI view of a manifest.json entry. Building hashes
-// the config and every layer of that image, streaming from the archive.
-func (d *dockerArchive) image(index int) (*dockerImage, error) {
+// the config and every distinct layer entry of that image, streaming from the
+// archive and stopping when ctx ends. A layer list longer than
+// Options.MaxImageLayers, or one whose manifest could not fit
+// Options.MaxManifestBytes, is refused before anything is hashed.
+func (d *dockerArchive) image(ctx context.Context, index int) (*dockerImage, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if image, ok := d.images[index]; ok {
 		return image, nil
 	}
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	entry := d.entries[index]
+	if d.options.MaxImageLayers > 0 && len(entry.Layers) > d.options.MaxImageLayers {
+		return nil, fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.Kind("image_layers"), int64(d.options.MaxImageLayers), "image manifest"))
+	}
+	if int64(len(entry.Layers)) > d.options.MaxManifestBytes/minLayerDescriptorJSONBytes {
+		return nil, fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.KindManifestBytes, d.options.MaxManifestBytes, "synthesised image manifest"))
+	}
 	blobs := make(map[string]string, len(entry.Layers)+1)
 
 	configName, err := cleanArchivePath(entry.Config)
 	if err != nil {
 		return nil, fmt.Errorf("docker archive %s: image %d config: %w", d.location, index, err)
 	}
-	configDescriptor, err := d.describeEntry(configName, manifest.MediaTypeDockerContainerConfig)
+	configDescriptor, err := d.describeEntry(ctx, configName, manifest.MediaTypeDockerContainerConfig)
 	if err != nil {
 		return nil, fmt.Errorf("docker archive %s: image %d config: %w", d.location, index, err)
 	}
@@ -217,11 +253,14 @@ func (d *dockerArchive) image(index int) (*dockerImage, error) {
 
 	layers := make([]manifest.Descriptor, 0, len(entry.Layers))
 	for position, layerPath := range entry.Layers {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
 		layerName, err := cleanArchivePath(layerPath)
 		if err != nil {
 			return nil, fmt.Errorf("docker archive %s: image %d layer %d: %w", d.location, index, position, err)
 		}
-		descriptor, err := d.describeEntry(layerName, "")
+		descriptor, err := d.describeEntry(ctx, layerName, "")
 		if err != nil {
 			return nil, fmt.Errorf("docker archive %s: image %d layer %d: %w", d.location, index, position, err)
 		}
@@ -241,6 +280,9 @@ func (d *dockerArchive) image(index int) (*dockerImage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker archive %s: encode manifest: %w", d.location, err)
 	}
+	if int64(len(body)) > d.options.MaxManifestBytes {
+		return nil, fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.KindManifestBytes, d.options.MaxManifestBytes, "synthesised image manifest"))
+	}
 	digest, err := manifest.DigestBytes("sha256", body)
 	if err != nil {
 		return nil, err
@@ -253,31 +295,52 @@ func (d *dockerArchive) image(index int) (*dockerImage, error) {
 	return image, nil
 }
 
-// describeEntry hashes one archive entry into a descriptor. An empty media
-// type means a layer, whose compression is sniffed from the first bytes.
-func (d *dockerArchive) describeEntry(name, mediaType string) (manifest.Descriptor, error) {
-	body, err := d.archive.open(name)
-	if err != nil {
-		return manifest.Descriptor{}, err
-	}
-	defer func() { _ = body.Close() }()
-	hasher := sha256.New()
-	head := make([]byte, 4)
-	headLength, err := io.ReadFull(body, head)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return manifest.Descriptor{}, fmt.Errorf("read %s: %w", name, err)
-	}
-	_, _ = hasher.Write(head[:headLength])
-	if _, err := io.Copy(hasher, body); err != nil {
-		return manifest.Descriptor{}, fmt.Errorf("read %s: %w", name, err)
+// describeEntry returns the descriptor of one archive entry, hashing it the
+// first time any image names it. An empty media type means a layer, whose
+// compression is sniffed from the first bytes. The caller holds d.mu.
+func (d *dockerArchive) describeEntry(ctx context.Context, name, mediaType string) (manifest.Descriptor, error) {
+	hashed, ok := d.hashed[name]
+	if !ok {
+		var err error
+		hashed, err = d.hashEntry(ctx, name)
+		if err != nil {
+			return manifest.Descriptor{}, err
+		}
+		d.hashed[name] = hashed
 	}
 	if mediaType == "" {
-		mediaType = layerMediaTypeFor(head[:headLength])
+		mediaType = hashed.layerMediaType
 	}
-	return manifest.Descriptor{
-		MediaType: mediaType,
-		Digest:    "sha256:" + hex.EncodeToString(hasher.Sum(nil)),
-		Size:      body.Size(),
+	return manifest.Descriptor{MediaType: mediaType, Digest: hashed.digest, Size: hashed.size}, nil
+}
+
+// hashEntry streams one archive entry through SHA-256, checking ctx before
+// every chunk so a deadline stops it mid-entry. The caller holds d.mu.
+func (d *dockerArchive) hashEntry(ctx context.Context, name string) (hashedEntry, error) {
+	body, err := d.archive.open(name)
+	if err != nil {
+		return hashedEntry{}, err
+	}
+	defer func() { _ = body.Close() }()
+	d.hashedEntries++
+	reader := contextReader{ctx: ctx, reader: body}
+	hasher := sha256.New()
+	head := make([]byte, 4)
+	headLength, err := io.ReadFull(reader, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return hashedEntry{}, fmt.Errorf("read %s: %w", name, err)
+	}
+	_, _ = hasher.Write(head[:headLength])
+	if d.hashBuffer == nil {
+		d.hashBuffer = make([]byte, hashChunkBytes)
+	}
+	if _, err := io.CopyBuffer(hasher, reader, d.hashBuffer); err != nil {
+		return hashedEntry{}, fmt.Errorf("read %s: %w", name, err)
+	}
+	return hashedEntry{
+		digest:         "sha256:" + hex.EncodeToString(hasher.Sum(nil)),
+		size:           body.Size(),
+		layerMediaType: layerMediaTypeFor(head[:headLength]),
 	}, nil
 }
 
@@ -298,7 +361,7 @@ func (d *dockerArchive) FetchManifest(ctx context.Context, _, identifier string)
 	if err := contextError(ctx); err != nil {
 		return registry.ManifestResponse{}, err
 	}
-	image, err := d.selectImage(identifier)
+	image, err := d.selectImage(ctx, identifier)
 	if err != nil {
 		return registry.ManifestResponse{}, err
 	}
@@ -309,7 +372,7 @@ func (d *dockerArchive) ResolveManifest(ctx context.Context, _, identifier strin
 	if err := contextError(ctx); err != nil {
 		return registry.ManifestMetadata{}, err
 	}
-	image, err := d.selectImage(identifier)
+	image, err := d.selectImage(ctx, identifier)
 	if err != nil {
 		return registry.ManifestMetadata{}, err
 	}

@@ -8,8 +8,14 @@ info:
     in PostgreSQL. The API has no built-in authentication or authorization.
     Deploy it only on a private network or behind an authenticated gateway.
 
-    Every response includes `X-Request-ID`. Findings and result snapshots stay
-    redacted even when the scanner has been configured to persist raw material.
+    Every response is JSON and carries `X-Request-ID`, `Cache-Control:
+    no-store` and `X-Content-Type-Options: nosniff`. Unknown paths, and paths
+    that are not in canonical form (repeated slashes, dot segments), answer
+    404 `not_found`; a known path with the wrong method answers 405
+    `method_not_allowed` with an `Allow` header. No redirect is ever issued.
+    Error `message` values are fixed neutral strings. Findings and result
+    snapshots stay redacted even when the scanner has been configured to
+    persist raw material.
   license:
     name: MIT
     identifier: MIT
@@ -38,6 +44,8 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Liveness"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
   /livez:
     get:
       tags: [Health]
@@ -47,6 +55,8 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Liveness"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
   /readyz:
     get:
       tags: [Health]
@@ -70,6 +80,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
@@ -111,6 +123,8 @@ paths:
                   x-contract-fixture: ../testdata/api/scan-completed.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "404":
           $ref: "#/components/responses/ImageNotFound"
         "408":
@@ -150,8 +164,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ScanDetailResponse"
+              examples:
+                completed:
+                  summary: Persisted completed scan with its redacted result
+                  externalValue: ../testdata/api/scan-detail.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -178,8 +198,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepositoriesResponse"
+              examples:
+                page:
+                  summary: First page of repositories
+                  externalValue: ../testdata/api/repositories.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -206,8 +232,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepositoryScansResponse"
+              examples:
+                history:
+                  summary: A completed reference scan and a failed repository sweep
+                  externalValue: ../testdata/api/repository-scans.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -235,8 +267,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepositoryFindingsResponse"
+              examples:
+                all:
+                  summary: Deduplicated findings with the all disposition
+                  externalValue: ../testdata/api/repository-findings.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -260,8 +298,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FindingDetailResponse"
+              examples:
+                detail:
+                  summary: One finding with an actionable and an example occurrence
+                  externalValue: ../testdata/api/finding-detail.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -272,10 +316,29 @@ paths:
 components:
   headers:
     RequestID:
-      description: Correlation identifier generated by or accepted from the request.
+      description: >-
+        Correlation identifier. A caller-supplied `X-Request-ID` of up to 128
+        characters from `A-Z a-z 0-9 - _ .` is echoed; anything else is
+        replaced by a generated identifier. Present on every response.
       schema:
         type: string
         minLength: 1
+        maxLength: 128
+    CacheControl:
+      description: Always `no-store`; present on every response.
+      schema:
+        type: string
+        enum: [no-store]
+    ContentTypeOptions:
+      description: Always `nosniff`; present on every response.
+      schema:
+        type: string
+        enum: [nosniff]
+    Allow:
+      description: The one method the path accepts.
+      schema:
+        type: string
+        enum: [GET, POST]
 
   parameters:
     ID:
@@ -322,15 +385,19 @@ components:
       name: limit
       in: query
       required: false
+      description: >-
+        Page size. Values above 200 are clamped to 200 rather than rejected;
+        the response's `limit` reports the effective value. Zero, negative and
+        non-integer values are 400 `invalid_request`.
       schema:
         type: integer
         minimum: 1
-        maximum: 200
         default: 50
     Offset:
       name: offset
       in: query
       required: false
+      description: Number of items to skip. Negative and non-integer values are 400 `invalid_request`.
       schema:
         type: integer
         minimum: 0
@@ -350,10 +417,60 @@ components:
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Health"
+    MethodNotAllowed:
+      description: The path exists but does not accept this method (`method_not_allowed`). `Allow` names the accepted method.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Allow:
+          $ref: "#/components/headers/Allow"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            wrongMethod:
+              value:
+                error:
+                  code: method_not_allowed
+                  message: method is not allowed for this endpoint
+                  request_id: 0f6d3e8d2c4b4a7a9e1f2b3c4d5e6f70
+    UnknownRoute:
+      description: |
+        Any path outside this document, including a documented path whose
+        form is not canonical (`//`, `.` or `..` segments) or that carries a
+        trailing slash, answers `not_found`. This response is not attached to
+        an operation because it applies to the paths that have none.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            unknownPath:
+              value:
+                error:
+                  code: not_found
+                  message: endpoint not found
+                  request_id: 0f6d3e8d2c4b4a7a9e1f2b3c4d5e6f71
     BadRequest:
       description: Invalid path, query, reference, platform, or JSON body.
       headers:
@@ -739,8 +856,13 @@ components:
           type: string
         status:
           type: string
+          description: >-
+            `scanned` when the tag's manifest was scanned, `resolved` when it
+            shared a digest with another tag that was scanned, `failed` when
+            it could not be resolved or scanned.
+          enum: [scanned, resolved, failed]
         error:
-          type: string
+          $ref: "#/components/schemas/SanitizedError"
     TargetResult:
       type: object
       additionalProperties: false
@@ -775,7 +897,7 @@ components:
           type: integer
           minimum: 0
         error:
-          type: string
+          $ref: "#/components/schemas/SanitizedError"
 
     PlatformResult:
       type: object
@@ -792,7 +914,7 @@ components:
           type: integer
           minimum: 0
         error:
-          type: string
+          $ref: "#/components/schemas/SanitizedError"
         coverage:
           $ref: "#/components/schemas/Coverage"
         diagnostics:
@@ -873,6 +995,14 @@ components:
           format: int64
           minimum: 0
 
+    SanitizedError:
+      type: string
+      description: >-
+        Present only when the step failed. The API replaces the stored
+        operational text with this fixed string; the CLI's local output keeps
+        the real message.
+      enum: ["scan step failed"]
+
     Diagnostic:
       type: object
       additionalProperties: false
@@ -880,12 +1010,22 @@ components:
       properties:
         code:
           type: string
+          description: Machine-readable diagnostic code; the stable signal for automation.
         scope:
           type: string
         subject:
           type: string
         message:
           type: string
+          description: >-
+            Fixed neutral text chosen from `code`; the API never returns the
+            scanner's own message. Codes other than the three listed map to
+            `scan step failed`.
+          enum:
+            - one or more files exceeded the configured per-file scan limit
+            - the scan exceeded the configured findings limit
+            - the scan exceeded the configured raw finding byte limit
+            - scan step failed
         limit:
           type: integer
           format: int64
@@ -1000,36 +1140,111 @@ components:
         offset:
           type: integer
     ScanSummary:
+      description: One persisted scan run as listed in repository history; closed to fields beyond ScanRunFields.
+      allOf:
+        - $ref: "#/components/schemas/ScanRunFields"
+      unevaluatedProperties: false
+    ScanRunFields:
       type: object
-      additionalProperties: true
-      required: [id, requested_reference, mode, status, scanned_at]
+      description: Fields shared by ScanSummary and the scan detail.
+      required:
+        - id
+        - requested_reference
+        - mode
+        - status
+        - scanned_at
+        - tags_enumerated
+        - tags_resolved
+        - tags_failed
+        - target_count
+        - completed_target_count
+        - failed_target_count
+        - partial_target_count
+        - manifest_count
+        - completed_manifest_count
+        - failed_manifest_count
+        - total_findings
+        - unique_fingerprints
+        - suppressed_findings_count
+        - suppressed_unique_fingerprints
       properties:
         id:
           type: integer
           format: int64
+          minimum: 1
         requested_reference:
           type: string
         resolved_reference:
           type: string
+          description: Omitted when the scan never resolved a digest.
         requested_digest:
           type: string
+          description: Omitted when the request carried no digest and none was resolved.
         mode:
           type: string
+          enum: [reference, repository]
         status:
-          type: string
+          $ref: "#/components/schemas/ResultStatus"
         error_message:
           type: string
+          description: >-
+            Present only when an error was recorded, always as this fixed
+            marker; the stored message is never returned by the API.
+          enum: ["scan did not complete successfully"]
         scanned_at:
           type: string
           format: date-time
+        tags_enumerated:
+          type: integer
+          minimum: 0
+        tags_resolved:
+          type: integer
+          minimum: 0
+        tags_failed:
+          type: integer
+          minimum: 0
+        target_count:
+          type: integer
+          minimum: 0
+        completed_target_count:
+          type: integer
+          minimum: 0
+        failed_target_count:
+          type: integer
+          minimum: 0
+        partial_target_count:
+          type: integer
+          minimum: 0
+        manifest_count:
+          type: integer
+          minimum: 0
+        completed_manifest_count:
+          type: integer
+          minimum: 0
+        failed_manifest_count:
+          type: integer
+          minimum: 0
+        total_findings:
+          type: integer
+          minimum: 0
+        unique_fingerprints:
+          type: integer
+          minimum: 0
+        suppressed_findings_count:
+          type: integer
+          minimum: 0
+        suppressed_unique_fingerprints:
+          type: integer
+          minimum: 0
     ScanDetailResponse:
       type: object
       additionalProperties: false
       required: [scan]
       properties:
         scan:
+          description: ScanRunFields plus the registry, repository and stored redacted result. Closed.
           allOf:
-            - $ref: "#/components/schemas/ScanSummary"
+            - $ref: "#/components/schemas/ScanRunFields"
             - type: object
               required: [registry, repository, result]
               properties:
@@ -1039,6 +1254,7 @@ components:
                   type: string
                 result:
                   $ref: "#/components/schemas/ScanResult"
+          unevaluatedProperties: false
 
     RepositoryFindingsResponse:
       type: object
@@ -1062,8 +1278,13 @@ components:
         offset:
           type: integer
     FindingSummary:
+      description: One deduplicated finding as listed for a repository; closed to fields beyond FindingFields.
+      allOf:
+        - $ref: "#/components/schemas/FindingFields"
+      unevaluatedProperties: false
+    FindingFields:
       type: object
-      additionalProperties: false
+      description: Fields shared by FindingSummary and the finding detail.
       required:
         - id
         - manifest_digest
@@ -1110,8 +1331,9 @@ components:
       required: [finding]
       properties:
         finding:
+          description: FindingFields plus the redacted occurrence history. Closed.
           allOf:
-            - $ref: "#/components/schemas/FindingSummary"
+            - $ref: "#/components/schemas/FindingFields"
             - type: object
               required: [occurrences]
               properties:
@@ -1119,6 +1341,7 @@ components:
                   type: array
                   items:
                     $ref: "#/components/schemas/FindingOccurrence"
+          unevaluatedProperties: false
     FindingOccurrence:
       type: object
       additionalProperties: false

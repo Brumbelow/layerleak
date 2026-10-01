@@ -1,0 +1,57 @@
+{
+  "finding": {
+    "actionable_occurrence_count": 1,
+    "detectors": [
+      "github_token"
+    ],
+    "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "first_seen_at": "2026-09-01T08:00:00Z",
+    "id": 7,
+    "last_seen_at": "2026-09-30T17:30:00Z",
+    "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "occurrence_count": 2,
+    "occurrences": [
+      {
+        "confidence": "high",
+        "context_snippet": "GH_TOKEN=ghp********************************56",
+        "detector_name": "github_token",
+        "disposition": "actionable",
+        "first_seen_at": "2026-09-01T08:00:00Z",
+        "key": "GH_TOKEN",
+        "last_seen_at": "2026-09-30T17:30:00Z",
+        "match_end": 49,
+        "match_start": 9,
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        "present_in_final_image": true,
+        "source_location": "config.env[GH_TOKEN]",
+        "source_type": "env"
+      },
+      {
+        "confidence": "high",
+        "context_snippet": "token: ghp********************************56",
+        "detector_name": "github_token",
+        "disposition": "example",
+        "disposition_reason": "example_path",
+        "file_path": "/usr/share/doc/example/README.md",
+        "first_seen_at": "2026-09-01T08:00:00Z",
+        "last_seen_at": "2026-09-01T08:00:00Z",
+        "layer_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "line_number": 12,
+        "match_end": 47,
+        "match_start": 7,
+        "platform": {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        "present_in_final_image": true,
+        "source_location": "/usr/share/doc/example/README.md:12",
+        "source_type": "file_final"
+      }
+    ],
+    "redacted_value": "ghp********************************56",
+    "suppressed_occurrence_count": 1
+  }
+}

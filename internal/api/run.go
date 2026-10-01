@@ -82,6 +82,9 @@ func NewServer(scanner scanExecutor, store storage.ReadStore, options ServerOpti
 		ReadTimeout:       options.ReadTimeout,
 		IdleTimeout:       options.IdleTimeout,
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		// net/http's own messages (accept errors, TLS handshakes, panics
+		// outside the middleware) join the JSON log stream.
+		ErrorLog: slog.NewLogLogger(options.Logger.Handler(), slog.LevelError),
 	}
 	return &Server{
 		handler:    handler,

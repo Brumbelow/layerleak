@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -291,4 +292,23 @@ func (s *drainingScanner) ScanAndSave(ctx context.Context, _ scanservice.Request
 	s.cancel()
 	<-ctx.Done()
 	return scanservice.Outcome{}, scanErrorFor(ctx.Err())
+}
+
+// TestServerRoutesHTTPErrorLogThroughSlog pins API-18: net/http's internal
+// logger writes JSON records through the configured slog handler instead of
+// plain text on stderr.
+func TestServerRoutesHTTPErrorLogThroughSlog(t *testing.T) {
+	logs := &bytes.Buffer{}
+	server := NewServer(&stubScanner{}, &stubReadStore{}, ServerOptions{Logger: testLogger(logs)})
+
+	server.httpServer.ErrorLog.Printf("http: accept error: %s", "synthetic")
+
+	line := logs.String()
+	if !strings.Contains(line, `"level":"ERROR"`) || !strings.Contains(line, `"msg":"http: accept error: synthetic"`) {
+		t.Fatalf("ErrorLog output = %q", line)
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &record); err != nil {
+		t.Fatalf("ErrorLog output is not one JSON object: %v: %q", err, line)
+	}
 }

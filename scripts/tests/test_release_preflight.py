@@ -401,8 +401,22 @@ class ReleasePreflightTests(unittest.TestCase):
                 self.assertIsNotNone(digest, f'action.yml must pin {key}')
                 self.assertNotEqual(digest.group(1), pin.group(2))
                 self.assertIn(f'{goos}/{goarch}) cosign_digest="${{{key}}}"', action)
-        # The action verifies against the same release workflow identity the release documents.
-        self.assertIn('container-release.yml@refs/heads/main', action)
+        # The action verifies against the release workflow identity the release
+        # documents: anchored, exact in path and ref, tolerant only in the
+        # owner's initial, and used by both cosign and gh.
+        identity = r'^https://github\.com/[Bb]rumbelow/layerleak/\.github/workflows/container-release\.yml@refs/heads/main$'
+        self.assertIn(f'SIGNING_IDENTITY_REGEXP: {identity}\n', action)
+        self.assertRegex(identity, r'^\^.*\$$')
+        self.assertIsNotNone(re.fullmatch(identity, 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main'))
+        self.assertIsNotNone(re.fullmatch(identity, 'https://github.com/brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main'))
+        for other in ('https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/dev',
+                      'https://github.com/Brumbelow/layerleak/.github/workflows/test.yml@refs/heads/main',
+                      'https://github.com/Brumbelow/layerleak-fork/.github/workflows/container-release.yml@refs/heads/main',
+                      'https://github.com/evil/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main'):
+            with self.subTest(identity=other):
+                self.assertIsNone(re.fullmatch(identity, other))
+        self.assertIn('--certificate-identity-regexp "${SIGNING_IDENTITY_REGEXP}"', action)
+        self.assertIn('--cert-identity-regex "${SIGNING_IDENTITY_REGEXP}"', action)
         self.assertIn('--deny-self-hosted-runners', action)
 
     def test_release_workflow_builds_exactly_the_preflight_cli_targets(self):

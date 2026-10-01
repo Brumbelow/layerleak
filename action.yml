@@ -182,8 +182,12 @@ runs:
         COSIGN_ASSET: ${{ steps.resolve.outputs.cosign-asset }}
         COSIGN_SHA256: ${{ steps.resolve.outputs.cosign-sha256 }}
         RELEASE_REPOSITORY: Brumbelow/layerleak
-        SIGNING_IDENTITY: https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main
-        SIGNER_WORKFLOW: Brumbelow/layerleak/.github/workflows/container-release.yml
+        # The exact release workflow identity (workflow path and the main ref),
+        # anchored at both ends. GitHub owner names are case-insensitive, so the
+        # one tolerated variation is the owner's initial: the Fulcio certificate
+        # spells it as GitHub does, and an action pinned at an immutable tag must
+        # not fail closed over that letter.
+        SIGNING_IDENTITY_REGEXP: ^https://github\.com/[Bb]rumbelow/layerleak/\.github/workflows/container-release\.yml@refs/heads/main$
       run: |
         set -euo pipefail
         cd "${WORK}"
@@ -226,7 +230,7 @@ runs:
         chmod 0755 "${cosign}"
         "./${cosign}" verify-blob \
           --bundle "${CHECKSUMS}.sigstore.json" \
-          --certificate-identity "${SIGNING_IDENTITY}" \
+          --certificate-identity-regexp "${SIGNING_IDENTITY_REGEXP}" \
           --certificate-oidc-issuer https://token.actions.githubusercontent.com \
           "${CHECKSUMS}" >/dev/null
         echo "Checksums signature verified with cosign ${COSIGN_VERSION}."
@@ -235,9 +239,12 @@ runs:
           echo "::error::the GitHub CLI is required to verify the archive attestation; install gh on this runner." >&2
           exit 1
         fi
+        # --cert-identity-regex replaces --signer-workflow, whose match is
+        # case-sensitive on the owner; it enforces the same workflow path and ref.
         gh attestation verify "${ARCHIVE}" \
           --repo "${RELEASE_REPOSITORY}" \
-          --signer-workflow "${SIGNER_WORKFLOW}" \
+          --cert-identity-regex "${SIGNING_IDENTITY_REGEXP}" \
+          --cert-oidc-issuer https://token.actions.githubusercontent.com \
           --source-ref refs/heads/main \
           --deny-self-hosted-runners >/dev/null
         echo "Build-provenance attestation verified for ${ARCHIVE}."

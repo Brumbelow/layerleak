@@ -359,7 +359,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		return nil, fmt.Errorf("perform registry request: %w", err)
 	}
 	if response.StatusCode != http.StatusUnauthorized {
-		return c.checkResponse(response)
+		return checkResponse(response, method, targetURL)
 	}
 
 	challenge, err := parseBearerChallenge(response.Header.Get("Www-Authenticate"))
@@ -401,16 +401,16 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		}
 	}
 
-	return c.checkResponse(retryResponse)
+	return checkResponse(retryResponse, method, targetURL)
 }
 
-func (c *Client) checkResponse(response *http.Response) (*http.Response, error) {
+func checkResponse(response *http.Response, method, targetURL string) (*http.Response, error) {
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
 		return response, nil
 	}
 
 	defer func() { _ = response.Body.Close() }()
-	return nil, fmt.Errorf("registry request failed: status=%d %s", response.StatusCode, http.StatusText(response.StatusCode))
+	return nil, &StatusError{StatusCode: response.StatusCode, Method: method, URL: redactURL(targetURL)}
 }
 
 func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, token string) (*http.Response, error) {
@@ -491,7 +491,7 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("auth request failed: status=%d %s", response.StatusCode, http.StatusText(response.StatusCode))
+		return "", &StatusError{StatusCode: response.StatusCode, Method: http.MethodGet, URL: redactURL(parsedRealm.String()), Auth: true}
 	}
 
 	maxAuthResponseBytes := c.maxAuthResponseBytes
@@ -796,7 +796,11 @@ func (c *Client) doHTTP(request *http.Request) (*http.Response, error) {
 		return nil
 	}
 
-	return client.Do(request)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, wrapTransportError(err)
+	}
+	return response, nil
 }
 
 func parseEndpointURL(value string, allowHTTP bool) (*url.URL, error) {

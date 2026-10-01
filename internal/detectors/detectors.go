@@ -181,6 +181,7 @@ func Default() Set {
 	rules = append(rules, cloudStateDetectors()...)
 	rules = append(rules, cloudFormatDetectors()...)
 	rules = append(rules, frameworkSecretDetectors()...)
+	rules = append(rules, saasTokenDetectors()...)
 	rules = append(rules, contextEntropyDetector{})
 	return Set{detectors: rules}
 }

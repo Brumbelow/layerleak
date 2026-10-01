@@ -75,6 +75,48 @@ version, including a dirty-worktree marker, or `dev` without VCS information.
 Release-installed binaries report the resolved module version through
 `layerleak --version`.
 
+### Download a release archive
+
+Every release also attaches prebuilt CLI archives, so no Go toolchain is
+needed: `layerleak_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on
+`amd64` and `arm64` (containing `layerleak`, `LICENSE` and
+`THIRD_PARTY_NOTICES.md`) and `layerleak_<version>_windows_amd64.zip`
+(`layerleak.exe`). Each release carries a `layerleak_<version>_checksums.txt`
+signed keylessly by the release workflow
+(`layerleak_<version>_checksums.txt.sigstore.json`) and a build-provenance
+attestation for every archive. Verify before you run:
+
+```bash
+version=v3.0.0
+archive="layerleak_${version}_linux_amd64.tar.gz"
+checksums="layerleak_${version}_checksums.txt"
+base="https://github.com/brumbelow/layerleak/releases/download/${version}"
+curl --fail --location --proto '=https' --tlsv1.2 --remote-name-all \
+  "${base}/${archive}" "${base}/${checksums}" "${base}/${checksums}.sigstore.json"
+
+sha256sum --check --ignore-missing "${checksums}"
+cosign verify-blob \
+  --bundle "${checksums}.sigstore.json" \
+  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${checksums}"
+gh attestation verify "${archive}" --repo Brumbelow/layerleak \
+  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+
+tar -xzf "${archive}" layerleak
+./layerleak version
+```
+
+The signature proves the checksums file came from this repository's release
+workflow on `main`, the checksum binds the archive to that file, and the
+attestation independently binds the archive to the workflow run that built it.
+`release-manifest.json` on the release lists every archive and the digest of
+the binary inside it. A stable release rebuilds the accepted release
+candidate's commit with the stable version string and refuses to publish
+unless the rebuild reproduces the candidate's binaries byte for byte, so
+`layerleak version` reports exactly the tag you downloaded.
+
 Build from source:
 
 ```bash
@@ -675,7 +717,16 @@ The Compose services use a digest-pinned PostgreSQL 16.15 image, wait for
 PostgreSQL health, run the idempotent migration command to completion before
 the API starts (a fresh volume becomes ready without a manual step), run the
 API read-only with all capabilities dropped, and use the native readiness
-probe. The host port binds to `127.0.0.1` by default; set `LAYERLEAK_API_HOST`
+probe. Every service is bounded: the API gets a 256 MiB `/tmp` tmpfs, a
+2 GiB memory limit and a 256-process limit (`mem_limit` and `pids_limit`,
+which `docker compose` v2 honours; mirror them under
+`deploy.resources.limits` for a Swarm stack, and raise the memory limit together
+with any `LAYERLEAK_MAX_*_BYTES` bound you lift); the database drops every
+capability except the five the PostgreSQL entrypoint needs (`CHOWN`,
+`DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`), mounts tmpfs for
+`/run/postgresql` and `/tmp`, and gets 256 MiB of shared memory; the one-shot
+migrate and purge commands run read-only on a 64 MiB tmpfs. The host port
+binds to `127.0.0.1` by default; set `LAYERLEAK_API_HOST`
 only when an authenticated network edge is ready. The Compose connection string
 uses `sslmode=disable` only because the `db` container is reachable solely on
 the private Compose network; point the API at any other database with

@@ -298,7 +298,20 @@ jobs:
           fi
 
       - name: Run full test suite with PostgreSQL
-        run: go test ./... -count=1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${LAYERLEAK_TEST_DATABASE_URL}"
+          # The integration tests skip themselves without a database; in this
+          # job a skip means the service wiring is broken, so fail on it.
+          go test ./internal/storage/... -count=1 -v 2>&1 | tee "${RUNNER_TEMP}/storage-tests.log" | grep -E '^(--- FAIL|FAIL|ok)' || true
+          if grep -q 'LAYERLEAK_TEST_DATABASE_URL is not set' "${RUNNER_TEMP}/storage-tests.log"; then
+            echo "storage integration tests skipped although a database is configured" >&2
+            exit 1
+          fi
+          grep -q '^ok' "${RUNNER_TEMP}/storage-tests.log"
+          go test ./... -count=1
+          go test -race ./internal/storage/... ./internal/scanservice/... ./cmd/... -count=1
 
   compose:
     name: Compose configuration

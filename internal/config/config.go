@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -65,6 +66,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	apiAddr, err := listenAddrFromEnv("LAYERLEAK_API_ADDR", "127.0.0.1:8080")
+	if err != nil {
+		return Config{}, err
+	}
+	registryBaseURL, err := endpointURLFromEnv("LAYERLEAK_REGISTRY_BASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	registryAuthURL, err := endpointURLFromEnv("LAYERLEAK_REGISTRY_AUTH_URL")
 	if err != nil {
 		return Config{}, err
 	}
@@ -244,8 +253,8 @@ func Load() (Config, error) {
 		APIIdleTimeout:              apiIdleTimeout,
 		APIShutdownTimeout:          apiShutdownTimeout,
 		APIReadinessTimeout:         apiReadinessTimeout,
-		RegistryBaseURL:             envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", ""),
-		RegistryAuthURL:             envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", ""),
+		RegistryBaseURL:             registryBaseURL,
+		RegistryAuthURL:             registryAuthURL,
 		AllowedPrivateRegistryHosts: allowedPrivateRegistryHosts,
 		AllowedPrivateAuthHosts:     allowedPrivateAuthHosts,
 		RegistryMaxRedirects:        registryMaxRedirects,
@@ -293,6 +302,36 @@ func logLevelFromEnv(key, fallback string) (string, error) {
 		return value, nil
 	}
 	return "", fmt.Errorf("parse %s: must be one of debug, info, warn, or error", key)
+}
+
+// endpointURLFromEnv validates an optional registry or auth endpoint override
+// at load time: an absolute http(s) URL with a valid host and no credentials
+// or fragment. The registry client applies its own, stricter policy (https
+// unless the host is allowlisted) when it connects.
+func endpointURLFromEnv(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: endpoint url is invalid", key)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return "", fmt.Errorf("parse %s: endpoint url must use https or http", key)
+	}
+	if parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", fmt.Errorf("parse %s: endpoint url must be absolute and must not include credentials or a fragment", key)
+	}
+	if err := validateHostname(strings.ToLower(parsed.Hostname())); err != nil {
+		return "", fmt.Errorf("parse %s: %w", key, err)
+	}
+	if port := parsed.Port(); port != "" {
+		if err := validatePort(port); err != nil {
+			return "", fmt.Errorf("parse %s: %w", key, err)
+		}
+	}
+	return value, nil
 }
 
 // listenAddrFromEnv validates a host:port listen address at load time so a

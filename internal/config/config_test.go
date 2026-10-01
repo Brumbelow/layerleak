@@ -673,3 +673,34 @@ func TestREADMEDocumentsEveryVariable(t *testing.T) {
 		t.Fatalf("expected at least 50 documented variables, found %d", len(documented))
 	}
 }
+
+func TestLoadValidatesRegistryEndpointOverrides(t *testing.T) {
+	for _, key := range []string{"LAYERLEAK_REGISTRY_BASE_URL", "LAYERLEAK_REGISTRY_AUTH_URL"} {
+		for _, value := range []string{"https://registry.internal:5000", "http://127.0.0.1:5000/v2/", "https://auth.example.com/token", "https://[::1]:5000"} {
+			t.Run("valid/"+key+"/"+value, func(t *testing.T) {
+				clearLayerleakEnv(t)
+				t.Setenv(key, value)
+				cfg, err := Load()
+				if err != nil {
+					t.Fatalf("Load() error = %v", err)
+				}
+				got := cfg.RegistryBaseURL
+				if key == "LAYERLEAK_REGISTRY_AUTH_URL" {
+					got = cfg.RegistryAuthURL
+				}
+				if got != value {
+					t.Fatalf("loaded %q, want %q", got, value)
+				}
+			})
+		}
+		for _, value := range []string{"registry.internal:5000", "ftp://registry.internal", "https://user:secret@registry.internal", "https://registry.internal/#frag", "https://", "https://bad host/", "https://registry.internal:70000"} {
+			t.Run("invalid/"+key+"/"+value, func(t *testing.T) {
+				clearLayerleakEnv(t)
+				t.Setenv(key, value)
+				if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("Load() error = %v, want %s rejection", err, key)
+				}
+			})
+		}
+	}
+}

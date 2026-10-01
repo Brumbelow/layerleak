@@ -26,7 +26,7 @@ func (s *recordingSleeper) sleep(_ context.Context, delay time.Duration) error {
 
 func newRetryClient(t *testing.T, attempts int, transport http.RoundTripper) (*Client, *recordingSleeper) {
 	t.Helper()
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestAttempts:   attempts,
@@ -225,7 +225,7 @@ func TestStalledFirstAttemptIsRetriedWithFreshDeadline(t *testing.T) {
 			"Docker-Content-Digest": "sha256:" + strings.Repeat("a", 64),
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestTimeout:    30 * time.Millisecond,
@@ -249,7 +249,7 @@ func TestBlobHeaderPhaseIsBoundedByRequestTimeout(t *testing.T) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestTimeout:    20 * time.Millisecond,

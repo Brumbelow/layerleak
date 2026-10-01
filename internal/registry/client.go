@@ -63,7 +63,6 @@ type Client struct {
 	userAgent                   string
 	now                         func() time.Time
 	sleep                       func(context.Context, time.Duration) error
-	configErr                   error
 	tokenCache                  map[string]string
 	tokenCacheBytes             int
 	tokenCacheMu                sync.Mutex
@@ -111,12 +110,26 @@ func DefaultUserAgent() string {
 	return "layerleak/" + version.Effective()
 }
 
-func NewClient(options Options) *Client {
+// NewClient validates the options and builds a registry client. Configuration
+// problems (malformed endpoint URLs, plain-http endpoints that are not
+// allowlisted, invalid allowlist entries, a transport that cannot be hardened)
+// are returned here rather than at the first request, so a misconfigured
+// deployment fails at startup instead of failing every scan.
+func NewClient(options Options) (*Client, error) {
 	registryAllowlist, registryAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateRegistryHosts)
 	authAllowlist, authAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateAuthHosts)
 	allowConfiguredHTTP := len(registryAllowlist) > 0 || len(authAllowlist) > 0
 	baseURL, baseErr := parseConfiguredEndpointURL(defaultString(options.BaseURL, "https://registry-1.docker.io"), allowConfiguredHTTP)
+	if baseErr != nil {
+		baseErr = fmt.Errorf("registry base url: %w", baseErr)
+	}
 	authURL, authErr := parseConfiguredEndpointURL(defaultString(options.AuthURL, "https://auth.docker.io/token"), allowConfiguredHTTP)
+	if authErr != nil {
+		authErr = fmt.Errorf("registry auth url: %w", authErr)
+	}
+	if err := errors.Join(baseErr, authErr, registryAllowlistErr, authAllowlistErr); err != nil {
+		return nil, err
+	}
 	httpClient := options.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{}
@@ -150,11 +163,24 @@ func NewClient(options Options) *Client {
 		userAgent:                   defaultString(strings.TrimSpace(options.UserAgent), DefaultUserAgent()),
 		now:                         time.Now,
 		sleep:                       sleepContext,
-		configErr:                   errors.Join(baseErr, authErr, registryAllowlistErr, authAllowlistErr),
 		tokenCache:                  make(map[string]string),
 	}
-	client.validateConfiguredEndpointSchemes()
-	client.hardenHTTPClient()
+	if err := client.validateConfiguredEndpointSchemes(); err != nil {
+		return nil, err
+	}
+	if err := client.hardenHTTPClient(); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// MustNewClient is NewClient for static configurations and tests: it panics
+// when the options are invalid.
+func MustNewClient(options Options) *Client {
+	client, err := NewClient(options)
+	if err != nil {
+		panic(fmt.Sprintf("registry: invalid client options: %v", err))
+	}
 	return client
 }
 
@@ -357,9 +383,6 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repository string) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if c.configErr != nil {
-		return nil, c.configErr
 	}
 	if err := c.validateOutboundURL(targetURL, c.baseURL, false, requestKindRegistry); err != nil {
 		return nil, err
@@ -897,13 +920,15 @@ func (c *Client) hostAllowed(value *url.URL, kind outboundRequestKind) bool {
 	return ok
 }
 
-func (c *Client) validateConfiguredEndpointSchemes() {
+func (c *Client) validateConfiguredEndpointSchemes() error {
+	var err error
 	if c.baseURL != nil && c.baseURL.Scheme == "http" && !c.hostAllowed(c.baseURL, requestKindRegistry) {
-		c.configErr = errors.Join(c.configErr, fmt.Errorf("http registry endpoint %s must be explicitly allowlisted", c.baseURL.Host))
+		err = errors.Join(err, fmt.Errorf("http registry endpoint %s must be explicitly allowlisted", c.baseURL.Host))
 	}
 	if c.authURL != nil && c.authURL.Scheme == "http" && !c.hostAllowed(c.authURL, requestKindAuth) {
-		c.configErr = errors.Join(c.configErr, fmt.Errorf("http auth endpoint %s must be explicitly allowlisted", c.authURL.Host))
+		err = errors.Join(err, fmt.Errorf("http auth endpoint %s must be explicitly allowlisted", c.authURL.Host))
 	}
+	return err
 }
 
 func normalizeHostAllowlist(values []string) (map[string]struct{}, error) {

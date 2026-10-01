@@ -172,7 +172,7 @@ func TestListTagsFollowsMultiRelationAndUnquotedLinks(t *testing.T) {
 					return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 				}
 			})
-			client := NewClient(Options{
+			client := MustNewClient(Options{
 				BaseURL:           "https://registry.test",
 				AllowPrivateHosts: true,
 				HTTPClient:        &http.Client{Transport: transport},
@@ -197,7 +197,7 @@ func TestListTagsFailsInsteadOfTruncatingOnMalformedLink(t *testing.T) {
 			"Link": `/v2/library/app/tags/list?n=2&last=2.0; rel="next"`,
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient:        &http.Client{Transport: transport},

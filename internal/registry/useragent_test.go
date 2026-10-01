@@ -25,7 +25,7 @@ func TestRequestsIdentifyLayerleakInUserAgent(t *testing.T) {
 		}
 		return jsonResponse(http.StatusOK, "application/vnd.oci.image.manifest.v1+json", []byte(`{"schemaVersion":2}`), nil), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient:        &http.Client{Transport: transport},
@@ -51,7 +51,7 @@ func TestUserAgentOptionOverridesDefault(t *testing.T) {
 		agent = request.Header.Get("User-Agent")
 		return jsonResponse(http.StatusOK, "application/vnd.oci.image.manifest.v1+json", []byte(`{"schemaVersion":2}`), nil), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		UserAgent:         "  layerleak-ci/1.2.3 (+https://ci.example)  ",

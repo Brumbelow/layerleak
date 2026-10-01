@@ -150,7 +150,7 @@ func TestProxiedRequestsConnectByHostnameWithoutLocalResolution(t *testing.T) {
 	transport.Proxy = func(*http.Request) (*url.URL, error) { return proxyURL, nil }
 
 	var lookups atomic.Int32
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:        "https://example.com",
 		RequestTimeout: 5 * time.Second,
 		HTTPClient:     &http.Client{Transport: transport},
@@ -185,7 +185,7 @@ func TestProxiedRequestsStillEnforceSchemeAndAllowlistPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(proxy.URL) error = %v", err)
 	}
-	newClient := func(baseURL string, allowed ...string) *Client {
+	newClient := func(baseURL string, allowed ...string) (*Client, error) {
 		transport := &http.Transport{Proxy: func(*http.Request) (*url.URL, error) { return proxyURL, nil }}
 		return NewClient(Options{
 			BaseURL:                     baseURL,
@@ -200,19 +200,23 @@ func TestProxiedRequestsStillEnforceSchemeAndAllowlistPolicy(t *testing.T) {
 	}
 
 	t.Run("plain http stays allowlist-only", func(t *testing.T) {
-		client := newClient("http://registry.example")
-		_, err := client.FetchManifest(context.Background(), "library/app", "latest")
-		if err == nil || (!strings.Contains(err.Error(), "allowlisted") && !strings.Contains(err.Error(), "https")) {
-			t.Fatalf("FetchManifest() error = %v", err)
+		if _, err := newClient("http://registry.example"); err == nil || !strings.Contains(err.Error(), "https") {
+			t.Fatalf("NewClient() error = %v", err)
 		}
-		redirected := newClient("https://registry.example", "registry.internal:5000")
+		redirected, err := newClient("https://registry.example", "registry.internal:5000")
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
 		if err := redirected.validateOutboundURL("http://registry.example/v2/", redirected.baseURL, true, requestKindRegistry); err == nil || !strings.Contains(err.Error(), "allowlisted") {
 			t.Fatalf("http redirect validation error = %v", err)
 		}
 	})
 	t.Run("non-public IP literal is rejected before the proxy", func(t *testing.T) {
-		client := newClient("https://169.254.169.254")
-		_, err := client.FetchManifest(context.Background(), "library/app", "latest")
+		client, err := newClient("https://169.254.169.254")
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		_, err = client.FetchManifest(context.Background(), "library/app", "latest")
 		if err == nil || !strings.Contains(err.Error(), "non-public registry address") {
 			t.Fatalf("FetchManifest() error = %v", err)
 		}
@@ -232,7 +236,7 @@ func TestDirectRequestsPinValidatedAddressesAndReuseConnections(t *testing.T) {
 		}
 	})
 	var lookups atomic.Int32
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:                     "https://example.com:" + port,
 		AllowedPrivateRegistryHosts: []string{"example.com:" + port},
 		RequestTimeout:              5 * time.Second,
@@ -269,7 +273,7 @@ func TestDirectRequestsPinValidatedAddressesAndReuseConnections(t *testing.T) {
 
 func TestPinnedDialFallsBackToNextValidatedAddress(t *testing.T) {
 	_, port, transport := newTLSRegistry(t, manifestHandler(t))
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:                     "https://example.com:" + port,
 		AllowedPrivateRegistryHosts: []string{"example.com:" + port},
 		RequestTimeout:              5 * time.Second,
@@ -290,7 +294,7 @@ func TestPinnedDialFallsBackToNextValidatedAddress(t *testing.T) {
 }
 
 func TestPinnedDialRejectsUnpinnedTargets(t *testing.T) {
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL: "https://example.com",
 		LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
@@ -312,7 +316,7 @@ func TestPinnedDialRejectsUnpinnedTargets(t *testing.T) {
 
 func TestClientRejectsNonPublicResolutionBeforeDial(t *testing.T) {
 	var lookups atomic.Int32
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:    "https://registry.example",
 		HTTPClient: &http.Client{Transport: &http.Transport{}}, // no environment proxy: exercise the direct path
 		LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
@@ -343,7 +347,7 @@ func TestBlobRequestsHaveResponseHeaderDeadline(t *testing.T) {
 		}
 		manifestHandler(t)(writer, request)
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:                     "https://example.com:" + port,
 		AllowedPrivateRegistryHosts: []string{"example.com:" + port},
 		RequestTimeout:              100 * time.Millisecond,
@@ -372,7 +376,7 @@ func TestBlobRequestsHaveResponseHeaderDeadline(t *testing.T) {
 }
 
 func TestHardenedTransportDerivesDeadlinesFromRequestTimeout(t *testing.T) {
-	client := NewClient(Options{BaseURL: "https://registry.example", RequestTimeout: 7 * time.Second})
+	client := MustNewClient(Options{BaseURL: "https://registry.example", RequestTimeout: 7 * time.Second})
 	transport, ok := client.httpClient.Transport.(*pinnedTransport)
 	if !ok {
 		t.Fatalf("client transport = %T", client.httpClient.Transport)
@@ -390,7 +394,7 @@ func TestHardenedTransportDerivesDeadlinesFromRequestTimeout(t *testing.T) {
 		t.Fatalf("dialTimeout = %s", transport.dialTimeout)
 	}
 
-	unbounded := NewClient(Options{BaseURL: "https://registry.example"})
+	unbounded := MustNewClient(Options{BaseURL: "https://registry.example"})
 	unboundedTransport := unbounded.httpClient.Transport.(*pinnedTransport)
 	if unboundedTransport.base.ResponseHeaderTimeout != defaultResponseHeaderTimeout || unboundedTransport.base.TLSHandshakeTimeout != 10*time.Second {
 		t.Fatalf("defaults: ResponseHeaderTimeout = %s TLSHandshakeTimeout = %s", unboundedTransport.base.ResponseHeaderTimeout, unboundedTransport.base.TLSHandshakeTimeout)
@@ -398,7 +402,7 @@ func TestHardenedTransportDerivesDeadlinesFromRequestTimeout(t *testing.T) {
 }
 
 func TestRequestTimeoutLongerThanDefaultsKeepsBaseHandshakeTimeout(t *testing.T) {
-	client := NewClient(Options{BaseURL: "https://registry.example", RequestTimeout: 90 * time.Second})
+	client := MustNewClient(Options{BaseURL: "https://registry.example", RequestTimeout: 90 * time.Second})
 	transport := client.httpClient.Transport.(*pinnedTransport)
 	if transport.base.TLSHandshakeTimeout != 10*time.Second {
 		t.Fatalf("TLSHandshakeTimeout = %s", transport.base.TLSHandshakeTimeout)

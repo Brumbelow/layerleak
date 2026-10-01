@@ -55,9 +55,13 @@ type pinnedAddresses struct {
 	addresses []net.IPAddr
 }
 
-func (c *Client) hardenHTTPClient() {
+// hardenHTTPClient replaces the configured transport with the pinned
+// transport. It fails for transports that cannot be hardened: a RoundTripper
+// that is not an *http.Transport (allowed only with the AllowPrivateHosts test
+// override) or one that skips TLS verification.
+func (c *Client) hardenHTTPClient() error {
 	if c.httpClient == nil || c.allowPrivateHosts {
-		return
+		return nil
 	}
 	client := *c.httpClient
 	transport := client.Transport
@@ -66,12 +70,10 @@ func (c *Client) hardenHTTPClient() {
 	}
 	base, ok := transport.(*http.Transport)
 	if !ok {
-		c.configErr = errors.Join(c.configErr, fmt.Errorf("custom registry transport requires explicit AllowPrivateHosts test override"))
-		return
+		return fmt.Errorf("custom registry transport requires explicit AllowPrivateHosts test override")
 	}
 	if base.TLSClientConfig != nil && base.TLSClientConfig.InsecureSkipVerify {
-		c.configErr = errors.Join(c.configErr, fmt.Errorf("registry transport must verify TLS certificates"))
-		return
+		return fmt.Errorf("registry transport must verify TLS certificates")
 	}
 	hardened := base.Clone()
 	if hardened.TLSClientConfig == nil {
@@ -101,6 +103,7 @@ func (c *Client) hardenHTTPClient() {
 
 	client.Transport = pinned
 	c.httpClient = &client
+	return nil
 }
 
 // boundedTimeout returns the configured transport timeout (or the fallback when

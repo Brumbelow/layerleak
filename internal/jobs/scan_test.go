@@ -84,7 +84,7 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -185,7 +185,7 @@ func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing
 	_, err = Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -246,7 +246,7 @@ func TestScanRepositoryReturnsPartialResultWhenTargetLimitExceeded(t *testing.T)
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -332,7 +332,7 @@ func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -431,7 +431,7 @@ func TestScanRepositoryAbortsOnLayerLimitAndPreservesCompletedTargets(t *testing
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -511,7 +511,7 @@ func TestScanRepositoryPreservesFatalTagResolutionErrors(t *testing.T) {
 			result, err := Scan(context.Background(), Request{
 				Reference: ref,
 				AllTags:   true,
-				Registry: registry.NewClient(registry.Options{
+				Registry: registry.MustNewClient(registry.Options{
 					BaseURL:           "https://registry.test",
 					AllowPrivateHosts: true,
 					RequestAttempts:   1,
@@ -580,7 +580,7 @@ func TestScanRepositoryAppliesMaxFindingsAcrossTargets(t *testing.T) {
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},
@@ -656,7 +656,7 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},

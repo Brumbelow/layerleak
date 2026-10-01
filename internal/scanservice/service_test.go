@@ -86,7 +86,7 @@ func TestScanAndSavePersistsPartialResultOnLimitError(t *testing.T) {
 		TagPageSize:             100,
 		RegistryRequestAttempts: 2,
 	}, store)
-	service.newRegistryClient = func(options registry.Options) *registry.Client {
+	service.newRegistryClient = func(options registry.Options) (*registry.Client, error) {
 		options.AllowPrivateHosts = true
 		options.HTTPClient = &http.Client{Transport: transport}
 		return registry.NewClient(options)
@@ -174,7 +174,7 @@ func TestScanAndSaveLetsBlobTimeoutOwnSlowLayerBody(t *testing.T) {
 	}
 	service := New(cfg, store)
 	var requestTimeout time.Duration
-	service.newRegistryClient = func(options registry.Options) *registry.Client {
+	service.newRegistryClient = func(options registry.Options) (*registry.Client, error) {
 		requestTimeout = options.RequestTimeout
 		options.AllowPrivateHosts = true
 		options.HTTPClient = &http.Client{Transport: transport}
@@ -244,7 +244,7 @@ func TestScanAndSaveAppliesRawFindingPolicy(t *testing.T) {
 				MaxRawFindingBytes:      test.maxRawFindingBytes,
 				RegistryRequestAttempts: 1,
 			}, store)
-			service.newRegistryClient = func(options registry.Options) *registry.Client {
+			service.newRegistryClient = func(options registry.Options) (*registry.Client, error) {
 				options.AllowPrivateHosts = true
 				options.HTTPClient = &http.Client{Transport: transport}
 				return registry.NewClient(options)

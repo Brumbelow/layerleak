@@ -126,7 +126,7 @@ func TestFetchManifestUsesBearerChallengeAfterBasic(t *testing.T) {
 			"Docker-Content-Digest": "sha256:" + strings.Repeat("a", 64),
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient:        &http.Client{Transport: transport},

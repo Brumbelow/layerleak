@@ -29,7 +29,7 @@ func TestRegistryStatusFailuresAreTyped(t *testing.T) {
 			transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return jsonResponse(test.status, "text/plain", []byte("body-marker"), nil), nil
 			})
-			client := NewClient(Options{
+			client := MustNewClient(Options{
 				BaseURL:           "https://registry.test",
 				AllowPrivateHosts: true,
 				RequestAttempts:   1,
@@ -76,7 +76,7 @@ func TestAuthStatusFailuresAreTypedAsAuth(t *testing.T) {
 			"Www-Authenticate": `Bearer realm="https://auth.test/token?secret=query-marker",service="registry.test"`,
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestAttempts:   1,
@@ -128,7 +128,7 @@ func TestTransportErrorsRedactRedirectTargetQuery(t *testing.T) {
 			}), nil
 		}
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestAttempts:   1,
@@ -166,7 +166,7 @@ func TestRejectedRedirectErrorsRedactTargetQuery(t *testing.T) {
 		}
 		return jsonResponse(http.StatusOK, "text/plain", nil, nil), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestAttempts:   1,

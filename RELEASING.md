@@ -258,7 +258,7 @@ GOBIN="${clean_root}/bin" \
 GOCACHE="${clean_root}/cache" \
 GOMODCACHE="${clean_root}/mod" \
 go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1
-"${clean_root}/bin/layerleak" --version
+"${clean_root}/bin/layerleak" version
 "${clean_root}/bin/layerleak" scan --help
 
 go list -m github.com/brumbelow/layerleak/v3@latest
@@ -277,8 +277,15 @@ Confirm:
 - the API refuses startup before migration; after schema 0004 is installed,
   `/health`, `/livez`, and `/readyz` become healthy. Readiness reports later
   database or schema degradation independently of liveness;
+- `layerleak version` prints exactly the RC tag as its version;
 - signatures and GitHub attestations verify against the exact digest and
-  `container-release.yml@refs/heads/main` identity and the RC source SHA;
+  `container-release.yml@refs/heads/main` identity and the RC source SHA. The
+  certificate identity is matched exactly, so confirm on the first RC that the
+  repository capitalisation in the identity (`Brumbelow/layerleak`) is what
+  the Fulcio certificate carries before writing it into automation;
+- a real scan succeeds from a host without a proxy and from a host behind an
+  `HTTPS_PROXY`, and a multi-platform image (for example `golang:latest`)
+  completes with the Windows manifests reported as skipped;
 - attached SBOM/provenance/checksum files match `release-manifest.json`.
 
 Soak an RC for at least 72 hours. The stable workflow enforces this interval

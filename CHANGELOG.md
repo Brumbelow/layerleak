@@ -43,8 +43,8 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   SBOMs, SLSA provenance, GitHub attestations, and keyless Cosign signatures.
 - Versioned OpenAPI 3.1 specification, release manifest, third-party notices,
   and release verification documentation.
-- A versioned, always-redacted companion scan record under `findings/scans/`
-  containing image identity, coverage, diagnostics, counts, creation time, and
+- A versioned, always-redacted scan record per scan containing the public
+  result, the findings with their source locations, creation time and the
   PostgreSQL persistence outcome.
 - Pinned CI validation for OpenAPI 3.1, real handler response fixtures,
   documented response examples, local documentation links, and synthetic demo
@@ -128,6 +128,61 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   writer still opted in cannot hide residue behind a successful exit.
 - `layerleak-migrate-up --status` (exit 0 current, 2 pending, 1 error),
   `--dry-run` and `--version`; `-h` exits 0 in both admin binaries.
+- `--format sarif` writes a SARIF 2.1.0 log: one run per scan,
+  `tool.driver.version` from the build, every default-catalog detector listed
+  under `rules`, `level` from confidence, suppressed findings as
+  `suppressions`, image, manifest, platform and layer properties and a
+  `layerleak/fingerprint/v1` partial fingerprint; `--output` works with it and
+  the README shows the `upload-sarif` recipe.
+- `--fail-on low|medium|high|none` selects the lowest confidence that produces
+  exit code 2 (default `low` keeps the previous behaviour; `none` reports
+  only), and exit code 3 reports usable but incomplete coverage that
+  `--allow-partial` did not accept.
+- Scan flags `--output <file>` (`-` for stdout), `--output-dir <dir>`,
+  `--no-artifacts` and `--no-db`.
+- The default summary output lists the actionable findings (detector,
+  confidence, location, redacted value, platform), capped at 50 with
+  "and N more".
+- Published JSON Schemas (draft 2020-12) for the CLI result and the scan
+  record at `web/docs/schemas/result-v2.schema.json` and
+  `web/docs/schemas/scan-record-v2.schema.json`, golden fixtures under
+  `internal/cli/testdata/`, and `scripts/validate_schemas.py`, which CI runs
+  against the fixtures and every documented API response.
+- Detector coverage for connection URLs with embedded passwords
+  (`connection_url_credentials`: `postgres://`, `mysql://`, `mongodb(+srv)://`,
+  `redis://`, `amqp://`, `cloudinary://` and friends); registry and
+  package-manager credentials (Docker Hub `dckr_pat_`/`dckr_oat_` tokens,
+  base64 `.dockerconfigjson` blobs, `registrytoken`, Artifactory, RubyGems,
+  NuGet, crates.io, Maven `settings.xml`, `.pgpass`, `.my.cnf`, `.npmrc`
+  `_password`, Composer and Bundler credentials); `Authorization: Basic` and
+  `Bearer`, `X-Api-Key` and `PRIVATE-TOKEN` headers; and refreshed vendor
+  prefixes for Slack, GitLab (nine token families), OpenAI, Notion, SonarQube,
+  Grafana, Sentry, New Relic, PlanetScale, CircleCI, Twilio and Datadog.
+- Detector coverage for kubeconfig files and cloud CLI caches (client key
+  data, passwords, quoted tokens, base64 PEM keys in Kubernetes Secrets, gcloud
+  refresh tokens, Azure CLI and AWS SSO token caches), cloud-provider formats
+  (Google OAuth client secrets, Azure AD client secrets, storage SAS
+  signatures, Service Bus shared access keys, Azure DevOps PATs, AWS STS
+  session tokens, Alibaba access keys, Fly.io macaroons, Terraform Cloud
+  tokens), operating-system and framework secrets (`/etc/shadow`, `.htpasswd`
+  and modular-crypt password hashes, Laravel `APP_KEY`, Django/Flask
+  `SECRET_KEY`, Rails master keys and `secret_key_base`, WordPress salts, PHP
+  `define()` credentials, XML password elements and attributes) and long-tail
+  SaaS tokens (Atlassian, Mailgun, Facebook, Supabase, Algolia, Duffel,
+  Flutterwave, Twitch, Dropbox, Asana, Bitbucket, Kafka SASL JAAS). The
+  default catalog now lists 161 identifiers.
+- Path-only findings: a sensitive file that cannot be read as text (binary or
+  over `LAYERLEAK_MAX_FILE_BYTES`) is reported by path under the
+  `sensitive_file_*` family (private keys, keystores, password databases,
+  credential stores, GPG keyrings) with an empty `redacted_value` and
+  `context_snippet`, zero offsets and a fingerprint of
+  `sha256(layer digest + "\n" + path)`; readable files never receive one.
+- `detectors.Set.Catalog()` lists every identifier a finding can carry (the
+  structured readers' sub-identifiers included) and backs the SARIF rule list;
+  a corpus test asserts that every emitted identifier is in the catalog.
+- `FuzzDetectorSetScan`, `BenchmarkDefaultSetScan*` and the
+  `internal/scanner/testdata/corpus` fixtures (real positives and discarded
+  placeholders, vendor shapes stored base64-encoded) drive the detector tests.
 
 ### Changed
 
@@ -257,6 +312,95 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   `Allow` on every operation, the unknown-route 404 and the always-present
   `Cache-Control` and `X-Content-Type-Options` headers; the README lists
   every API status code.
+- `result_schema_version` is 2. Results carry `scanned_at` (RFC 3339 UTC, the
+  scan start time) and `scanner {name, version}`; the integer counters
+  (`tags_enumerated`, `tags_resolved`, `tags_failed`,
+  `suppressed_findings_count`, `suppressed_unique_fingerprints`) are always
+  present; an empty `platform` is omitted instead of serialised as `{}`; and
+  `tag_results[].status` is a typed enum shared by both scan modes
+  (`resolved`, `scanned`, `partial`, `failed`, `skipped`), updated after each
+  target finishes.
+- A repository sweep that stops early (findings budget, limit, integrity
+  error, cancellation) records every unscanned target as failed with a "not
+  scanned" reason and marks its tags `skipped`, so `target_count` always
+  equals completed + partial + failed; reference-mode results report
+  `tags_enumerated`/`tags_resolved` as 0 and list the requested tag in
+  `tag_results` whenever it resolved.
+- Progress output counts partial targets, reports resolved tags once, keeps
+  per-manifest scanner events in the scanning phase and emits one
+  `target_done` per target.
+- `--format json` prints the result for failed scans too (exit code still 1)
+  and the scan record is written for them; CLI stdout JSON and the local
+  record keep real, control-character-sanitised error and diagnostic messages
+  with raw values redacted instead of the constant "scan step failed". Storage
+  and the HTTP API keep the fully redacted result.
+- Exactly one local artifact per scan,
+  `<dir>/<utc-timestamp>-<reference-token>-<random>.json` with
+  `record_schema_version` 2 (public result, findings with `source_location`,
+  persistence outcome). The record directory is `--output-dir`, else
+  `LAYERLEAK_FINDINGS_DIR` (relative values resolve against the working
+  directory), else `./findings` under the working directory; the nearest
+  `go.mod` heuristic is gone.
+- Exit codes: 0 clean; 1 operational, input or persistence failure and
+  cancellation; 2 actionable findings at or above `--fail-on`; 3 usable but
+  incomplete coverage not accepted by `--allow-partial` (findings take
+  precedence). Unaccepted partial coverage exited 1 before.
+- The unaccepted-partial message tells the operator to re-run with
+  `--allow-partial`; a scan-timeout error is printed once and names
+  `LAYERLEAK_SCAN_TIMEOUT` and its value only when that deadline expired, while
+  a blob or request deadline keeps its own text and hints at
+  `LAYERLEAK_BLOB_TIMEOUT`/`LAYERLEAK_HTTP_TIMEOUT`; a signal cancellation
+  names the signal.
+- The first SIGINT/SIGTERM cancels the run with an "interrupt received,
+  finishing... press again to force exit" note and restores default signal
+  handling, so a second signal terminates the process (SIGINT still exits 1).
+- Debug logging goes to the command's stderr; in `--progress auto` the dynamic
+  renderer falls back to plain lines when `LAYERLEAK_LOG_LEVEL=debug`,
+  `TERM=dumb` or `CI=true`.
+- `redacted_value` masks values shorter than 12 characters completely and
+  shows the first three characters followed by a fixed eight-character mask
+  otherwise; the suffix and the length are no longer disclosed.
+- Environment-variable and label findings cover the value alone, so their
+  `fingerprint`, `match_start`, `match_end` and `redacted_value` equal those of
+  the same secret found in a file and the two no longer produce separate
+  findings. These fingerprints change once; see UPGRADING.md.
+- Detector identifiers were renamed: `digitalocean_pat` ->
+  `digitalocean_personal_access_token`, `stripe_key` -> `stripe_api_key`,
+  `gitlab_token` -> `gitlab_personal_access_token`, `jwt` -> `json_web_token`,
+  `hashicorp_vault_token` -> `vault_token`, `docker_config_identitytoken` ->
+  `docker_config_identity_token`, `npmrc_auth` -> `npmrc_basic_auth`,
+  `planetscale_token` -> `planetscale_service_token`.
+- Identifier-only detectors (`twilio_account_sid`, `sentry_dsn`) report at
+  medium confidence; `password_hash` and `facebook_access_token` are medium by
+  shape; `sensitive_file_*` findings are medium (Java keystores low) and are
+  never promoted above medium. `assigned_sensitive_value` ranks below the
+  specific rules.
+- Default-credential pairs on real hosts are reported as suppressed with the
+  reason `default_credentials` instead of being discarded.
+- Detection fixes: unquoted `KEY=VALUE` and quoted-key assignments
+  (`"key": "value"`, `key: "value"`, `key = "value"`) are detectable; the
+  entropy floor is alphabet-aware so hex, UUID-shaped and lowercase base64url
+  secrets pass while content digests and lock files are skipped; `age` secret
+  keys match their real uppercase Bech32 form; `basic_auth_url` handles
+  compact JSON and mixed-case schemes; PEM/PGP blocks without an END marker,
+  routable GitLab tokens, 76-character `ghr_` tokens, quoted `.npmrc` tokens,
+  Databricks and Telegram boundaries, percent-encoded git credentials, quoted
+  CRLF AWS profiles and BOM-prefixed INI files are detected; tokens ending in
+  `-` match whole; `.netrc` passwords need `machine`/`login` context;
+  suppression heuristics weigh placeholder markers and test paths on whole
+  words; nested duplicate matches are dropped; `compareFindings` is
+  deterministic. The default rule set runs 17-27x faster through a
+  required-literal prefilter.
+- `keyword_entropy` no longer reports CamelCase word compounds such as
+  `RootManageSharedAccessKey`; `xml_password_*` ignore boolean and keyword
+  values; `php_define_password` skips constants that describe a credential
+  (`*_TTL`, `*_PATH`, `*_FILE`); `twitch_api_token` requires a credential
+  word so the public `TWITCH_CLIENT_ID` is not reported.
+- OpenAPI: `ScanResult` requires only the fields every
+  `result_schema_version` carries and documents `scanned_at`, `scanner` and
+  the counters as present from version 2, so stored 2.x results returned by
+  `GET /api/v1/scans/{id}` stay valid; `TagResult.status` gains `partial` and
+  `skipped`; `disposition_reason` gains `default_credentials`.
 
 ### Security
 
@@ -300,6 +444,18 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   credential to a registry or token realm the caller names. Passwords are
   held in `config.Secret` and every credential type redacts itself when
   formatted.
+- The CLI never changes the permissions of a pre-existing findings
+  directory: it is inspected with `Lstat`, a symbolic link in its place is
+  refused, a group- or world-readable directory produces one warning, a
+  missing directory is created `0700` and records are written `0600`. No raw
+  secret value is ever written locally, even with
+  `LAYERLEAK_PERSIST_RAW_SECRETS=1`.
+- CLI registry credentials are taken only through `--password-stdin` (no
+  `--password` flag), apply to the registry of the scanned reference over
+  https only, and never appear in logs, output, records or the database; a
+  401/403 exits 1 with "authentication to <registry host> failed".
+- `context_snippet` redacts every copy of a matched secret inside the window,
+  not only the first one.
 
 ### Removed
 
@@ -309,6 +465,12 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   `go run ./cmd/migrate`.
 - The `# syntax=docker/dockerfile:1.7` directive and the image-level
   `LAYERLEAK_FINDINGS_DIR` default.
+- The legacy findings-array file under `findings/`, its
+  `LAYERLEAK_PERSIST_RAW_SECRETS` raw-value opt-in for local output, the
+  low-confidence grouping cap and the nearest-`go.mod` output-directory
+  heuristic. Raw secret persistence is database-only.
+- The `max_raw_finding_bytes_exceeded` diagnostic (replaced by
+  `raw_retention_truncated`).
 
 ### Compatibility
 
@@ -319,9 +481,27 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   differ for uncommon contextual formats.
 - Deployments must apply migration 0004 before `/readyz` returns success.
 - Compose deployments must set `LAYERLEAK_DB_PASSWORD`.
-- Existing `findings/*.json` files remain findings arrays. The new object
-  record uses the same basename under `findings/scans/`, so non-recursive
-  consumers remain compatible.
+- Local output: one record per scan under `./findings` (or `--output-dir`,
+  `LAYERLEAK_FINDINGS_DIR`) instead of a findings array plus a companion record
+  under `findings/scans/`; the record is `record_schema_version` 2. Consumers
+  of the old array must read `findings[]` from the record instead.
+- `result_schema_version` 1 -> 2: new `scanned_at` and `scanner` fields,
+  counters are no longer omitted when zero, `platform` is omitted when empty,
+  `tag_results[].status` adds `partial` and `skipped` and uses `scanned` in
+  both modes. Stored version 1 results are still returned unchanged by the
+  API.
+- Exit code 3 is new. Scripts that treated exit 1 as retryable must add 3 as
+  "incomplete coverage"; `--fail-on` defaults to `low`, which preserves the
+  previous exit 2 behaviour.
+- `--format json` now prints a result on failure (exit 1) where it printed
+  nothing.
+- `redacted_value` has a new shape and the fingerprints of environment and
+  label findings changed once; detector identifiers listed under "Changed"
+  were renamed. Baselines keyed on these values must be regenerated.
+- `sensitive_file_*` findings carry an empty `redacted_value`, an empty
+  `context_snippet`, `line_number` 0 and `match_start` = `match_end` = 0;
+  consumers that assumed a non-empty value or a positive span must accept
+  them.
 - Go API users: `registry.NewClient` returns `(*Client, error)` and reports
   configuration errors eagerly (`registry.MustNewClient` panics instead);
   transport failures are `*registry.RequestError` rather than `*url.Error`.

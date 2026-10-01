@@ -6,9 +6,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"golang.org/x/term"
 )
 
@@ -403,11 +403,14 @@ func progressValue(value, fallback string) string {
 	return sanitized
 }
 
+// sanitizeProgressValue prepares untrusted registry and image text for the
+// terminal: whitespace and control runs collapse to one space, and Unicode
+// format characters (bidi overrides, zero-width joiners, soft hyphens) and
+// other non-printable runes are dropped. It is the same function that
+// sanitises PublicResult messages, so the summary, stdout JSON and the scan
+// record agree. Trusted local paths are printed with %q instead.
 func sanitizeProgressValue(value string) string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	})
-	return strings.Join(fields, " ")
+	return scanservice.SanitizeMessageText(value)
 }
 
 func clampProgressLine(line string, maxWidth int) string {

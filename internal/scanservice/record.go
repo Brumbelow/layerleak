@@ -332,18 +332,38 @@ func publicMessageSanitizer(result jobs.Result) func(string) string {
 		for _, item := range replacements {
 			value = strings.ReplaceAll(value, item.raw, item.redacted)
 		}
-		return sanitizeMessageText(value)
+		return SanitizeMessageText(value)
 	}
 }
 
-// sanitizeMessageText collapses every run of control characters and
-// whitespace into one space, matching the CLI's terminal sanitiser so stdout
-// JSON, the record and the summary agree.
-func sanitizeMessageText(value string) string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	})
-	return strings.Join(fields, " ")
+// SanitizeMessageText makes untrusted registry and image text safe to print
+// on a terminal and to store. Every run of whitespace and control characters
+// becomes one space (leading and trailing runs are dropped), and Unicode
+// format characters (unicode.Cf: bidi overrides and isolates, zero-width
+// joiners and spaces, soft hyphens, the byte order mark) and other
+// non-printable runes (private use, unassigned) are removed without a
+// separator, so they can neither reorder nor hide text. The CLI uses it for
+// every progress, summary and error line, so stdout JSON, the record and the
+// summary agree.
+func SanitizeMessageText(value string) string {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	pendingSpace := false
+	for _, r := range value {
+		switch {
+		case unicode.IsSpace(r) || unicode.IsControl(r):
+			pendingSpace = builder.Len() > 0
+		case !unicode.IsPrint(r):
+			// unicode.Cf and other non-printable runes are dropped.
+		default:
+			if pendingSpace {
+				builder.WriteByte(' ')
+				pendingSpace = false
+			}
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func sanitizeStoredResult(result jobs.Result) jobs.Result {

@@ -317,7 +317,15 @@ func (w *archiveWalk) readZip(content []byte) {
 	// first entry can be examined, so the entry bound is applied to the
 	// directory's own account of itself first: an archive with more entries
 	// than the allowance is refused whole rather than parsed and then cut.
-	if entries, ok := zipDirectoryEntries(content); ok && entries > w.entryAllowance {
+	// Content whose directory the pre-check cannot locate is refused as
+	// malformed rather than handed to the reader, so no difference between
+	// the two parsers can let an unbounded directory through.
+	entries, ok := zipDirectoryEntries(content)
+	if !ok {
+		w.malformed++
+		return
+	}
+	if entries > w.entryAllowance {
 		w.refuseEntries(entries)
 		return
 	}

@@ -8,12 +8,14 @@ import (
 
 // zip end-of-central-directory geometry, as archive/zip reads it.
 const (
-	zipDirectoryEndLen      = 22
-	zipDirectory64LocLen    = 20
-	zipDirectory64EndLen    = 56
-	zipDirectoryHeaderLen   = 46
-	zipMaxCommentLen        = 65535
-	zipDirectoryEndSearch   = zipDirectoryEndLen + zipMaxCommentLen
+	zipDirectoryEndLen    = 22
+	zipDirectory64LocLen  = 20
+	zipDirectory64EndLen  = 56
+	zipDirectoryHeaderLen = 46
+	// zipDirectoryEndSearch is how far back from the end archive/zip looks
+	// for the end record (readDirectoryEnd: the last 1 KiB, then the last
+	// 65 KiB, which finds the same record when the first pass does).
+	zipDirectoryEndSearch   = 65 * 1024
 	zipDirectoryEndSig      = "PK\x05\x06"
 	zipDirectory64LocSig    = "PK\x06\x07"
 	zipDirectory64EndSig    = "PK\x06\x06"
@@ -35,9 +37,10 @@ const (
 // and the number of headers the directory region actually holds. The reader
 // compares the declared count with the parsed one in 16 bits only, so a
 // hostile archive can declare few entries and store many; counting the
-// headers in place closes that gap. ok is false when no end record can be
-// located, in which case archive/zip rejects the content before parsing
-// anything.
+// headers in place closes that gap. ok is false only where archive/zip
+// itself rejects the content before parsing any header (no end record in its
+// search window, a comment running past the end, a zip64 directory larger
+// than the content); callers refuse such content rather than parse it.
 func zipDirectoryEntries(content []byte) (entries int64, ok bool) {
 	size := int64(len(content))
 	end := zipFindDirectoryEnd(content)
@@ -63,10 +66,14 @@ func zipDirectoryEntries(content []byte) (entries int64, ok bool) {
 				}
 				return int64(records64), true
 			}
-			if size64 > uint64(size) || offset64 > uint64(size) {
+			if size64 > uint64(size) || offset64 > math.MaxInt64 {
+				// archive/zip rejects both: the directory would start before
+				// the content, or its offset does not fit an int64. An offset
+				// past the end is not rejected (the reader then reads the
+				// directory from end64-size64), so it is not refused here.
 				return 0, false
 			}
-			records, directorySize, directoryOffset = int64(records64), int64(size64), int64(offset64) //nolint:gosec // each value was checked above to be at most len(content)
+			records, directorySize, directoryOffset = int64(records64), int64(size64), int64(offset64) //nolint:gosec // records64 and size64 are at most len(content) and offset64 at most MaxInt64, checked above
 		}
 	}
 	// archive/zip reads the directory from directoryEnd-directorySize, or from
@@ -84,9 +91,11 @@ func zipDirectoryEntries(content []byte) (entries int64, ok bool) {
 	return entries, true
 }
 
-// zipFindDirectoryEnd returns the offset of the last end-of-central-directory
-// record whose declared comment fits the content, searching back through the
-// longest possible comment, or -1.
+// zipFindDirectoryEnd returns the offset of the end-of-central-directory
+// record archive/zip would use, or -1 where archive/zip finds none: the last
+// signature within the final zipDirectoryEndSearch bytes, and only when its
+// declared comment fits the content (an earlier record is never tried).
+// Trailing bytes after the comment are allowed, as the reader allows them.
 func zipFindDirectoryEnd(content []byte) int {
 	stop := len(content) - zipDirectoryEndSearch
 	if stop < 0 {
@@ -97,9 +106,10 @@ func zipFindDirectoryEnd(content []byte) int {
 			continue
 		}
 		comment := int(binary.LittleEndian.Uint16(content[offset+zipDirectoryEndLen-2:]))
-		if offset+zipDirectoryEndLen+comment <= len(content) {
-			return offset
+		if offset+zipDirectoryEndLen+comment > len(content) {
+			return -1
 		}
+		return offset
 	}
 	return -1
 }

@@ -279,7 +279,9 @@ Additions you may start reading:
   | --- | --- | --- |
   | `result_schema_version` | absent | `2` |
   | `scanned_at` | absent | RFC 3339 UTC scan start time, always present |
-  | `scanner` | absent | `{ "name": "layerleak", "version": "<build version>" }`, always present |
+  | `scanner` | absent | `{ "name": "layerleak", "version": "<build version>", "detector_set_version": "sha256:<hex>" }`, always present |
+  | `duration_ms` | absent | wall-clock milliseconds from `scanned_at` to completion, always present |
+  | `coverage.files_transcoded_utf16`, `coverage.nested_archives_expanded`, `coverage.nested_entries_scanned` | absent | always present |
   | `tags_enumerated`, `tags_resolved`, `tags_failed` | omitted when `0` | always present |
   | `suppressed_findings_count`, `suppressed_unique_fingerprints` | omitted when `0` | always present |
   | `tag_results[].status` | free string: `resolved`, `scanned`, `failed` | enum `resolved`, `scanned`, `partial`, `failed`, `skipped`, shared by both scan modes |
@@ -287,6 +289,7 @@ Additions you may start reading:
   | `findings[].redacted_value` | prefix, variable mask, suffix | fixed-length mask (see Track 1) |
   | `findings[].disposition_reason` | five reasons | adds `default_credentials` |
   | `findings[].detector_name` | old identifiers | renamed identifiers (see Track 1); `sensitive_file_*` findings carry empty value and snippet |
+  | `findings[].file_path` | layer path | layer path, or `outer/path!inner/path` for a file inside an archive stored in a layer |
 
   Everything else (`status`, counters, `targets`, `coverage`, `diagnostics`,
   `findings` fields) keeps its name and type.
@@ -325,6 +328,11 @@ Additions you may start reading:
   are a JSON 404 instead of a redirect.
 - Redacted values and context snippets are shorter and never reveal a secret
   that appears twice in a window.
+- `POST /api/v1/scans` stays registry-only: a local image source
+  (`oci:`, `oci-archive:`, `docker-archive:`) in `reference` is
+  `400 invalid_request`. The CLI's `baselined` disposition never reaches the
+  database, so API results keep the scanner's `actionable` and `example`
+  dispositions.
 
 Nothing in 3.0.0 requires an API consumer change beyond handling the new
 failure statuses; a client that validated `result_schema_version == 1` must

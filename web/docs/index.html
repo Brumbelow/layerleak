@@ -857,7 +857,8 @@ docker run --rm \
                 status class, request durations, scans by outcome and error code, in-flight scans,
                 process start time, and build info. Labels never carry paths, references, or request
                 bodies. It must differ from <code>LAYERLEAK_API_ADDR</code> and is unauthenticated,
-                so bind it to a private interface. The API logs one JSON record per request (method,
+                so bind it to a private interface. The API logs one record per request (JSON by default,
+                key=value with <code>LAYERLEAK_LOG_FORMAT=text</code>; method,
                 route pattern, status, bytes, duration, request id, remote address) and never the
                 path, query, or body.
               </p>

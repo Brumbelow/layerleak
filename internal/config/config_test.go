@@ -642,3 +642,34 @@ func TestLoadRestrictsLogLevelNames(t *testing.T) {
 		})
 	}
 }
+
+// TestREADMEDocumentsEveryVariable keeps the README configuration tables and
+// .env.example in lockstep: every variable in one must appear in the other.
+func TestREADMEDocumentsEveryVariable(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	rowPattern := regexp.MustCompile("(?m)^\\| `(LAYERLEAK_[A-Z_]+)` \\|")
+	documented := make(map[string]bool)
+	for _, match := range rowPattern.FindAllStringSubmatch(string(readme), -1) {
+		if documented[match[1]] {
+			t.Fatalf("README documents %s twice", match[1])
+		}
+		documented[match[1]] = true
+	}
+	example := readEnvExample(t)
+	for key := range example {
+		if !documented[key] {
+			t.Errorf("%s is in .env.example but has no README table row", key)
+		}
+	}
+	for key := range documented {
+		if _, present := example[key]; !present {
+			t.Errorf("%s has a README table row but is missing from .env.example", key)
+		}
+	}
+	if len(documented) < 50 {
+		t.Fatalf("expected at least 50 documented variables, found %d", len(documented))
+	}
+}

@@ -297,9 +297,12 @@ go run ./cmd/migrate
 go run ./cmd/migrate
 ```
 
-`LAYERLEAK_MIGRATIONS_DIR` is read only by the migration command; the
-container default is `/app/migrations`. The second run is intentionally a
-no-op. The migration command uses an advisory
+The second run is intentionally a no-op. The migration command reads one
+variable of its own:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LAYERLEAK_MIGRATIONS_DIR` | `/app/migrations` | Directory holding the shipped `migrations/*.sql`; from a checkout use `$PWD/migrations`. | The migration command uses an advisory
 lock, a checksummed migration ledger, and one transaction per migration. It can
 adopt a complete legacy 0001-0003 schema and refuses drift, gaps, dirty state,
 or a partial legacy schema.

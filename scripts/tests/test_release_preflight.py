@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess  # Tests run owned scripts with absolute interpreters and shell=False.  # nosec B404
@@ -13,6 +14,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'release-preflight.py'
+# scripts/release-tools.sh installs a Linux x86_64 bundle and refuses every
+# other host before it reaches the checksum step.
+LINUX_X86_64 = platform.system() == 'Linux' and platform.machine() == 'x86_64'
 
 
 class ReleasePreflightTests(unittest.TestCase):
@@ -153,20 +157,33 @@ class ReleasePreflightTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('16384', result.stderr)
 
-    def test_installer_rejects_corrupt_cached_archive_without_installation(self):
+    def run_installer_with_corrupt_cache(self, directory):
         bash = shutil.which('bash', path=os.defpath)
         self.assertIsNotNone(bash, 'Bash must be installed in the system executable path')
+        cache = Path(directory) / 'downloads'
+        cache.mkdir()
+        (cache / 'gh.tar.gz').write_bytes(b'corrupt archive')
+        # System-path Bash runs an owned script against a disposable corrupt-cache fixture.
+        return subprocess.run(  # nosec B603
+            [bash, str(SCRIPT.with_name('release-tools.sh')), directory],
+            check=False, shell=False, text=True, capture_output=True, timeout=60)
+
+    @unittest.skipUnless(LINUX_X86_64, 'the release tool bundle is Linux x86_64 only')
+    def test_installer_rejects_corrupt_cached_archive_without_installation(self):
         with tempfile.TemporaryDirectory() as directory:
-            cache = Path(directory) / 'downloads'
-            cache.mkdir()
-            (cache / 'gh.tar.gz').write_bytes(b'corrupt archive')
-            # System-path Bash runs an owned script against a disposable corrupt-cache fixture.
-            result = subprocess.run(  # nosec B603
-                [bash, str(SCRIPT.with_name('release-tools.sh')), directory],
-                check=False, shell=False, text=True, capture_output=True, timeout=60)
+            result = self.run_installer_with_corrupt_cache(directory)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Checksum verification failed', result.stderr)
             self.assertFalse((Path(directory) / 'bin' / 'gh').exists())
+
+    @unittest.skipIf(LINUX_X86_64, 'covered by the checksum test on Linux x86_64')
+    def test_installer_refuses_other_platforms_without_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_installer_with_corrupt_cache(directory)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('supports Linux x86_64 only', result.stderr)
+            self.assertNotIn('Checksum verification failed', result.stderr)
+            self.assertFalse((Path(directory) / 'bin').exists())
 
     @staticmethod
     def payload(header=None, signature='-----BEGIN PGP SIGNATURE-----\ntest\n-----END PGP SIGNATURE-----\n'):

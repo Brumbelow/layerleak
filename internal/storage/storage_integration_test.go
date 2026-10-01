@@ -631,7 +631,7 @@ func TestPostgresStorePurgeRawSecrets(t *testing.T) {
 	if err != nil || before.Total() == 0 {
 		t.Fatalf("CountRawSecrets() = %#v, %v", before, err)
 	}
-	purged, err := store.PurgeRawSecrets(context.Background())
+	purged, err := store.PurgeRawSecrets(context.Background(), PurgeOptions{})
 	if err != nil {
 		t.Fatalf("PurgeRawSecrets() error = %v", err)
 	}

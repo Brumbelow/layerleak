@@ -376,11 +376,33 @@ docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
   --entrypoint /usr/local/bin/layerleak-purge-raw-secrets \
   ghcr.io/brumbelow/layerleak:latest \
+  --dry-run
+docker run --rm \
+  -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
+  --entrypoint /usr/local/bin/layerleak-purge-raw-secrets \
+  ghcr.io/brumbelow/layerleak:latest \
   --confirm
 ```
 
-The purge command requires `--confirm`, serializes concurrent purge attempts,
-and clears only `findings.value` and `finding_occurrences.raw_snippet`.
+`--dry-run` prints how many raw finding values and occurrence snippets would
+be cleared and changes nothing. A real purge requires `--confirm`, clears only
+`findings.value` and `finding_occurrences.raw_snippet`, and works in ascending
+id-range batches of `--batch-size` rows (default 5000), one transaction per
+batch: each batch holds the exclusive purge lock only for its own transaction,
+so concurrent scan writers wait for one batch instead of the whole purge, and
+every batch is bounded by `LAYERLEAK_DATABASE_WRITE_TIMEOUT`. Running totals go
+to stderr after each batch; the final counts go to stdout. Batches that already
+committed stay purged if a later one fails, so a failed or timed-out run can
+simply be rerun. The command reads one variable of its own:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LAYERLEAK_PURGE_TIMEOUT` | `30m` | Overall deadline for one run of `layerleak-purge-raw-secrets`; `0` disables it. Each batch is separately bounded by `LAYERLEAK_DATABASE_WRITE_TIMEOUT`. |
+
+An `UPDATE` does not remove the old row versions: raw material lingers in dead
+tuples until autovacuum (or `VACUUM FULL`) rewrites `findings` and
+`finding_occurrences`, and it remains in WAL archives, replicas and backups
+taken before the purge until those are rotated or expired.
 
 ## HTTP API
 
@@ -590,6 +612,7 @@ scan is killed before it is persisted. Purge raw material only after reviewing
 the command:
 
 ```bash
+docker compose --profile tools run --rm purge-raw-secrets --dry-run
 docker compose --profile tools run --rm purge-raw-secrets --confirm
 ```
 

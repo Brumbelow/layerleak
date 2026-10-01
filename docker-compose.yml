@@ -143,6 +143,7 @@ services:
       LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
       PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
+      LAYERLEAK_PURGE_TIMEOUT: ${LAYERLEAK_PURGE_TIMEOUT:-30m}
     depends_on:
       db:
         condition: service_healthy

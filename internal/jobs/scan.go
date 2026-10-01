@@ -715,6 +715,12 @@ func hasCompletedManifest(result Result) bool {
 }
 
 func mustPreserveScanError(err error) bool {
+	// An unsupported manifest (foreign or non-distributable layers) or a
+	// platform selector that matched nothing is a per-target coverage outcome:
+	// the sweep records it and moves on to the next target.
+	if scanner.IsUnsupportedManifest(err) || scanner.IsPlatformNotFound(err) {
+		return false
+	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || manifest.IsIntegrityError(err)
 }
 

@@ -14,9 +14,33 @@ import (
 
 	"github.com/brumbelow/layerleak/v3/internal/detectors"
 	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
+
+func TestMustPreserveScanErrorLetsUnsupportedManifestsContinueTheSweep(t *testing.T) {
+	unsupported := &scanner.UnsupportedManifestError{
+		Digest: "sha256:" + strings.Repeat("a", 64),
+		Cause:  &layers.UnsupportedLayerError{Digest: "sha256:" + strings.Repeat("f", 64), MediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+	}
+	notFound := &scanner.PlatformNotFoundError{Selector: "linux/arm64", Actual: manifest.Platform{OS: "linux", Architecture: "amd64"}}
+	for _, err := range []error{unsupported, notFound} {
+		if mustPreserveScanError(err) {
+			t.Fatalf("mustPreserveScanError(%T) = true", err)
+		}
+	}
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		&manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch},
+	} {
+		if !mustPreserveScanError(err) {
+			t.Fatalf("mustPreserveScanError(%v) = false", err)
+		}
+	}
+}
 
 func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	configOneBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)
@@ -667,13 +691,15 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 		MaxRawFindingBytes: maxRawFindingBytes,
 		TagPageSize:        100,
 	})
-	if err == nil || !IsIncomplete(err) {
+	// Spending the raw budget disables retention for the rest of the sweep but
+	// never costs detection coverage, so both targets complete.
+	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
-	if result.Status != ResultStatusPartial {
+	if result.Status != ResultStatusCompleted {
 		t.Fatalf("result.Status = %q", result.Status)
 	}
-	if result.CompletedTargetCount != 1 || result.PartialTargetCount != 1 {
+	if result.CompletedTargetCount != 2 || result.PartialTargetCount != 0 {
 		t.Fatalf("target counts = completed %d, partial %d", result.CompletedTargetCount, result.PartialTargetCount)
 	}
 	if len(result.DetailedFindings) != 2 {
@@ -706,7 +732,7 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 
 	foundDiagnostic := false
 	for _, diagnostic := range result.Diagnostics {
-		if diagnostic.Code != "max_raw_finding_bytes_exceeded" {
+		if diagnostic.Code != "raw_retention_truncated" {
 			continue
 		}
 		foundDiagnostic = true

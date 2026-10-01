@@ -77,6 +77,58 @@ type Diagnostic struct {
 	Observed int64  `json:"observed,omitempty"`
 }
 
+// UnsupportedManifestError reports a selected manifest that Layerleak cannot
+// scan because its layers are foreign/non-distributable or use an unknown
+// media type. It is a coverage outcome (the platform is reported as failed
+// with a manifest_unsupported diagnostic and the scan continues), never an
+// integrity failure, so --allow-partial may accept it.
+type UnsupportedManifestError struct {
+	Digest   string
+	Platform manifest.Platform
+	Cause    error
+}
+
+func (e *UnsupportedManifestError) Error() string {
+	subject := strings.TrimSpace(e.Digest)
+	if platform := e.Platform.String(); platform != "" {
+		subject = platform + " (" + subject + ")"
+	}
+	return fmt.Sprintf("manifest %s is not supported: %v", subject, e.Cause)
+}
+
+func (e *UnsupportedManifestError) Unwrap() error {
+	return e.Cause
+}
+
+// IsUnsupportedManifest reports whether err describes a manifest that cannot
+// be scanned on this platform policy.
+func IsUnsupportedManifest(err error) bool {
+	var target *UnsupportedManifestError
+	return errors.As(err, &target)
+}
+
+// PlatformNotFoundError reports that a single-manifest image does not match
+// the requested platform selector.
+type PlatformNotFoundError struct {
+	Selector string
+	Actual   manifest.Platform
+}
+
+func (e *PlatformNotFoundError) Error() string {
+	actual := e.Actual.String()
+	if actual == "" {
+		actual = "unspecified"
+	}
+	return fmt.Sprintf("platform %s not found in image manifest (image platform is %s)", e.Selector, actual)
+}
+
+// IsPlatformNotFound reports whether err describes a platform selector that
+// matched no manifest.
+func IsPlatformNotFound(err error) bool {
+	var target *PlatformNotFoundError
+	return errors.As(err, &target)
+}
+
 type ProgressPhase string
 
 const (
@@ -196,14 +248,22 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			manifest: &document.Manifest,
 		})
 	case manifest.DocumentKindIndex:
-		selected, err := manifest.SelectDescriptors(document.Index, request.Platform)
+		selection, err := manifest.SelectManifests(document.Index, request.Platform)
 		if err != nil {
 			return result, err
 		}
-		if request.MaxImageManifests > 0 && len(selected) > request.MaxImageManifests {
+		if request.MaxImageManifests > 0 && len(selection.Selected) > request.MaxImageManifests {
 			return result, limits.NewExceeded(limits.Kind("image_manifests"), int64(request.MaxImageManifests), "image index")
 		}
-		for _, descriptor := range selected {
+		for _, skipped := range selection.Skipped {
+			result.Diagnostics = appendDiagnostic(result.Diagnostics, Diagnostic{
+				Code:    string(skipped.Reason),
+				Scope:   "platform",
+				Subject: skipped.Descriptor.Digest,
+				Message: skipped.Detail,
+			})
+		}
+		for _, descriptor := range selection.Selected {
 			targets = append(targets, target{descriptor: descriptor})
 		}
 	default:
@@ -221,21 +281,19 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
+	platformErrors := make([]error, 0)
 	findingsFound := 0
+	budgetStopped := false
 	for _, target := range targets {
-		if budget.rawExceeded {
-			result.Coverage.Complete = false
-			result.Diagnostics = append(result.Diagnostics, budget.diagnostic())
-			break
-		}
 		if budget.exhausted() {
 			budget.markExceeded(target.descriptor.Digest)
+			budgetStopped = true
 			result.Coverage.Complete = false
-			result.Diagnostics = append(result.Diagnostics, budget.diagnostic())
+			result.Diagnostics = appendDiagnostic(result.Diagnostics, budget.diagnostic())
 			break
 		}
 		if err := ctx.Err(); err != nil {
-			finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+			finalizeScan(&result, budget, allDetailedFindings, allSuppressedDetailedFindings)
 			return result, err
 		}
 		emitProgress(request, ProgressUpdate{
@@ -270,8 +328,9 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			}
 			result.PlatformResults = append(result.PlatformResults, platformResult)
 			result.Coverage = mergeCoverage(result.Coverage, platformResult.Coverage, result.CompletedManifestCount+result.FailedManifestCount > 0)
-			result.Diagnostics = append(result.Diagnostics, platformResult.Diagnostics...)
+			result.Diagnostics = appendDiagnostics(result.Diagnostics, platformResult.Diagnostics)
 			result.FailedManifestCount++
+			platformErrors = append(platformErrors, err)
 			emitProgress(request, ProgressUpdate{
 				Phase:                 ProgressPhaseManifestFailed,
 				Repository:            request.Reference.Repository,
@@ -285,7 +344,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 				Message:               err.Error(),
 			})
 			if limits.IsExceeded(err) || manifest.IsIntegrityError(err) || isCancellationError(err) || ctx.Err() != nil {
-				finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+				finalizeScan(&result, budget, allDetailedFindings, allSuppressedDetailedFindings)
 				return result, err
 			}
 			continue
@@ -293,7 +352,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 		result.PlatformResults = append(result.PlatformResults, platformResult)
 		result.Coverage = mergeCoverage(result.Coverage, platformResult.Coverage, result.CompletedManifestCount+result.FailedManifestCount > 0)
-		result.Diagnostics = append(result.Diagnostics, platformResult.Diagnostics...)
+		result.Diagnostics = appendDiagnostics(result.Diagnostics, platformResult.Diagnostics)
 		result.CompletedManifestCount++
 		emitProgress(request, ProgressUpdate{
 			Phase:                 ProgressPhaseManifestCompleted,
@@ -309,9 +368,17 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 		})
 	}
 
-	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+	finalizeScan(&result, budget, allDetailedFindings, allSuppressedDetailedFindings)
 	if result.CompletedManifestCount == 0 {
-		return result, allSelectedManifestsFailedError(result.PlatformResults)
+		if budgetStopped && len(result.PlatformResults) == 0 {
+			// The findings budget carried in from earlier targets was already
+			// spent, so nothing was attempted. That is incomplete coverage, not
+			// a failure of the selected manifests.
+			result.Status = ResultStatusPartial
+			result.Coverage.Complete = false
+			return result, nil
+		}
+		return result, allSelectedManifestsFailedError(result.PlatformResults, platformErrors)
 	}
 	emitProgress(request, ProgressUpdate{
 		Phase:                 ProgressPhaseCompleted,
@@ -385,6 +452,18 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 		platform.Variant = imageConfig.Variant
 	}
 	platformResult.Platform = platform
+	if preloaded != nil && strings.TrimSpace(request.Platform) != "" {
+		// The root document was a single image manifest, so no index entry was
+		// matched against the selector. Enforce it against the image config
+		// before any detection runs for a platform the caller did not ask for.
+		selector, err := manifest.ParsePlatformSelector(request.Platform)
+		if err != nil {
+			return platformResult, nil, nil, err
+		}
+		if !platform.Matches(selector) {
+			return platformResult, nil, nil, &PlatformNotFoundError{Selector: strings.TrimSpace(request.Platform), Actual: platform}
+		}
+	}
 
 	budgetStart := budget.snapshot()
 	metadataFindings := scanMetadataWithBudget(budget, request.Detectors, descriptor.Digest, platform, imageConfig)
@@ -425,6 +504,9 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 			}
 			return &verifiedReadCloser{VerifyingReader: verifier, closer: response.Body, cancel: cancel}, nil
 		}))
+		if layers.IsUnsupportedLayer(err) {
+			err = &UnsupportedManifestError{Digest: descriptor.Digest, Platform: platform, Cause: err}
+		}
 	}
 
 	fileFindings := scanArtifactsWithBudget(budget, request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileFinal, true, layerResult.FinalFiles)
@@ -516,20 +598,27 @@ type detectionCoverage struct {
 	detectorInputBytesScanned int64
 }
 
+// detectionBudget tracks the two per-scan budgets. The findings budget stops
+// detection when it is spent because nothing further could be reported. The
+// raw-retention budget only stops raw values from being kept: detection keeps
+// running with retention disabled and the truncation is surfaced as a
+// diagnostic, so an operator convenience never costs detection coverage.
 type detectionBudget struct {
-	ctx                context.Context
-	maxFindings        int
-	retained           int
-	exceeded           bool
-	observed           int
-	diagnosticManifest string
-	err                error
-	retainRaw          bool
-	maxRawBytes        int64
-	rawBytes           int64
-	rawExceeded        bool
-	rawObserved        int64
-	coverage           detectionCoverage
+	ctx                  context.Context
+	maxFindings          int
+	retained             int
+	exceeded             bool
+	observed             int
+	diagnosticManifest   string
+	err                  error
+	retainRaw            bool
+	maxRawBytes          int64
+	rawBytes             int64
+	rawTruncated         bool
+	rawTruncatedFindings int
+	rawObserved          int64
+	rawManifest          string
+	coverage             detectionCoverage
 }
 
 func newDetectionBudget(ctx context.Context, request Request) *detectionBudget {
@@ -593,16 +682,18 @@ func (b *detectionBudget) scan(detectorSet detectors.Set, input findings.Input, 
 			b.diagnosticManifest = input.ManifestDigest
 			break
 		}
-		retainRaw := b.retainRaw
+		retainRaw := b.retainRaw && !b.rawTruncated
 		if retainRaw && b.maxRawBytes > 0 {
 			rawSize, rawSizeErr := normalizer.RawByteSize(match)
 			if rawSizeErr != nil {
 				continue
 			}
 			if b.rawBytes > b.maxRawBytes || rawSize > b.maxRawBytes-b.rawBytes {
-				b.rawExceeded = true
+				// Once the budget is spent raw retention stays off for the rest of
+				// the scan; detection continues with redacted findings only.
+				b.rawTruncated = true
 				b.rawObserved = b.rawBytes + rawSize
-				b.diagnosticManifest = input.ManifestDigest
+				b.rawManifest = input.ManifestDigest
 				retainRaw = false
 			}
 		}
@@ -612,11 +703,11 @@ func (b *detectionBudget) scan(detectorSet detectors.Set, input findings.Input, 
 		}
 		result = append(result, finding)
 		b.retained++
-		if retainRaw {
+		switch {
+		case retainRaw:
 			b.rawBytes += int64(len(finding.Value)) + int64(len(finding.RawSnippet))
-		}
-		if b.rawExceeded {
-			break
+		case b.retainRaw && b.rawTruncated:
+			b.rawTruncatedFindings++
 		}
 	}
 	return result
@@ -626,8 +717,10 @@ func (b *detectionBudget) exhausted() bool {
 	return b != nil && b.maxFindings > 0 && b.retained >= b.maxFindings
 }
 
+// stopped reports whether detection must halt. Only the findings budget stops
+// detection; raw-retention truncation is reported, not enforced as a stop.
 func (b *detectionBudget) stopped() bool {
-	return b != nil && (b.exceeded || b.rawExceeded)
+	return b != nil && b.exceeded
 }
 
 func (b *detectionBudget) markExceeded(manifestDigest string) {
@@ -657,17 +750,20 @@ func (b *detectionBudget) delta(before detectionCoverage) detectionCoverage {
 	}
 }
 
-func (b *detectionBudget) diagnostic() Diagnostic {
-	if b.rawExceeded {
-		return Diagnostic{
-			Code:     "max_raw_finding_bytes_exceeded",
-			Scope:    "scan",
-			Subject:  b.diagnosticManifest,
-			Message:  fmt.Sprintf("scan reached raw finding byte limit of %d before coverage completed", b.maxRawBytes),
-			Limit:    b.maxRawBytes,
-			Observed: b.rawObserved,
-		}
+// rawDiagnostic describes raw-retention truncation. It is scan-scoped and is
+// attached once, when the result is finalised, so the finding count is final.
+func (b *detectionBudget) rawDiagnostic() Diagnostic {
+	return Diagnostic{
+		Code:     "raw_retention_truncated",
+		Scope:    "scan",
+		Subject:  b.rawManifest,
+		Message:  fmt.Sprintf("raw secret retention stopped at the %d byte limit; %d finding(s) were recorded without raw values and detection continued", b.maxRawBytes, b.rawTruncatedFindings),
+		Limit:    b.maxRawBytes,
+		Observed: b.rawObserved,
 	}
+}
+
+func (b *detectionBudget) diagnostic() Diagnostic {
 	return Diagnostic{
 		Code:     "max_findings_exceeded",
 		Scope:    "scan",
@@ -848,14 +944,42 @@ func sortPlatformResults(items []PlatformResult) {
 	})
 }
 
-func allSelectedManifestsFailedError(items []PlatformResult) error {
-	errors := collectErrorMessages(len(items), func(index int) string {
+// allSelectedManifestsFailedError summarises why no manifest completed. Only
+// the typed platform outcomes (unsupported manifests and selector mismatches)
+// are exposed through Unwrap so callers can classify them without inheriting
+// transport or registry failures from other platforms.
+func allSelectedManifestsFailedError(items []PlatformResult, causes []error) error {
+	typed := make([]error, 0, len(causes))
+	for _, cause := range causes {
+		if IsUnsupportedManifest(cause) || IsPlatformNotFound(cause) {
+			typed = append(typed, cause)
+		}
+	}
+	if len(causes) == 1 && len(typed) == 1 && IsPlatformNotFound(typed[0]) {
+		return typed[0]
+	}
+
+	messages := collectErrorMessages(len(items), func(index int) string {
 		return items[index].Error
 	})
-	if len(errors) == 0 {
-		return fmt.Errorf("all selected manifests failed")
+	message := "all selected manifests failed"
+	if len(messages) > 0 {
+		message += ": " + strings.Join(messages, "; ")
 	}
-	return fmt.Errorf("all selected manifests failed: %s", strings.Join(errors, "; "))
+	return &selectedManifestsFailedError{message: message, causes: typed}
+}
+
+type selectedManifestsFailedError struct {
+	message string
+	causes  []error
+}
+
+func (e *selectedManifestsFailedError) Error() string {
+	return e.message
+}
+
+func (e *selectedManifestsFailedError) Unwrap() []error {
+	return e.causes
 }
 
 func collectErrorMessages(limit int, message func(index int) string) []string {
@@ -898,6 +1022,15 @@ func emitProgress(request Request, update ProgressUpdate) {
 		update.Repository = request.Reference.Repository
 	}
 	request.Progress(update)
+}
+
+// finalizeScan attaches the scan-scoped budget diagnostics and finalises the
+// result. Every exit from Scan after the budget exists goes through it.
+func finalizeScan(result *Result, budget *detectionBudget, actionable, suppressed []findings.DetailedFinding) {
+	if budget != nil && budget.rawTruncated {
+		result.Diagnostics = appendDiagnostic(result.Diagnostics, budget.rawDiagnostic())
+	}
+	finalizeResult(result, actionable, suppressed)
 }
 
 func finalizeResult(result *Result, actionable, suppressed []findings.DetailedFinding) {
@@ -1000,7 +1133,39 @@ func manifestStatusMessage(prefix string, descriptor manifest.Descriptor) string
 	return prefix + " " + target
 }
 
+// verifyRootDocument checks the root manifest body against the digest the
+// caller expects (the reference digest, or the registry's Docker-Content-Digest
+// for tag references) before a single byte of untrusted JSON is decoded. Only
+// then is the document parsed, validated and checked for media-type
+// consistency with the response.
 func verifyRootDocument(reference manifest.Reference, response registry.ManifestResponse) (manifest.Document, string, error) {
+	requestedDigest := strings.TrimSpace(reference.Digest)
+	responseDigest := strings.TrimSpace(response.Digest)
+	if requestedDigest != "" && responseDigest != "" && requestedDigest != responseDigest {
+		return manifest.Document{}, "", &manifest.IntegrityError{
+			Kind:     manifest.IntegrityDigestMismatch,
+			Subject:  reference.Original,
+			Expected: requestedDigest,
+			Actual:   responseDigest,
+		}
+	}
+	expectedDigest := requestedDigest
+	if expectedDigest == "" {
+		expectedDigest = responseDigest
+	}
+	if expectedDigest == "" {
+		// Neither the reference nor the registry named a digest; the body can
+		// only be identified by its own hash.
+		computed, err := manifest.DigestBytes("sha256", response.Body)
+		if err != nil {
+			return manifest.Document{}, "", err
+		}
+		expectedDigest = computed
+	}
+	if err := verifyRootBytes(reference.Original, expectedDigest, response.Body); err != nil {
+		return manifest.Document{}, "", fmt.Errorf("verify root manifest: %w", err)
+	}
+
 	document, err := manifest.ParseDocument(response.MediaType, response.Body)
 	if err != nil {
 		return manifest.Document{}, "", &manifest.IntegrityError{
@@ -1023,42 +1188,29 @@ func verifyRootDocument(reference manifest.Reference, response registry.Manifest
 		return manifest.Document{}, "", err
 	}
 
-	requestedDigest := strings.TrimSpace(reference.Digest)
-	responseDigest := strings.TrimSpace(response.Digest)
-	if requestedDigest != "" && responseDigest != "" && requestedDigest != responseDigest {
-		return manifest.Document{}, "", &manifest.IntegrityError{
-			Kind:     manifest.IntegrityDigestMismatch,
-			Subject:  reference.Original,
-			Expected: requestedDigest,
-			Actual:   responseDigest,
-		}
-	}
-	if requestedDigest == "" {
-		requestedDigest = responseDigest
-	}
-	if requestedDigest == "" {
-		requestedDigest, err = manifest.DigestBytes("sha256", response.Body)
-		if err != nil {
-			return manifest.Document{}, "", err
-		}
-	}
-	rootDescriptor := manifest.Descriptor{
-		MediaType: expectedMediaType,
-		Digest:    requestedDigest,
-		Size:      int64(len(response.Body)),
-	}
-	if err := manifest.VerifyDescriptorBytes(rootDescriptor, response.Body, response.MediaType, false); err != nil {
-		return manifest.Document{}, "", fmt.Errorf("verify root manifest: %w", err)
-	}
-	if responseDigest != "" && responseDigest != requestedDigest {
-		responseDescriptor := rootDescriptor
-		responseDescriptor.Digest = responseDigest
-		if err := manifest.VerifyDescriptorBytes(responseDescriptor, response.Body, response.MediaType, false); err != nil {
-			return manifest.Document{}, "", fmt.Errorf("verify registry manifest digest: %w", err)
-		}
-	}
+	return document, expectedDigest, nil
+}
 
-	return document, requestedDigest, nil
+// verifyRootBytes compares body with expectedDigest without consulting any
+// media type, so it can run before the document is parsed.
+func verifyRootBytes(subject, expectedDigest string, body []byte) error {
+	if err := manifest.ValidateDigest(expectedDigest); err != nil {
+		return err
+	}
+	algorithm, _, _ := strings.Cut(expectedDigest, ":")
+	actual, err := manifest.DigestBytes(algorithm, body)
+	if err != nil {
+		return err
+	}
+	if actual != expectedDigest {
+		return &manifest.IntegrityError{
+			Kind:     manifest.IntegrityDigestMismatch,
+			Subject:  subject,
+			Expected: expectedDigest,
+			Actual:   actual,
+		}
+	}
+	return nil
 }
 
 func verifyManifestResponseDescriptor(descriptor manifest.Descriptor, response registry.ManifestResponse) error {
@@ -1190,6 +1342,18 @@ func mergeCoverage(left, right Coverage, initialized bool) Coverage {
 
 func diagnosticForError(scope, subject string, err error) Diagnostic {
 	diagnostic := Diagnostic{Scope: scope, Subject: subject, Message: err.Error()}
+	if IsUnsupportedManifest(err) {
+		diagnostic.Code = "manifest_unsupported"
+		return diagnostic
+	}
+	if IsPlatformNotFound(err) {
+		diagnostic.Code = "platform_not_found"
+		return diagnostic
+	}
+	if layers.IsTrailingData(err) {
+		diagnostic.Code = "layer_trailing_data"
+		return diagnostic
+	}
 	if integrityErr, ok := manifest.AsIntegrityError(err); ok {
 		diagnostic.Code = string(integrityErr.Kind)
 		return diagnostic
@@ -1215,4 +1379,14 @@ func appendDiagnostic(items []Diagnostic, item Diagnostic) []Diagnostic {
 		}
 	}
 	return append(items, item)
+}
+
+// appendDiagnostics merges platform diagnostics into the scan result without
+// repeating scan-scoped entries (such as a budget diagnostic) that a platform
+// already carried.
+func appendDiagnostics(items []Diagnostic, additions []Diagnostic) []Diagnostic {
+	for _, item := range additions {
+		items = appendDiagnostic(items, item)
+	}
+	return items
 }

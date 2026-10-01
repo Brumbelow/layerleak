@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
@@ -337,6 +338,25 @@ func TestScanCommandRejectsInvalidScopeFlags(t *testing.T) {
 	}
 }
 
+func TestCanAcceptPartialAcceptsUnsupportedManifestsButNotIntegrityFailures(t *testing.T) {
+	result := jobs.Result{ResultSchemaVersion: 1, CompletedManifestCount: 1, FailedManifestCount: 1}
+	unsupported := &scanner.UnsupportedManifestError{
+		Digest:   "sha256:" + strings.Repeat("a", 64),
+		Platform: manifest.Platform{OS: "windows", Architecture: "amd64"},
+		Cause:    &layers.UnsupportedLayerError{Digest: "sha256:" + strings.Repeat("f", 64), MediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+	}
+	if !canAcceptPartial(context.Background(), result, unsupported) {
+		t.Fatal("canAcceptPartial(unsupported manifest) = false")
+	}
+	integrity := &manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch, Subject: "sha256:" + strings.Repeat("a", 64)}
+	if canAcceptPartial(context.Background(), result, integrity) {
+		t.Fatal("canAcceptPartial(integrity error) = true")
+	}
+	if canAcceptPartial(context.Background(), jobs.Result{ResultSchemaVersion: 1}, unsupported) {
+		t.Fatal("canAcceptPartial(no completed manifest) = true")
+	}
+}
+
 func TestScanCommandValidatesOutputAndScopeBeforeScanning(t *testing.T) {
 	cases := []struct {
 		name string
@@ -345,7 +365,7 @@ func TestScanCommandValidatesOutputAndScopeBeforeScanning(t *testing.T) {
 	}{
 		{name: "invalid format", args: []string{"scan", "library/app", "--format", "xml"}, want: "unsupported output format"},
 		{name: "invalid progress", args: []string{"scan", "library/app", "--progress", "sometimes"}, want: "unsupported progress mode"},
-		{name: "invalid platform", args: []string{"scan", "library/app", "--platform", "linux"}, want: "invalid --platform"},
+		{name: "invalid platform", args: []string{"scan", "library/app", "--platform", "linux/amd64/"}, want: "invalid --platform"},
 		{name: "all tags pinned", args: []string{"scan", "library/app:latest", "--all-tags"}, want: "requires a bare repository"},
 		{name: "scope limit without all tags", args: []string{"scan", "library/app", "--tag-page-size", "50"}, want: "requires --all-tags"},
 	}

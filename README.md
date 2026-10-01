@@ -126,10 +126,13 @@ layerleak scan public.ecr.aws/docker/library/alpine:3.20
 layerleak scan mcr.microsoft.com/hello-world:latest
 ```
 
-Choose one platform from a multi-platform index:
+Choose platforms from a multi-platform index. Without `--platform` every
+`linux` manifest is scanned and entries for other operating systems are
+reported as `platform_skipped` diagnostics instead of being downloaded:
 
 ```bash
 layerleak scan alpine:latest --platform linux/arm64
+layerleak scan golang:latest --platform linux
 ```
 
 Scanning every public tag is explicit because it can perform substantial work:
@@ -147,7 +150,7 @@ Useful scan flags:
 | Flag | Meaning |
 | --- | --- |
 | `--format summary|json` | Human summary or stable JSON result. |
-| `--platform os/arch[/variant]` | Restrict a multi-platform image. |
+| `--platform os[/arch[/variant]]` | Select platforms from a multi-platform image; omitted parts match anything and `linux/arm64/v8` is equivalent to `linux/arm64`. Defaults to every `linux` manifest. A single-manifest image that does not match fails with `platform_not_found`. |
 | `--all-tags` | Enumerate every public tag for a bare repository. |
 | `--allow-partial` | Accept usable incomplete coverage while preserving `status`, coverage, and diagnostics. |
 | `--progress auto|tty|plain|off` | Select interactive, log-safe, or disabled progress output. |
@@ -274,7 +277,7 @@ apply. Hosts matched by `NO_PROXY` are connected directly with address pinning.
 | `LAYERLEAK_MAX_CONFIG_BYTES` | `8388608` | Maximum image config response size. |
 | `LAYERLEAK_MAX_TAG_RESPONSE_BYTES` | `8388608` | Maximum tag-list response page size. |
 | `LAYERLEAK_MAX_FINDINGS_PER_SCAN` | `10000` | Maximum findings retained for one scan. |
-| `LAYERLEAK_MAX_RAW_FINDING_BYTES` | `67108864` | Maximum raw value and context bytes retained when raw-secret persistence is enabled; exceeding it makes coverage partial. |
+| `LAYERLEAK_MAX_RAW_FINDING_BYTES` | `67108864` | Maximum raw value and context bytes retained when raw-secret persistence is enabled. Once reached, detection continues with raw retention disabled, coverage stays complete, and a `raw_retention_truncated` diagnostic reports how many findings were recorded without raw values. |
 | `LAYERLEAK_TAG_PAGE_SIZE` | `100` | Registry tag-list page size; must be positive. |
 | `LAYERLEAK_MAX_REPOSITORY_TAGS` | `1000` | Maximum tags enumerated by `--all-tags`. |
 | `LAYERLEAK_MAX_REPOSITORY_TARGETS` | `250` | Maximum distinct targets scanned by `--all-tags`. |

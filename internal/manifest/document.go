@@ -22,7 +22,22 @@ const (
 	MediaTypeDockerSchema2LayerGzip        = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 	MediaTypeDockerSchema2ForeignLayer     = "application/vnd.docker.image.rootfs.foreign.diff.tar"
 	MediaTypeDockerSchema2ForeignLayerGzip = "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"
+
+	// Non-distributable (foreign) layers are referenced by URL instead of being
+	// served by the registry. They are syntactically valid layer descriptors
+	// that Layerleak does not download.
+	MediaTypeOCIImageLayerNonDistributable     = "application/vnd.oci.image.layer.nondistributable.v1.tar"
+	MediaTypeOCIImageLayerNonDistributableGzip = "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip"
+	MediaTypeOCIImageLayerNonDistributableZstd = "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd"
+
+	// Common non-image index entries that are skipped rather than scanned.
+	MediaTypeOCIEmptyJSON = "application/vnd.oci.empty.v1+json"
+	MediaTypeInTotoJSON   = "application/vnd.in-toto+json"
 )
+
+// DefaultPlatformOS is the operating system whose manifests are selected from
+// an image index when no platform selector is given.
+const DefaultPlatformOS = "linux"
 
 type Platform struct {
 	OS           string `json:"os,omitempty"`
@@ -165,6 +180,8 @@ func ParseImageConfig(body []byte) (ImageConfig, error) {
 	return cfg, nil
 }
 
+// ParsePlatformSelector parses an os, os/arch or os/arch/variant selector.
+// Omitted components act as wildcards when the selector is matched.
 func ParsePlatformSelector(raw string) (Platform, error) {
 	if raw == "" {
 		return Platform{}, fmt.Errorf("platform selector is required")
@@ -174,15 +191,20 @@ func ParsePlatformSelector(raw string) (Platform, error) {
 	}
 
 	parts := strings.Split(raw, "/")
-	if len(parts) < 2 || len(parts) > 3 {
-		return Platform{}, fmt.Errorf("platform selector must be os/arch or os/arch/variant")
+	if len(parts) > 3 {
+		return Platform{}, fmt.Errorf("platform selector must be os, os/arch or os/arch/variant")
+	}
+	for _, part := range parts {
+		if part == "" {
+			return Platform{}, fmt.Errorf("platform selector components must not be empty")
+		}
 	}
 
-	platform := Platform{
-		OS:           parts[0],
-		Architecture: parts[1],
+	platform := Platform{OS: parts[0]}
+	if len(parts) > 1 {
+		platform.Architecture = parts[1]
 	}
-	if len(parts) == 3 {
+	if len(parts) > 2 {
 		platform.Variant = parts[2]
 	}
 
@@ -193,9 +215,15 @@ func ParsePlatformSelector(raw string) (Platform, error) {
 	return platform, nil
 }
 
-func ValidatePlatform(platform Platform, requireOSAndArchitecture bool) error {
-	if requireOSAndArchitecture && (platform.OS == "" || platform.Architecture == "") {
-		return fmt.Errorf("platform selector must include os and architecture")
+// ValidatePlatform checks the syntax of every platform component. A selector
+// must name an operating system and may only carry a variant alongside an
+// architecture; descriptor platforms may leave every component empty.
+func ValidatePlatform(platform Platform, selector bool) error {
+	if selector && platform.OS == "" {
+		return fmt.Errorf("platform selector must include an operating system")
+	}
+	if selector && platform.Variant != "" && platform.Architecture == "" {
+		return fmt.Errorf("platform selector variant requires an architecture")
 	}
 	for _, field := range []struct {
 		name  string
@@ -219,38 +247,125 @@ func ValidatePlatform(platform Platform, requireOSAndArchitecture bool) error {
 	return nil
 }
 
-func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) {
-	if strings.TrimSpace(selector) == "" {
-		selected := slices.Clone(index.Manifests)
-		selected = slices.DeleteFunc(selected, func(item Descriptor) bool {
-			return !IsScannableManifestDescriptor(item)
-		})
-		if len(selected) == 0 {
-			return nil, fmt.Errorf("image index does not contain supported image manifests")
+// SkipReason classifies an index entry that was not selected for scanning.
+// The values double as diagnostic codes.
+type SkipReason string
+
+const (
+	// SkipReasonUnsupportedManifest marks entries that are not scannable image
+	// manifests: attestation manifests, nested indexes, artifact descriptors and
+	// other non-image media types.
+	SkipReasonUnsupportedManifest SkipReason = "manifest_skipped"
+	// SkipReasonPlatform marks image manifests left out by the default
+	// linux-only platform policy.
+	SkipReasonPlatform SkipReason = "platform_skipped"
+)
+
+// SkippedDescriptor records why an index entry was not selected.
+type SkippedDescriptor struct {
+	Descriptor Descriptor
+	Reason     SkipReason
+	Detail     string
+}
+
+// Selection is the outcome of applying the platform policy to an image index.
+type Selection struct {
+	Selected []Descriptor
+	Skipped  []SkippedDescriptor
+}
+
+// SelectManifests applies the platform policy to an image index.
+//
+// Without a selector every scannable image manifest whose platform OS is
+// linux (or unspecified) is selected; non-image entries and manifests for
+// other operating systems are reported in Skipped. With a selector only the
+// matching image manifests are selected; entries that do not match the
+// selector are left out silently and non-image entries that would otherwise
+// match are reported.
+func SelectManifests(index ImageIndex, selector string) (Selection, error) {
+	explicit := strings.TrimSpace(selector) != ""
+	var want Platform
+	if explicit {
+		parsed, err := ParsePlatformSelector(selector)
+		if err != nil {
+			return Selection{}, err
 		}
-		return uniqueDescriptors(selected)
+		want = parsed
 	}
 
-	platform, err := ParsePlatformSelector(selector)
+	selection := Selection{
+		Selected: make([]Descriptor, 0, len(index.Manifests)),
+		Skipped:  make([]SkippedDescriptor, 0),
+	}
+	skip := func(descriptor Descriptor, reason SkipReason, detail string) {
+		selection.Skipped = append(selection.Skipped, SkippedDescriptor{Descriptor: descriptor, Reason: reason, Detail: detail})
+	}
+	scannable := 0
+	for _, candidate := range index.Manifests {
+		if detail, ok := unsupportedIndexEntryDetail(candidate); ok {
+			if !explicit || candidate.Platform.Matches(want) {
+				skip(candidate, SkipReasonUnsupportedManifest, detail)
+			}
+			continue
+		}
+		scannable++
+		if explicit {
+			if candidate.Platform.Matches(want) {
+				selection.Selected = append(selection.Selected, candidate)
+			}
+			continue
+		}
+		if isDefaultPlatform(candidate.Platform) {
+			selection.Selected = append(selection.Selected, candidate)
+			continue
+		}
+		skip(candidate, SkipReasonPlatform, fmt.Sprintf("skipped platform %s: only %s manifests are selected without a platform selector", candidate.Platform.String(), DefaultPlatformOS))
+	}
+
+	if len(selection.Selected) == 0 {
+		switch {
+		case scannable == 0:
+			return Selection{}, fmt.Errorf("image index does not contain supported image manifests")
+		case explicit:
+			return Selection{}, fmt.Errorf("platform %s not found in manifest index", want.String())
+		default:
+			return Selection{}, fmt.Errorf("image index does not contain %s image manifests; select another platform explicitly", DefaultPlatformOS)
+		}
+	}
+
+	unique, err := uniqueDescriptors(selection.Selected)
+	if err != nil {
+		return Selection{}, err
+	}
+	selection.Selected = unique
+	return selection, nil
+}
+
+// SelectDescriptors returns only the selected descriptors of SelectManifests.
+func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) {
+	selection, err := SelectManifests(index, selector)
 	if err != nil {
 		return nil, err
 	}
+	return selection.Selected, nil
+}
 
-	matches := make([]Descriptor, 0)
-	for _, candidate := range index.Manifests {
-		if !IsScannableManifestDescriptor(candidate) {
-			continue
-		}
-		if candidate.Platform.Matches(platform) {
-			matches = append(matches, candidate)
-		}
+func unsupportedIndexEntryDetail(descriptor Descriptor) (string, bool) {
+	switch {
+	case IsIndexMediaType(descriptor.MediaType):
+		return "skipped index entry: nested image indexes are not scanned", true
+	case !IsManifestMediaType(descriptor.MediaType):
+		return fmt.Sprintf("skipped index entry: media type %q is not an image manifest", MediaTypeBase(descriptor.MediaType)), true
+	case IsAttestationDescriptor(descriptor):
+		return "skipped attestation manifest", true
+	default:
+		return "", false
 	}
+}
 
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("platform %s not found in manifest index", platform.String())
-	}
-
-	return uniqueDescriptors(matches)
+func isDefaultPlatform(platform Platform) bool {
+	os := strings.ToLower(strings.TrimSpace(platform.OS))
+	return os == "" || os == DefaultPlatformOS
 }
 
 func uniqueDescriptors(items []Descriptor) ([]Descriptor, error) {
@@ -274,18 +389,51 @@ func uniqueDescriptors(items []Descriptor) ([]Descriptor, error) {
 	return selected, nil
 }
 
-func (p Platform) Matches(other Platform) bool {
-	if !equalFoldOrEmpty(p.OS, other.OS) {
+// Matches reports whether the descriptor platform p satisfies selector. An
+// empty selector architecture or variant acts as a wildcard, and variants are
+// normalised the way containerd does so linux/arm64/v8 and linux/arm64 are
+// interchangeable, linux/arm means linux/arm/v7, and amd64 microarchitecture
+// levels are ignored.
+func (p Platform) Matches(selector Platform) bool {
+	descriptor := normalizePlatform(p)
+	want := normalizePlatform(selector)
+	if want.OS == "" || descriptor.OS != want.OS {
 		return false
 	}
-	if !equalFoldOrEmpty(p.Architecture, other.Architecture) {
-		return false
-	}
-	if strings.TrimSpace(other.Variant) == "" {
+	if want.Architecture == "" {
 		return true
 	}
+	if descriptor.Architecture != want.Architecture {
+		return false
+	}
+	if strings.TrimSpace(selector.Variant) == "" {
+		return true
+	}
+	return descriptor.Variant == want.Variant
+}
 
-	return strings.EqualFold(strings.TrimSpace(p.Variant), strings.TrimSpace(other.Variant))
+func normalizePlatform(platform Platform) Platform {
+	normalized := Platform{
+		OS:           strings.ToLower(strings.TrimSpace(platform.OS)),
+		Architecture: strings.ToLower(strings.TrimSpace(platform.Architecture)),
+		Variant:      strings.ToLower(strings.TrimSpace(platform.Variant)),
+	}
+	switch normalized.Architecture {
+	case "amd64", "386":
+		normalized.Variant = ""
+	case "arm64":
+		if normalized.Variant == "v8" || normalized.Variant == "8" {
+			normalized.Variant = ""
+		}
+	case "arm":
+		switch normalized.Variant {
+		case "", "7":
+			normalized.Variant = "v7"
+		case "5", "6", "8":
+			normalized.Variant = "v" + normalized.Variant
+		}
+	}
+	return normalized
 }
 
 func IsScannableManifestDescriptor(descriptor Descriptor) bool {
@@ -316,13 +464,19 @@ func IsAttestationDescriptor(descriptor Descriptor) bool {
 }
 
 func (p Platform) String() string {
-	if p.OS == "" && p.Architecture == "" {
+	os := strings.ToLower(strings.TrimSpace(p.OS))
+	architecture := strings.ToLower(strings.TrimSpace(p.Architecture))
+	variant := strings.ToLower(strings.TrimSpace(p.Variant))
+	if os == "" && architecture == "" {
 		return ""
 	}
-	if p.Variant == "" {
-		return strings.ToLower(strings.TrimSpace(p.OS)) + "/" + strings.ToLower(strings.TrimSpace(p.Architecture))
+	if architecture == "" {
+		return os
 	}
-	return strings.ToLower(strings.TrimSpace(p.OS)) + "/" + strings.ToLower(strings.TrimSpace(p.Architecture)) + "/" + strings.ToLower(strings.TrimSpace(p.Variant))
+	if variant == "" {
+		return os + "/" + architecture
+	}
+	return os + "/" + architecture + "/" + variant
 }
 
 func IsIndexMediaType(mediaType string) bool {
@@ -361,20 +515,29 @@ func IsLayerMediaType(mediaType string) bool {
 	}
 }
 
+// IsForeignLayerMediaType reports Docker foreign and OCI non-distributable
+// layer media types. They are valid descriptors but cannot be scanned.
 func IsForeignLayerMediaType(mediaType string) bool {
 	switch normalizeMediaType(mediaType) {
-	case MediaTypeDockerSchema2ForeignLayer, MediaTypeDockerSchema2ForeignLayerGzip:
+	case MediaTypeDockerSchema2ForeignLayer, MediaTypeDockerSchema2ForeignLayerGzip,
+		MediaTypeOCIImageLayerNonDistributable, MediaTypeOCIImageLayerNonDistributableGzip, MediaTypeOCIImageLayerNonDistributableZstd:
 		return true
 	default:
 		return false
 	}
 }
 
+// IsLayerDescriptorMediaType reports every media type that may appear in an
+// image manifest's layers array, scannable or not.
+func IsLayerDescriptorMediaType(mediaType string) bool {
+	return IsLayerMediaType(mediaType) || IsForeignLayerMediaType(mediaType)
+}
+
 func LayerCompression(mediaType string) string {
 	switch normalizeMediaType(mediaType) {
-	case MediaTypeOCIImageLayerGzip, MediaTypeDockerSchema2LayerGzip, MediaTypeDockerSchema2ForeignLayerGzip:
+	case MediaTypeOCIImageLayerGzip, MediaTypeDockerSchema2LayerGzip, MediaTypeDockerSchema2ForeignLayerGzip, MediaTypeOCIImageLayerNonDistributableGzip:
 		return "gzip"
-	case MediaTypeOCIImageLayerZstd:
+	case MediaTypeOCIImageLayerZstd, MediaTypeOCIImageLayerNonDistributableZstd:
 		return "zstd"
 	default:
 		return ""
@@ -446,13 +609,4 @@ func normalizeMediaType(mediaType string) string {
 		value = value[:index]
 	}
 	return strings.TrimSpace(value)
-}
-
-func equalFoldOrEmpty(left, right string) bool {
-	left = strings.TrimSpace(left)
-	right = strings.TrimSpace(right)
-	if left == "" || right == "" {
-		return false
-	}
-	return strings.EqualFold(left, right)
 }

@@ -957,6 +957,18 @@ func safeDiagnosticMessage(code string) string {
 		return "the scan exceeded the configured findings limit"
 	case "max_raw_finding_bytes_exceeded":
 		return "the scan exceeded the configured raw finding byte limit"
+	case "raw_retention_truncated":
+		return "raw secret retention stopped at the configured byte limit; detection continued without raw values"
+	case "platform_skipped":
+		return "a platform manifest was skipped by the default linux-only platform policy"
+	case "manifest_skipped":
+		return "an index entry that is not an image manifest was skipped"
+	case "manifest_unsupported":
+		return "a selected manifest uses layers that cannot be scanned"
+	case "platform_not_found":
+		return "the requested platform was not found in the image"
+	case "layer_trailing_data":
+		return "a layer blob carried data after the end of its compressed stream"
 	default:
 		return "scan step failed"
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
 	"github.com/spf13/cobra"
@@ -285,7 +286,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 		},
 	}
 
-	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform in os/arch[/variant] format")
+	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform as os, os/arch or os/arch/variant (default: every linux platform)")
 	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary or json")
 	cmd.Flags().BoolVar(&allTags, "all-tags", false, "Enumerate and scan every public tag in a bare repository reference")
 	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed")
@@ -329,7 +330,10 @@ func canAcceptPartial(ctx context.Context, result jobs.Result, err error) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
-	return jobs.IsIncomplete(err) || limits.IsExceeded(err)
+	// A manifest whose layers are foreign or non-distributable is incomplete
+	// coverage that --allow-partial may accept. It is typed separately from
+	// integrity failures, which the check above keeps fail-closed.
+	return jobs.IsIncomplete(err) || limits.IsExceeded(err) || scanner.IsUnsupportedManifest(err)
 }
 
 func isCancellation(err error) bool {

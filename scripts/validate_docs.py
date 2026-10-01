@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -354,11 +355,27 @@ def validate_release_version(root: Path, spec):
 
 
 README_VARIABLE_ROW = re.compile(r"^\| `(LAYERLEAK_[A-Z_]+)` \|", re.MULTILINE)
+README_VARIABLE_DEFAULT = re.compile(r"^\| `(LAYERLEAK_[A-Z_]+)` \| (.*?) \|", re.MULTILINE)
 WEB_VARIABLE = re.compile(r"LAYERLEAK_[A-Z][A-Z_]+")
+WEB_VARIABLE_ROW = re.compile(r"<tr><td><code>(LAYERLEAK_[A-Z_]+)</code></td><td>(.*?)</td>")
+HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def _readme_default(cell):
+    return cell.replace("`", "").strip()
+
+
+def _web_default(cell):
+    return html.unescape(HTML_TAG.sub("", cell)).strip()
 
 
 def validate_web_variables(root: Path):
-    """Every LAYERLEAK_* variable the docs site mentions must have a README table row."""
+    """Keep the site's configuration tables in step with README in both directions.
+
+    Every LAYERLEAK_* variable the site mentions must have a README table row,
+    every README row must have a site table row, and both must state the same
+    default.
+    """
     readme = (root / "README.md").read_text(encoding="utf-8")
     documented = set(README_VARIABLE_ROW.findall(readme))
     if len(documented) < 50:
@@ -372,6 +389,18 @@ def validate_web_variables(root: Path):
         raise ValidationFailure(
             "web/docs/index.html mentions variables without a README table row: " + ", ".join(missing)
         )
+    site_rows = {name: _web_default(cell) for name, cell in WEB_VARIABLE_ROW.findall(site)}
+    absent = sorted(documented - set(site_rows))
+    if absent:
+        raise ValidationFailure(
+            "README variables without a web/docs/index.html table row: " + ", ".join(absent)
+        )
+    for name, cell in README_VARIABLE_DEFAULT.findall(readme):
+        expected = _readme_default(cell)
+        if site_rows[name] != expected:
+            raise ValidationFailure(
+                f"{name} default {site_rows[name]!r} on the site differs from README {expected!r}"
+            )
 
 
 def validate_repository(root: Path):

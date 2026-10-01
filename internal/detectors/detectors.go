@@ -119,7 +119,6 @@ func Default() Set {
 		newRegexDetector("linear_api_key", regexp.MustCompile(`\blin_api_[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("doppler_token", regexp.MustCompile(`\bdp\.(?:st|pt|sa|ct)\.[A-Za-z0-9._-]{20,}`), 0, ConfidenceHigh, nil),
 		newRegexDetector("grafana_service_account_token", regexp.MustCompile(`\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
-		newPathRegexDetector("kubeconfig_token", regexp.MustCompile(`(^|/)\.kube/config$`), regexp.MustCompile(`(?im)^\s+token:\s+([^\s#]+)\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
 		newPathRegexDetector("vault_token_file", regexp.MustCompile(`(^|/)\.vault-token$`), regexp.MustCompile(`((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}|s\.[A-Za-z0-9]{24,})`), 0, ConfidenceHigh, hasMinPrintableLength(24)),
 		// An Account SID is a public identifier, not a credential (DET-21).
 		newRegexDetector("twilio_account_sid", regexp.MustCompile(`\bAC[a-f0-9]{32}\b`), 0, ConfidenceMedium, nil),
@@ -177,6 +176,7 @@ func Default() Set {
 	rules = append(rules, vendorTokenDetectors()...)
 	rules = append(rules, registryCredentialDetectors()...)
 	rules = append(rules, httpHeaderCredentialDetectors()...)
+	rules = append(rules, cloudStateDetectors()...)
 	rules = append(rules, contextEntropyDetector{})
 	return Set{detectors: rules}
 }

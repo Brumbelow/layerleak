@@ -1,0 +1,13 @@
+{
+  "name": "file_aws_sso_cache_token_actionable",
+  "source_type": "file_final",
+  "path": "root/.aws/sso/cache/0123456789abcdef0123456789abcdef01234567.json",
+  "key": "",
+  "content": "{\"startUrl\":\"https://org.awsapps.com/start\",\"region\":\"eu-west-1\",\"accessToken\":\"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.Xk9fL2mQ8vR4tY7wZ1aB3cD5eF6gH8jK0lM2\",\"expiresAt\":\"2026-01-01T00:00:00Z\"}",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "aws_sso_cache_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

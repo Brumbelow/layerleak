@@ -955,6 +955,10 @@ components:
         target_count:
           type: integer
           minimum: 0
+          description: >-
+            Distinct digests selected for scanning. When a repository sweep
+            exceeds the target bound it stops resolving tags and reports the
+            bound plus one.
         completed_target_count:
           type: integer
           minimum: 0
@@ -1033,7 +1037,9 @@ components:
             `scanned` when every selected manifest of the tag's target
             completed, `partial` when some did, `failed` when the tag could
             not be resolved or its target failed, `skipped` when the sweep
-            stopped before reaching the tag's target, and `resolved` when the
+            stopped before reaching the tag's target or before resolving the
+            tag because the repository target bound was exceeded (such
+            entries carry no `root_digest`), and `resolved` when the
             tag resolved to a digest the sweep had not scanned yet (only in
             results of sweeps that stopped during resolution).
           enum: [scanned, partial, failed, skipped, resolved]
@@ -1421,6 +1427,10 @@ components:
         target_count:
           type: integer
           minimum: 0
+          description: >-
+            Distinct digests selected for scanning. When a repository sweep
+            exceeds the target bound it stops resolving tags and reports the
+            bound plus one.
         completed_target_count:
           type: integer
           minimum: 0

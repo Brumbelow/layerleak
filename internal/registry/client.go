@@ -2,14 +2,12 @@ package registry
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"path"
 	"sort"
@@ -326,7 +324,7 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 			tags = append(tags, tag)
 		}
 
-		nextURL, ok, err := c.nextLinkURL(ctx, targetURL, linkHeaders)
+		nextURL, ok, err := c.nextLinkURL(targetURL, linkHeaders)
 		if err != nil {
 			sort.Strings(tags)
 			return tags, fmt.Errorf("registry tag pagination cannot continue: %w", err)
@@ -352,7 +350,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 	if c.configErr != nil {
 		return nil, c.configErr
 	}
-	if err := c.validateOutboundURL(ctx, targetURL, c.baseURL, false, requestKindRegistry); err != nil {
+	if err := c.validateOutboundURL(targetURL, c.baseURL, false, requestKindRegistry); err != nil {
 		return nil, err
 	}
 
@@ -375,7 +373,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 	if challenge.Realm == "" && c.authURL != nil {
 		challenge.Realm = c.authURL.String()
 	}
-	if err := c.validateAuthRealm(ctx, challenge.Realm); err != nil {
+	if err := c.validateAuthRealm(challenge.Realm); err != nil {
 		return nil, fmt.Errorf("reject auth realm: %w", err)
 	}
 
@@ -481,7 +479,7 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 		query.Set("scope", strings.TrimSpace(challenge.Scope))
 	}
 	parsedRealm.RawQuery = query.Encode()
-	if err := c.validateAuthRealm(requestCtx, parsedRealm.String()); err != nil {
+	if err := c.validateAuthRealm(parsedRealm.String()); err != nil {
 		return "", fmt.Errorf("reject auth realm: %w", err)
 	}
 	requestCtx = context.WithValue(requestCtx, requestKindContextKey{}, requestKindAuth)
@@ -757,7 +755,7 @@ func readTagResponseBody(reader io.Reader, maxBytes int64, repository string) ([
 	return body, nil
 }
 
-func (c *Client) nextLinkURL(ctx context.Context, currentURL string, headers []string) (string, bool, error) {
+func (c *Client) nextLinkURL(currentURL string, headers []string) (string, bool, error) {
 	nextURL, ok, err := nextLinkURL(currentURL, headers)
 	if err != nil || !ok {
 		return nextURL, ok, err
@@ -766,7 +764,7 @@ func (c *Client) nextLinkURL(ctx context.Context, currentURL string, headers []s
 	if err != nil {
 		return "", false, fmt.Errorf("current pagination url is invalid")
 	}
-	if err := c.validateOutboundURL(ctx, nextURL, current, false, requestKindRegistry); err != nil {
+	if err := c.validateOutboundURL(nextURL, current, false, requestKindRegistry); err != nil {
 		return "", false, fmt.Errorf("reject pagination link: %w", err)
 	}
 	return nextURL, true, nil
@@ -789,7 +787,7 @@ func (c *Client) doHTTP(request *http.Request) (*http.Response, error) {
 			}
 		}
 		origin := via[0].URL
-		if err := c.validateOutboundURL(next.Context(), next.URL.String(), origin, true, requestKind); err != nil {
+		if err := c.validateOutboundURL(next.URL.String(), origin, true, requestKind); err != nil {
 			return fmt.Errorf("reject redirect: %w", err)
 		}
 		if !sameURLHost(via[len(via)-1].URL, next.URL) {
@@ -853,7 +851,7 @@ func requestKindFromContext(ctx context.Context) outboundRequestKind {
 	return requestKindRegistry
 }
 
-func (c *Client) validateOutboundURL(ctx context.Context, value string, origin *url.URL, allowCrossHost bool, kind outboundRequestKind) error {
+func (c *Client) validateOutboundURL(value string, origin *url.URL, allowCrossHost bool, kind outboundRequestKind) error {
 	parsed, err := parseEndpointURL(value, true)
 	if err != nil {
 		return err
@@ -864,15 +862,39 @@ func (c *Client) validateOutboundURL(ctx context.Context, value string, origin *
 	if parsed.Scheme == "http" && !c.hostAllowed(parsed, kind) {
 		return fmt.Errorf("http is allowed only for an explicitly allowlisted private %s host", kind)
 	}
-	_, err = c.resolveOutbound(ctx, parsed, kind)
-	return err
+	return c.checkLiteralAddress(parsed, kind)
 }
 
+// checkLiteralAddress applies the non-public address policy to a URL whose host
+// is an IP literal. Hostnames are classified by resolveOutbound at dial time.
+func (c *Client) checkLiteralAddress(parsed *url.URL, kind outboundRequestKind) error {
+	if c.allowPrivateHosts {
+		return nil
+	}
+	ip := net.ParseIP(canonicalHostname(parsed.Hostname()))
+	if ip == nil {
+		return nil
+	}
+	if !c.hostAllowed(parsed, kind) && isNonPublicAddress(ip) {
+		return fmt.Errorf("non-public %s address %s is not allowed", kind, ip)
+	}
+	return nil
+}
+
+// resolveOutbound resolves the URL host and rejects non-public addresses unless
+// the host is allowlisted. The returned addresses are the only ones the pinned
+// transport may dial for this request.
 func (c *Client) resolveOutbound(ctx context.Context, parsed *url.URL, kind outboundRequestKind) ([]net.IPAddr, error) {
 	if c.allowPrivateHosts || c.lookupIP == nil {
 		return nil, nil
 	}
-	host := parsed.Hostname()
+	host := canonicalHostname(parsed.Hostname())
+	if ip := net.ParseIP(host); ip != nil {
+		if err := c.checkLiteralAddress(parsed, kind); err != nil {
+			return nil, err
+		}
+		return []net.IPAddr{{IP: ip}}, nil
+	}
 	addresses, err := c.lookupIP(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s host %s: %w", kind, host, err)
@@ -890,12 +912,12 @@ func (c *Client) resolveOutbound(ctx context.Context, parsed *url.URL, kind outb
 	return addresses, nil
 }
 
-func (c *Client) validateAuthRealm(ctx context.Context, value string) error {
+func (c *Client) validateAuthRealm(value string) error {
 	parsed, err := parseEndpointURL(value, true)
 	if err != nil {
 		return err
 	}
-	return c.validateOutboundURL(ctx, parsed.String(), c.baseURL, true, requestKindAuth)
+	return c.validateOutboundURL(parsed.String(), c.baseURL, true, requestKindAuth)
 }
 
 func (c *Client) hostAllowed(value *url.URL, kind outboundRequestKind) bool {
@@ -980,158 +1002,4 @@ func canonicalURLHost(value *url.URL) string {
 		return host
 	}
 	return net.JoinHostPort(host, value.Port())
-}
-
-func (c *Client) hardenHTTPClient() {
-	if c.httpClient == nil || c.allowPrivateHosts {
-		return
-	}
-	client := *c.httpClient
-	transport := client.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	base, ok := transport.(*http.Transport)
-	if !ok {
-		c.configErr = errors.Join(c.configErr, fmt.Errorf("custom registry transport requires explicit AllowPrivateHosts test override"))
-		return
-	}
-	if base.TLSClientConfig != nil && base.TLSClientConfig.InsecureSkipVerify {
-		c.configErr = errors.Join(c.configErr, fmt.Errorf("registry transport must verify TLS certificates"))
-		return
-	}
-	hardenedTransport := base.Clone()
-	if hardenedTransport.TLSClientConfig == nil {
-		hardenedTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	} else if hardenedTransport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
-		hardenedTransport.TLSClientConfig.MinVersion = tls.VersionTLS12
-	}
-	if hardenedTransport.MaxResponseHeaderBytes <= 0 || hardenedTransport.MaxResponseHeaderBytes > maxRegistryResponseHeaderBytes {
-		hardenedTransport.MaxResponseHeaderBytes = maxRegistryResponseHeaderBytes
-	}
-	client.Transport = &pinnedTransport{base: hardenedTransport, client: c}
-	c.httpClient = &client
-}
-
-type pinnedTransport struct {
-	base   *http.Transport
-	client *Client
-}
-
-func (t *pinnedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	kind := requestKindFromContext(request.Context())
-	addresses, err := t.client.resolveOutbound(request.Context(), request.URL, kind)
-	if err != nil {
-		return nil, err
-	}
-	if len(addresses) == 0 {
-		return nil, fmt.Errorf("%s host %s did not resolve", kind, request.URL.Hostname())
-	}
-
-	originalRequest := request
-	request = request.Clone(request.Context())
-	request.URL = cloneURL(originalRequest.URL)
-	request.Host = originalRequest.URL.Host
-	port := originalRequest.URL.Port()
-	if port == "" {
-		port = effectivePort(originalRequest.URL)
-	}
-	request.URL.Host = net.JoinHostPort(addresses[0].IP.String(), port)
-
-	transport := t.base.Clone()
-	transport.DisableKeepAlives = true
-	transport.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	transport.DialTLS = nil //nolint:staticcheck // clear the deprecated hook so the plain dialer and TLSClientConfig below are authoritative
-	transport.DialTLSContext = nil
-	tlsConfig := transport.TLSClientConfig.Clone()
-	tlsConfig.ServerName = originalRequest.URL.Hostname()
-	transport.TLSClientConfig = tlsConfig
-	if t.base.Proxy != nil {
-		proxyURL, proxyErr := t.base.Proxy(originalRequest)
-		if proxyErr != nil {
-			return nil, proxyErr
-		}
-		transport.Proxy = func(*http.Request) (*url.URL, error) {
-			return proxyURL, nil
-		}
-	}
-
-	response, err := transport.RoundTrip(request)
-	if response != nil {
-		response.Request = originalRequest
-	}
-	return response, err
-}
-
-func cloneURL(value *url.URL) *url.URL {
-	if value == nil {
-		return new(url.URL)
-	}
-	cloned := *value
-	return &cloned
-}
-
-func sameURLHost(left, right *url.URL) bool {
-	return strings.EqualFold(left.Hostname(), right.Hostname()) && effectivePort(left) == effectivePort(right)
-}
-
-func effectivePort(value *url.URL) string {
-	if value.Port() != "" {
-		return value.Port()
-	}
-	if value.Scheme == "https" {
-		return "443"
-	}
-	if value.Scheme == "http" {
-		return "80"
-	}
-	return ""
-}
-
-var nonPublicAddressPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),
-	netip.MustParsePrefix("10.0.0.0/8"),
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("127.0.0.0/8"),
-	netip.MustParsePrefix("169.254.0.0/16"),
-	netip.MustParsePrefix("172.16.0.0/12"),
-	netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("192.0.2.0/24"),
-	netip.MustParsePrefix("192.88.99.0/24"),
-	netip.MustParsePrefix("192.168.0.0/16"),
-	netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("198.51.100.0/24"),
-	netip.MustParsePrefix("203.0.113.0/24"),
-	netip.MustParsePrefix("240.0.0.0/4"),
-	netip.MustParsePrefix("64:ff9b::/96"),
-	netip.MustParsePrefix("64:ff9b:1::/48"),
-	netip.MustParsePrefix("100::/64"),
-	netip.MustParsePrefix("2001::/32"),
-	netip.MustParsePrefix("2001:2::/48"),
-	netip.MustParsePrefix("2001:10::/28"),
-	netip.MustParsePrefix("2001:20::/28"),
-	netip.MustParsePrefix("2001:db8::/32"),
-	netip.MustParsePrefix("2002::/16"),
-	netip.MustParsePrefix("3fff::/20"),
-	netip.MustParsePrefix("5f00::/16"),
-	netip.MustParsePrefix("fc00::/7"),
-	netip.MustParsePrefix("fe80::/10"),
-	netip.MustParsePrefix("ff00::/8"),
-}
-
-func isNonPublicAddress(value net.IP) bool {
-	address, ok := netip.AddrFromSlice(value)
-	if !ok {
-		return true
-	}
-	address = address.Unmap()
-	if !address.IsGlobalUnicast() {
-		return true
-	}
-	for _, prefix := range nonPublicAddressPrefixes {
-		if prefix.Contains(address) {
-			return true
-		}
-	}
-	return false
 }

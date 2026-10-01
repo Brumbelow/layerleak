@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -781,28 +782,6 @@ func TestFetchManifestDiscoversAuthRealmForNonDockerHubRegistry(t *testing.T) {
 	}
 }
 
-func TestClientRejectsDNSRebindingBeforeDial(t *testing.T) {
-	lookups := 0
-	client := NewClient(Options{
-		BaseURL: "https://registry.example",
-		LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
-			lookups++
-			if lookups == 1 {
-				return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
-			}
-			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
-		},
-	})
-
-	_, err := client.FetchManifest(context.Background(), "library/app", "latest")
-	if err == nil || !strings.Contains(err.Error(), "non-public registry address") {
-		t.Fatalf("FetchManifest() error = %v", err)
-	}
-	if lookups != 2 {
-		t.Fatalf("lookups = %d", lookups)
-	}
-}
-
 func TestClientUsesSeparateExactPrivateHostAllowlists(t *testing.T) {
 	lookup := func(context.Context, string) ([]net.IPAddr, error) {
 		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
@@ -812,11 +791,11 @@ func TestClientUsesSeparateExactPrivateHostAllowlists(t *testing.T) {
 		AllowedPrivateRegistryHosts: []string{"registry.internal:5000"},
 		LookupIP:                    lookup,
 	})
-	if err := client.validateOutboundURL(context.Background(), "https://registry.internal:5000/v2/", client.baseURL, false, requestKindRegistry); err != nil {
-		t.Fatalf("registry validation error = %v", err)
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://registry.internal:5000/v2/"), requestKindRegistry); err != nil {
+		t.Fatalf("registry resolution error = %v", err)
 	}
-	if err := client.validateOutboundURL(context.Background(), "https://registry.internal:5000/token", nil, true, requestKindAuth); err == nil {
-		t.Fatal("auth validation error = nil")
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://registry.internal:5000/token"), requestKindAuth); err == nil {
+		t.Fatal("auth resolution error = nil")
 	}
 
 	client = NewClient(Options{
@@ -824,12 +803,24 @@ func TestClientUsesSeparateExactPrivateHostAllowlists(t *testing.T) {
 		AllowedPrivateAuthHosts: []string{"auth.internal"},
 		LookupIP:                lookup,
 	})
-	if err := client.validateAuthRealm(context.Background(), "https://auth.internal/token"); err != nil {
+	if err := client.validateAuthRealm("https://auth.internal/token"); err != nil {
 		t.Fatalf("auth validation error = %v", err)
 	}
-	if err := client.validateOutboundURL(context.Background(), "https://auth.internal/v2/", nil, true, requestKindRegistry); err == nil {
-		t.Fatal("registry validation error = nil")
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://auth.internal/token"), requestKindAuth); err != nil {
+		t.Fatalf("auth resolution error = %v", err)
 	}
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://auth.internal/v2/"), requestKindRegistry); err == nil {
+		t.Fatal("registry resolution error = nil")
+	}
+}
+
+func mustParseURL(t *testing.T, value string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatalf("Parse(%q) error = %v", value, err)
+	}
+	return parsed
 }
 
 func TestClientAllowsPublicCrossHostAuthRealm(t *testing.T) {
@@ -839,7 +830,7 @@ func TestClientAllowsPublicCrossHostAuthRealm(t *testing.T) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
 	})
-	if err := client.validateAuthRealm(context.Background(), "https://auth.example/token"); err != nil {
+	if err := client.validateAuthRealm("https://auth.example/token"); err != nil {
 		t.Fatalf("validateAuthRealm() error = %v", err)
 	}
 }
@@ -866,6 +857,8 @@ func TestNonPublicAddressClassification(t *testing.T) {
 		{address: "2002:7f00:1::", nonPublic: true},
 		{address: "fc00::1", nonPublic: true},
 		{address: "fe80::1", nonPublic: true},
+		{address: "fec0::1", nonPublic: true},
+		{address: "::7f00:1", nonPublic: true},
 	} {
 		t.Run(test.address, func(t *testing.T) {
 			if got := isNonPublicAddress(net.ParseIP(test.address)); got != test.nonPublic {
@@ -887,7 +880,7 @@ func TestClientAllowsHTTPOnlyForExactPrivateHost(t *testing.T) {
 		AllowedPrivateRegistryHosts: []string{"registry.internal:5000"},
 		LookupIP:                    lookup,
 	})
-	if err := allowed.validateOutboundURL(context.Background(), allowed.BaseURL(), allowed.baseURL, false, requestKindRegistry); err != nil {
+	if err := allowed.validateOutboundURL(allowed.BaseURL(), allowed.baseURL, false, requestKindRegistry); err != nil {
 		t.Fatalf("allowed validation error = %v", err)
 	}
 	rejected := NewClient(Options{

@@ -382,6 +382,18 @@ class ReleasePreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn('Release preflight failed', result.stderr)
 
+    def test_composite_action_pins_the_reviewed_cosign_release(self):
+        root = SCRIPT.parents[1]
+        installer = (root / 'scripts' / 'release-tools.sh').read_text(encoding='utf-8')
+        pin = re.search(r'cosign/releases/download/(v[0-9.]+)/cosign-linux-amd64 \\\n\s+([0-9a-f]{64})', installer)
+        self.assertIsNotNone(pin, 'release-tools.sh must pin cosign-linux-amd64 by version and SHA-256')
+        action = (root / 'action.yml').read_text(encoding='utf-8')
+        self.assertIn(f'COSIGN_VERSION: {pin.group(1)}\n', action)
+        self.assertIn(f'COSIGN_SHA256: {pin.group(2)}\n', action)
+        # The action verifies against the same release workflow identity the release documents.
+        self.assertIn('container-release.yml@refs/heads/main', action)
+        self.assertIn('--deny-self-hosted-runners', action)
+
     def test_release_workflow_builds_exactly_the_preflight_cli_targets(self):
         workflow = (SCRIPT.parents[1] / '.github' / 'workflows' / 'container-release.yml').read_text(encoding='utf-8')
         match = re.search(r'^  CLI_TARGETS: (.+)$', workflow, re.MULTILINE)

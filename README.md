@@ -117,6 +117,49 @@ candidate's commit with the stable version string and refuses to publish
 unless the rebuild reproduces the candidate's binaries byte for byte, so
 `layerleak version` reports exactly the tag you downloaded.
 
+### GitHub Action
+
+The repository root is a composite action that downloads the archive for the
+runner, verifies it as above (checksum and attestation everywhere, the cosign
+bundle on Linux x86_64 runners with the cosign release pinned in
+`scripts/release-tools.sh`) and runs `layerleak scan`. Pin it to a release tag;
+the matching archives are downloaded from that release:
+
+```yaml
+name: Image secrets
+on: { push: { branches: [main] } }
+permissions: { contents: read, security-events: write }
+jobs:
+  layerleak:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: scan
+        uses: brumbelow/layerleak@v3.0.0
+        with: { image: "ghcr.io/${{ github.repository }}:${{ github.sha }}", fail-on: none }
+      - uses: github/codeql-action/upload-sarif@v3
+        if: ${{ always() && steps.scan.outputs.sarif-file != '' }}
+        with: { sarif_file: "${{ steps.scan.outputs.sarif-file }}" }
+```
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `image` | required | Image reference to scan; private registries use `LAYERLEAK_REGISTRY_USERNAME`/`LAYERLEAK_REGISTRY_PASSWORD` in the step `env`. |
+| `version` | the tag in `uses:` | Release whose archive is downloaded; set it only when `uses:` names a branch or commit. |
+| `format` | `sarif` | `summary`, `json` or `sarif`. |
+| `fail-on` | `low` | Passed to `--fail-on`; `none` reports without failing the step. |
+| `allow-partial` | `false` | Passes `--allow-partial`. |
+| `platform` | every `linux` manifest | Passed to `--platform`. |
+| `output-file` | `$RUNNER_TEMP/layerleak/results.<ext>` | Where the formatted result is written. |
+
+Outputs: `exit-code` (the CLI exit code, see the table under "Scan images"),
+`result-file` (the written file) and `sarif-file` (the same path when `format`
+is `sarif`, otherwise empty). The step fails exactly when the CLI exits
+non-zero, so `fail-on: none` plus `if: always()` on the upload step gives a
+report-only scan. The action never prints findings; only the redacted
+`summary` format is echoed to the log, and the scan runs with `--no-artifacts`.
+It needs `curl`, `tar`/`unzip` and the GitHub CLI, all present on GitHub-hosted
+runners.
+
 Build from source:
 
 ```bash

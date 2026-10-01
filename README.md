@@ -88,7 +88,27 @@ migration, purge, and healthcheck commands. The `cmd/*` packages are source
 build targets for development, not separately versioned install paths. Before
 starting a PostgreSQL-backed API version, run its matching
 `layerleak-migrate-up` binary or container entrypoint and wait for migration
-success; the API will remain unready on an older schema.
+success: the API refuses to start unless the installed schema is exactly the
+version it expects, and after startup `/readyz` re-checks the database and
+schema on every probe so later degradation is reported.
+
+## Platform support
+
+| Component | Platforms | How it is verified |
+| --- | --- | --- |
+| `layerleak` CLI | Linux, macOS, and Windows on amd64 and arm64 via `go install` | Tests run on linux/amd64 in CI; darwin/arm64, darwin/amd64, windows/amd64, and linux/arm64 are compiled and vetted on every change. |
+| API image | `linux/amd64`, `linux/arm64` | Built, smoke-tested, scanned, and signed for both platforms by the release workflow. |
+
+On Windows the dynamic progress display switches the console into
+virtual-terminal mode; a console that refuses (older than Windows 10 1511)
+falls back to plain progress lines, as does `--progress plain`. Shell
+completion for bash, zsh, fish, and PowerShell comes from
+`layerleak completion <shell>`.
+
+The CLI reaches registries directly over HTTPS or through `HTTPS_PROXY` (see
+[Configuration](#configuration)). The API listens on plain HTTP and expects the
+deployment to terminate TLS, authenticate clients, and rate-limit; see
+[SECURITY.md](./SECURITY.md#security-boundaries).
 
 ## Scan images
 
@@ -495,34 +515,18 @@ Releases publish one signed multi-platform image digest. RC tags never move
 `latest`; a stable tag and `latest` point to the exact accepted RC digest.
 
 ```bash
-version=v3.0.0-rc.1
+version=v3.0.0
 image=ghcr.io/brumbelow/layerleak
-source_sha='<source-sha-from-release-manifest>'
 docker buildx imagetools inspect "${image}:${version}"
-
-digest=$(docker buildx imagetools inspect "${image}:${version}" \
-  --format '{{json .Manifest.Digest}}' | tr -d '"')
-
-cosign verify \
-  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
-  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  "${image}@${digest}"
-
-gh attestation verify "oci://${image}@${digest}" \
-  --repo Brumbelow/layerleak \
-  --bundle-from-oci \
-  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
-  --source-ref refs/heads/main \
-  --source-digest "${source_sha}" \
-  --deny-self-hosted-runners
-
-gh release verify "${version}" --repo Brumbelow/layerleak
 ```
 
 Each GitHub release includes checksums, per-platform SPDX SBOMs, SLSA
 provenance, vulnerability reports, attestation bundles, and a
 `release-manifest.json` that binds the source commit to the image index and
-platform digests.
+platform digests. The canonical `cosign verify`, `gh attestation verify`, and
+`gh release verify` commands live in
+[SECURITY.md](./SECURITY.md#verify-release-integrity); always verify the
+digest-addressed image rather than trusting a mutable tag.
 
 ## Version history
 

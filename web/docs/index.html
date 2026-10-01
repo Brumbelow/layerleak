@@ -328,9 +328,10 @@ LAYERLEAK_DATABASE_URL=postgres://postgres:***@localhost:5432/layerleak?sslmode=
                 <h2>Postgres persistence</h2>
               </div>
               <p>
-                Migrations are explicit. The API does not create or upgrade schema at runtime and
-                does not become ready until schema version <code>0004</code> is installed. Use
-                PostgreSQL server <code>&gt;= 16.13</code>.
+                Migrations are explicit. The API does not create or upgrade schema at runtime: it
+                refuses to start until schema version <code>0004</code> is installed, and
+                <code>/readyz</code> re-checks the database and schema afterwards. Use PostgreSQL
+                server <code>&gt;= 16.13</code>.
               </p>
               <pre><code>export LAYERLEAK_MIGRATIONS_DIR="$PWD/migrations"
 go run ./cmd/migrate

@@ -97,6 +97,12 @@ func newProgressRendererWithMode(out io.Writer, mode progressMode) *progressRend
 		renderer.dynamic = isTerminal
 		renderer.plain = !isTerminal
 	}
+	// Windows consoles must opt in to ANSI processing; when that fails the
+	// dynamic block would print raw escape sequences, so use plain lines.
+	if renderer.dynamic && terminalFD >= 0 && !enableVirtualTerminal(terminalFD) {
+		renderer.dynamic = false
+		renderer.plain = true
+	}
 	renderer.widthFn = renderer.currentWidth
 	return renderer
 }

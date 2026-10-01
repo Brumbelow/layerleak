@@ -205,8 +205,10 @@ major is expected to become `@latest`. Stable publication points `v3.x.y` and
 ## Prepare v3.0.0-rc.1
 
 1. Merge the intended release changes to `main`.
-2. Confirm the **CI**, **CodeQL**, **Codacy Security Scan**, and **Pages**
-   workflows are green on the exact commit.
+2. Confirm the **CI**, **CodeQL**, and **Codacy Security Scan** workflows are
+   green on the exact commit, and that the most recent **Pages** deployment
+   succeeded (Pages runs only when `web/`, the validators, or the CHANGELOG
+   change, so most release commits have no Pages run of their own).
 3. Review [CHANGELOG.md](./CHANGELOG.md), [README.md](./README.md), the OpenAPI
    document, migration notes, security policy, and third-party notices. Freeze
    the changes under the final `v3.0.0` changelog heading and use `3.0.0` as the

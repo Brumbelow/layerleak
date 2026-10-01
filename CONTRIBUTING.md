@@ -69,6 +69,9 @@ python3 -m venv .venv-docs
 .venv-docs/bin/python -m pip install --require-hashes -r requirements-docs.txt
 .venv-docs/bin/python -m unittest scripts/test_validate_docs.py
 .venv-docs/bin/python scripts/validate_docs.py
+.venv-docs/bin/python scripts/validate_sarif.py internal/sarif/testdata/*.sarif.json
+python3 -m unittest discover -s scripts/tests -v
+npm ci --prefix scripts/tests && npm test --prefix scripts/tests
 LAYERLEAK_DB_PASSWORD=test docker compose config --quiet
 LAYERLEAK_DB_PASSWORD=test docker compose --profile tools config --quiet
 ```

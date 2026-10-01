@@ -180,7 +180,13 @@ go test ./internal/cli -run TestGoldenResultAndScanRecordFixtures -update
 go test ./internal/sarif -update
 LAYERLEAK_UPDATE_CONTRACT_FIXTURES=1 go test ./internal/api -run TestDocumented
 go test ./internal/cli -run TestDetectorsDocMatchesCatalog -update-docs
+go test ./internal/cli -run TestDemoFixtureMatchesRealScan -update-demo
 ```
+
+The last command rebuilds `web/assets/demo-data.json` from a real scan of a
+synthetic OCI layout; run it whenever progress or summary text, result or
+record fields, redaction, fingerprints or the detectors that fire on the demo
+layout change.
 
 A new detector identifier needs a one-line description in
 `internal/detectors/descriptions.go` (a test keeps the descriptions and the

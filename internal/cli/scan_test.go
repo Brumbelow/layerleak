@@ -258,10 +258,13 @@ func TestScanCommandWritesPartialResultsOnConfiguredLimitError(t *testing.T) {
 	if !ok {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if exit.ExitCode() != 1 {
+	// The limit error is acceptable partial coverage that was not accepted,
+	// and the scan found a secret: findings take precedence, so exit 2 with
+	// the coverage message and the --allow-partial hint on stderr.
+	if exit.ExitCode() != 2 {
 		t.Fatalf("exit.ExitCode() = %d", exit.ExitCode())
 	}
-	if !strings.Contains(err.Error(), "max config bytes limit") {
+	if !strings.Contains(err.Error(), "max config bytes limit") || !strings.Contains(err.Error(), "--allow-partial") {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(stdout.String(), `"total_findings"`) {

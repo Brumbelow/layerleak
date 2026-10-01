@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 
@@ -39,6 +40,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var outputPath string
 	var noArtifacts bool
 	var noDatabase bool
+	var failOn string
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
@@ -50,6 +52,10 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				return err
 			}
 			progressMode, err := parseProgressMode(progressSetting)
+			if err != nil {
+				return err
+			}
+			failThreshold, err := parseFailOn(failOn)
 			if err != nil {
 				return err
 			}
@@ -76,15 +82,17 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err := applyScanScopeFlags(cmd, &cfg, tagPageSize, maxRepositoryTags, maxRepositoryTargets); err != nil {
 				return err
 			}
-			logger, err := newLogger(cfg.LogLevel)
+			logger, err := newLogger(cfg.LogLevel, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
+			progressMode = effectiveProgressMode(progressMode, cfg.LogLevel, os.Getenv)
 
-			ctx := cmd.Context()
-			if ctx == nil {
-				ctx = context.Background()
+			parentCtx := cmd.Context()
+			if parentCtx == nil {
+				parentCtx = context.Background()
 			}
+			ctx := parentCtx
 			if cfg.ScanTimeout > 0 {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, cfg.ScanTimeout)
@@ -178,15 +186,24 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if operationErr == nil {
 				operationErr = scanErr
 			}
-			if ctx.Err() != nil {
+			// The scan error usually already wraps the context error; join
+			// it only when it does not, so the cause is reported once.
+			if ctx.Err() != nil && !errors.Is(operationErr, ctx.Err()) {
 				operationErr = errors.Join(operationErr, ctx.Err())
 			}
-			acceptPartial := allowPartial && canAcceptPartial(ctx, result, scanErr)
+			acceptablePartial := canAcceptPartial(ctx, result, scanErr)
+			acceptPartial := allowPartial && acceptablePartial
 			// Cancellation and failures before a result existed are the only
 			// silent paths. A failed scan still publishes its result (status
 			// failed, diagnostics, per-target errors) on stdout and in the
 			// local record so automation can see why it failed.
-			if isCancellation(scanErr) || ctx.Err() != nil || !hasPublishableResult(result) {
+			if isCancellation(scanErr) || ctx.Err() != nil {
+				if err := progress.Finish(); err != nil {
+					logger.Debug("progress update failed")
+				}
+				return cancellationExit(parentCtx, ctx, cfg.ScanTimeout, operationErr)
+			}
+			if !hasPublishableResult(result) {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
@@ -291,26 +308,21 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if publicationErr != nil || saveErr != nil {
 				return errors.Join(operationErr, publicationErr)
 			}
-			if scanErr != nil && !acceptPartial {
-				return exitError{code: 1, message: scanErr.Error()}
-			}
-			if acceptPartial {
-				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "warning: incomplete scan accepted by --allow-partial"); err != nil {
+			warning, exit := exitForOutcome(result, scanErr, acceptablePartial, acceptPartial, failThreshold)
+			if warning != "" {
+				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
 					logger.Debug("progress update failed")
 				}
 			}
-			if result.TotalFindings > 0 {
-				return exitError{code: 2}
-			}
-
-			return nil
+			return exit
 		},
 	}
 
 	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform as os, os/arch or os/arch/variant (default: every linux platform)")
 	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary or json")
 	cmd.Flags().BoolVar(&allTags, "all-tags", false, "Enumerate and scan every public tag in a bare repository reference")
-	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed")
+	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed (otherwise exit code 3)")
+	cmd.Flags().StringVar(&failOn, "fail-on", "low", "Lowest confidence of an actionable finding that produces exit code 2: low, medium, high, or none to report only")
 	cmd.Flags().StringVar(&progressSetting, "progress", string(progressModeAuto), "Progress mode: auto, tty, plain, or off")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory for the scan record. Overrides LAYERLEAK_FINDINGS_DIR; the default is ./findings under the working directory.")
 	cmd.Flags().StringVar(&outputPath, "output", "-", "Write the formatted result to this file instead of stdout; - means stdout.")

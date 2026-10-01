@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/brumbelow/layerleak/v3/internal/config"
 	"github.com/brumbelow/layerleak/v3/internal/findings"
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
 )
 
 // failOnLevel is the --fail-on threshold: the lowest confidence of an
@@ -97,13 +102,14 @@ func cancellationExit(parent, ctx context.Context, timeout time.Duration, cause 
 //	0  otherwise
 //
 // acceptable reports whether --allow-partial could accept scanErr; accepted
-// reports whether it did. The returned warning is printed when coverage was
-// accepted.
-func exitForOutcome(result jobs.Result, scanErr error, acceptable, accepted bool, threshold failOnLevel) (string, error) {
+// reports whether it did. registryHost names the registry in the message
+// for an authentication failure. The returned warning is printed when
+// coverage was accepted.
+func exitForOutcome(result jobs.Result, scanErr error, acceptable, accepted bool, threshold failOnLevel, registryHost string) (string, error) {
 	blocking := countBlockingFindings(result.Findings, threshold)
 	switch {
 	case scanErr != nil && !acceptable:
-		return "", exitError{code: exitCodeFailure, message: scanErr.Error(), cause: scanErr}
+		return "", exitError{code: exitCodeFailure, message: scanFailureMessage(scanErr, registryHost), cause: scanErr}
 	case scanErr != nil && !accepted:
 		message := scanErr.Error() + allowPartialHint
 		if blocking > 0 {
@@ -119,6 +125,76 @@ func exitForOutcome(result jobs.Result, scanErr error, acceptable, accepted bool
 		return warning, exitError{code: exitCodeFindings}
 	}
 	return warning, nil
+}
+
+// scanFailureMessage is the operator-facing text for a failed scan. A 401 or
+// 403 from the registry (or its token endpoint) becomes a plain
+// authentication failure that names the host and never echoes the request.
+func scanFailureMessage(scanErr error, registryHost string) string {
+	if registry.IsUnauthorized(scanErr) {
+		return fmt.Sprintf("authentication to %s failed", registryHost)
+	}
+	return scanErr.Error()
+}
+
+// registryHostFor names the host a scan contacts: the LAYERLEAK_REGISTRY_BASE_URL
+// override when set, otherwise the reference's registry.
+func registryHostFor(cfg config.Config, ref manifest.Reference) string {
+	if cfg.RegistryBaseURL != "" {
+		if parsed, err := url.Parse(cfg.RegistryBaseURL); err == nil && parsed.Host != "" {
+			return parsed.Host
+		}
+		return cfg.RegistryBaseURL
+	}
+	return ref.Registry
+}
+
+// maxPasswordBytes bounds the stdin read for --password-stdin.
+const maxPasswordBytes = 64 * 1024
+
+// readPasswordStdin reads the whole of stdin and removes exactly one trailing
+// newline (LF or CRLF), so a password piped with echo or from a file works
+// while a password that legitimately ends in a newline character is still
+// representable by adding a second one.
+func readPasswordStdin(stdin io.Reader) (string, error) {
+	if stdin == nil {
+		return "", errors.New("--password-stdin: no standard input")
+	}
+	data, err := io.ReadAll(io.LimitReader(stdin, maxPasswordBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("--password-stdin: read standard input: %w", err)
+	}
+	if len(data) > maxPasswordBytes {
+		return "", fmt.Errorf("--password-stdin: password exceeds %d bytes", maxPasswordBytes)
+	}
+	password := string(data)
+	if strings.HasSuffix(password, "\n") {
+		password = strings.TrimSuffix(password, "\n")
+		password = strings.TrimSuffix(password, "\r")
+	}
+	if password == "" {
+		return "", errors.New("--password-stdin: standard input is empty")
+	}
+	return password, nil
+}
+
+// credentialFromFlags validates the --username/--password-stdin pair (both or
+// neither) and reads the password. The zero credential means "not given".
+func credentialFromFlags(username string, passwordStdin bool, stdin io.Reader) (registry.Credential, error) {
+	username = strings.TrimSpace(username)
+	switch {
+	case username == "" && !passwordStdin:
+		return registry.Credential{}, nil
+	case username == "":
+		return registry.Credential{}, errors.New("--password-stdin requires --username")
+	case !passwordStdin:
+		return registry.Credential{}, errors.New("--username requires --password-stdin (a --password flag is deliberately not offered: it would expose the secret in process listings and shell history)")
+	}
+	password, err := readPasswordStdin(stdin)
+	if err != nil {
+		return registry.Credential{}, err
+	}
+	return registry.Credential{Username: username, Password: password}, nil
 }
 
 // effectiveProgressMode resolves "auto": the dynamic terminal block is not

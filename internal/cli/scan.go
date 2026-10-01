@@ -43,6 +43,8 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var noArtifacts bool
 	var noDatabase bool
 	var failOn string
+	var username string
+	var passwordStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
@@ -76,10 +78,21 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err := validateRepositoryScopeFlags(cmd, allTags); err != nil {
 				return err
 			}
+			credential, err := credentialFromFlags(username, passwordStdin, cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
 
 			cfg, err := config.Load()
 			if err != nil {
 				return err
+			}
+			// Flags win; otherwise the configured LAYERLEAK_REGISTRY_USERNAME/
+			// PASSWORD pair applies to the registry of this reference. The
+			// credential is bound to that one host by the registry client and
+			// only ever sent over https.
+			if credential.IsZero() {
+				credential = scanservice.ConfiguredCredential(cfg)
 			}
 			if err := applyScanScopeFlags(cmd, &cfg, tagPageSize, maxRepositoryTags, maxRepositoryTargets); err != nil {
 				return err
@@ -149,6 +162,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				Reference:      ref,
 				Platform:       platform,
 				AllTags:        allTags,
+				Credential:     credential,
 				ScannerVersion: effectiveVersion(),
 				Logger:         logger,
 				Progress: func(update jobs.ProgressUpdate) {
@@ -312,7 +326,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if publicationErr != nil || saveErr != nil {
 				return errors.Join(operationErr, publicationErr)
 			}
-			warning, exit := exitForOutcome(result, scanErr, acceptablePartial, acceptPartial, failThreshold)
+			warning, exit := exitForOutcome(result, scanErr, acceptablePartial, acceptPartial, failThreshold, registryHostFor(cfg, ref))
 			if warning != "" {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
 					logger.Debug("progress update failed")
@@ -332,6 +346,8 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	cmd.Flags().StringVar(&outputPath, "output", "-", "Write the formatted result to this file instead of stdout; - means stdout.")
 	cmd.Flags().BoolVar(&noArtifacts, "no-artifacts", false, "Do not write a scan record file.")
 	cmd.Flags().BoolVar(&noDatabase, "no-db", false, "Do not open or write to PostgreSQL even when LAYERLEAK_DATABASE_URL is set.")
+	cmd.Flags().StringVar(&username, "username", "", "Registry username for a private image; requires --password-stdin. Overrides LAYERLEAK_REGISTRY_USERNAME/PASSWORD for this scan.")
+	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "Read the registry password or token from standard input (to the end, one trailing newline removed); requires --username.")
 	cmd.Flags().IntVar(&tagPageSize, "tag-page-size", 0, "Registry tag-list page size for repository sweeps. Overrides LAYERLEAK_TAG_PAGE_SIZE. Must be greater than zero when set.")
 	cmd.Flags().IntVar(&maxRepositoryTags, "max-repository-tags", 0, "Maximum tags enumerated per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TAGS. Set to 0 to disable the limit; negative values are rejected.")
 	cmd.Flags().IntVar(&maxRepositoryTargets, "max-repository-targets", 0, "Maximum distinct targets resolved per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TARGETS. Set to 0 to disable the limit; negative values are rejected.")

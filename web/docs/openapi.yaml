@@ -1110,6 +1110,7 @@ components:
         - expanded_layer_bytes
         - retained_bytes
         - detector_input_bytes_scanned
+        - files_transcoded_utf16
       properties:
         complete:
           type: boolean
@@ -1149,6 +1150,12 @@ components:
           type: integer
           format: int64
           minimum: 0
+        files_transcoded_utf16:
+          type: integer
+          minimum: 0
+          description: >-
+            Scanned files whose UTF-16 content (byte-order mark or
+            alternating-NUL shape) was transcoded to UTF-8 before detection.
 
     SanitizedError:
       type: string

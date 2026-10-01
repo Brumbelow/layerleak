@@ -16,6 +16,7 @@
       "files_scanned": 0,
       "files_seen": 2,
       "files_skipped_oversize": 0,
+      "files_transcoded_utf16": 0,
       "layers_completed": 0,
       "layers_seen": 1,
       "metadata_values_scanned": 1,

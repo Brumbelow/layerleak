@@ -66,6 +66,10 @@ type Artifact struct {
 	Size                 int64
 	ContentClass         ContentClass
 	Scannable            bool
+	// SourceEncoding names the stored encoding of a text file whose Content
+	// was transcoded to UTF-8 (UTF-16 with or without a byte-order mark).
+	// Offsets and line numbers of findings refer to the transcoded Content.
+	SourceEncoding TextEncoding
 }
 
 type ReplayResult struct {
@@ -91,6 +95,9 @@ type Coverage struct {
 	FilesSkippedOversize int
 	FilesExcludedBinary  int
 	EntriesSkippedUnsafe int
+	// FilesTranscodedUTF16 counts scanned files (and hardlinks to them) whose
+	// UTF-16 content was transcoded to UTF-8 before detection.
+	FilesTranscodedUTF16 int
 	ExpandedBytes        int64
 	RetainedBytes        int64
 }
@@ -440,6 +447,9 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			}
 			if target.Scannable {
 				working.coverage.FilesScanned++
+				if target.SourceEncoding != "" {
+					working.coverage.FilesTranscodedUTF16++
+				}
 			} else if target.ContentClass == ContentClassOversize {
 				working.coverage.FilesSkippedOversize++
 			} else {
@@ -471,6 +481,9 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			}
 			if artifact.Scannable {
 				working.coverage.FilesScanned++
+				if artifact.SourceEncoding != "" {
+					working.coverage.FilesTranscodedUTF16++
+				}
 			} else if artifact.ContentClass == ContentClassOversize {
 				working.coverage.FilesSkippedOversize++
 			} else {
@@ -937,15 +950,26 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 	}
 
 	var contentClass ContentClass
+	var encoding TextEncoding
 	scannable := int64(len(content)) <= maxFileBytes
 	if !scannable {
 		contentClass = ContentClassOversize
 		content = nil
 	} else {
-		contentClass = classifyContent(entryPath, content)
-		scannable = contentClass == ContentClassText
+		content, encoding, scannable = transcodeTextContent(content, maxFileBytes)
 		if !scannable {
+			// The UTF-8 form of a UTF-16 file is subject to the per-file limit
+			// exactly as a file stored in UTF-8 is.
+			contentClass = ContentClassOversize
 			content = nil
+			encoding = ""
+		} else {
+			contentClass = classifyContent(entryPath, content)
+			scannable = contentClass == ContentClassText
+			if !scannable {
+				content = nil
+				encoding = ""
+			}
 		}
 	}
 
@@ -954,14 +978,32 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 	}
 
 	return Artifact{
-		Path:         entryPath,
-		LayerDigest:  layerDigest,
-		Type:         ArtifactTypeRegularFile,
-		Content:      content,
-		Size:         size,
-		ContentClass: contentClass,
-		Scannable:    scannable,
+		Path:           entryPath,
+		LayerDigest:    layerDigest,
+		Type:           ArtifactTypeRegularFile,
+		Content:        content,
+		Size:           size,
+		ContentClass:   contentClass,
+		Scannable:      scannable,
+		SourceEncoding: encoding,
 	}, nil
+}
+
+// transcodeTextContent returns content in UTF-8 for classification. UTF-16
+// text (with a byte-order mark or in the alternating-NUL shape) is decoded so
+// that it is scanned instead of being excluded as binary for its NUL bytes;
+// every other content is returned as stored. The boolean is false only when a
+// transcoded file's UTF-8 form exceeds maxBytes.
+func transcodeTextContent(content []byte, maxBytes int64) ([]byte, TextEncoding, bool) {
+	encoding, bomLength := detectUTF16(content)
+	if encoding == "" {
+		return content, "", true
+	}
+	decoded, ok := transcodeUTF16(content, encoding, bomLength, maxBytes)
+	if !ok {
+		return nil, encoding, false
+	}
+	return decoded, encoding, true
 }
 
 func boundedPathForError(value string) string {

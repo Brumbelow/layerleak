@@ -126,7 +126,8 @@
         "metadata_values_scanned",
         "expanded_layer_bytes",
         "retained_bytes",
-        "detector_input_bytes_scanned"
+        "detector_input_bytes_scanned",
+        "files_transcoded_utf16"
       ],
       "properties": {
         "complete": { "type": "boolean" },
@@ -140,7 +141,8 @@
         "metadata_values_scanned": { "$ref": "#/$defs/count" },
         "expanded_layer_bytes": { "$ref": "#/$defs/count" },
         "retained_bytes": { "$ref": "#/$defs/count" },
-        "detector_input_bytes_scanned": { "$ref": "#/$defs/count" }
+        "detector_input_bytes_scanned": { "$ref": "#/$defs/count" },
+        "files_transcoded_utf16": { "$ref": "#/$defs/count" }
       }
     },
     "diagnostic": {

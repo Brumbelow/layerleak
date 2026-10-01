@@ -770,6 +770,7 @@ func mergeCoverage(left, right scanner.Coverage) scanner.Coverage {
 		ExpandedLayerBytes:        left.ExpandedLayerBytes + right.ExpandedLayerBytes,
 		RetainedBytes:             left.RetainedBytes + right.RetainedBytes,
 		DetectorInputBytesScanned: left.DetectorInputBytesScanned + right.DetectorInputBytesScanned,
+		FilesTranscodedUTF16:      left.FilesTranscodedUTF16 + right.FilesTranscodedUTF16,
 	}
 }
 

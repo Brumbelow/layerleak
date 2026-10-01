@@ -161,7 +161,8 @@ func TestSARIFRulesAndEncodingExactOutput(t *testing.T) {
           "metadata_values_scanned": 1,
           "expanded_layer_bytes": 0,
           "retained_bytes": 0,
-          "detector_input_bytes_scanned": 0
+          "detector_input_bytes_scanned": 0,
+          "files_transcoded_utf16": 0
         },
         "failed_manifest_count": 0,
         "failed_target_count": 0,

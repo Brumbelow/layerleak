@@ -66,6 +66,10 @@ type Coverage struct {
 	ExpandedLayerBytes        int64 `json:"expanded_layer_bytes"`
 	RetainedBytes             int64 `json:"retained_bytes"`
 	DetectorInputBytesScanned int64 `json:"detector_input_bytes_scanned"`
+	// FilesTranscodedUTF16 counts scanned files whose UTF-16 content was
+	// transcoded to UTF-8 before detection (3.0.0; previously such files were
+	// excluded as binary).
+	FilesTranscodedUTF16 int `json:"files_transcoded_utf16"`
 }
 
 type Diagnostic struct {
@@ -1388,6 +1392,7 @@ func coverageFromLayerResult(layerCoverage layers.Coverage, detection detectionC
 		ExpandedLayerBytes:        layerCoverage.ExpandedBytes,
 		RetainedBytes:             layerCoverage.RetainedBytes,
 		DetectorInputBytesScanned: detection.detectorInputBytesScanned,
+		FilesTranscodedUTF16:      layerCoverage.FilesTranscodedUTF16,
 	}
 }
 
@@ -1408,6 +1413,7 @@ func mergeCoverage(left, right Coverage, initialized bool) Coverage {
 		ExpandedLayerBytes:        left.ExpandedLayerBytes + right.ExpandedLayerBytes,
 		RetainedBytes:             left.RetainedBytes + right.RetainedBytes,
 		DetectorInputBytesScanned: left.DetectorInputBytesScanned + right.DetectorInputBytesScanned,
+		FilesTranscodedUTF16:      left.FilesTranscodedUTF16 + right.FilesTranscodedUTF16,
 	}
 }
 

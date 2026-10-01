@@ -41,9 +41,11 @@ services:
       LAYERLEAK_DATABASE_MAX_IDLE_CONNS: ${LAYERLEAK_DATABASE_MAX_IDLE_CONNS:-5}
       LAYERLEAK_DATABASE_MAX_OPEN_CONNS: ${LAYERLEAK_DATABASE_MAX_OPEN_CONNS:-10}
       LAYERLEAK_DATABASE_QUERY_TIMEOUT: ${LAYERLEAK_DATABASE_QUERY_TIMEOUT:-10s}
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      # sslmode=disable is acceptable only on the Compose-internal network; the
+      # password travels as PGPASSWORD rather than inside the URL.
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
-      LAYERLEAK_FINDINGS_DIR: ${LAYERLEAK_FINDINGS_DIR:-/tmp/layerleak/findings}
       LAYERLEAK_HTTP_TIMEOUT: ${LAYERLEAK_HTTP_TIMEOUT:-30s}
       LAYERLEAK_LOG_LEVEL: ${LAYERLEAK_LOG_LEVEL:-info}
       LAYERLEAK_MAX_AUTH_RESPONSE_BYTES: ${LAYERLEAK_MAX_AUTH_RESPONSE_BYTES:-1048576}
@@ -72,6 +74,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # A fresh volume becomes ready without a manual migration step; the
+      # migration command is idempotent, so restarts are safe.
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${LAYERLEAK_API_HOST:-127.0.0.1}:${LAYERLEAK_API_PORT:-8080}:8080"
     healthcheck:
@@ -87,13 +93,19 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Must exceed LAYERLEAK_API_SHUTDOWN_TIMEOUT so an in-flight scan can be
+    # persisted before the container is killed.
+    stop_grace_period: ${LAYERLEAK_API_STOP_GRACE_PERIOD:-35s}
     restart: unless-stopped
 
   migrate:
     image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
     entrypoint: ["/usr/local/bin/layerleak-migrate-up"]
     environment:
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      # sslmode=disable is acceptable only on the Compose-internal network; the
+      # password travels as PGPASSWORD rather than inside the URL.
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_MIGRATIONS_DIR: ${LAYERLEAK_MIGRATIONS_DIR:-/app/migrations}
     depends_on:
       db:
@@ -105,8 +117,6 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    profiles:
-      - tools
     restart: "no"
 
   purge-raw-secrets:
@@ -118,7 +128,10 @@ services:
       LAYERLEAK_DATABASE_MAX_IDLE_CONNS: ${LAYERLEAK_DATABASE_MAX_IDLE_CONNS:-5}
       LAYERLEAK_DATABASE_MAX_OPEN_CONNS: ${LAYERLEAK_DATABASE_MAX_OPEN_CONNS:-10}
       LAYERLEAK_DATABASE_QUERY_TIMEOUT: ${LAYERLEAK_DATABASE_QUERY_TIMEOUT:-10s}
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      # sslmode=disable is acceptable only on the Compose-internal network; the
+      # password travels as PGPASSWORD rather than inside the URL.
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
     depends_on:
       db:

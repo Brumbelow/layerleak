@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"slices"
@@ -58,11 +57,14 @@ type Config struct {
 	DatabaseConnMaxIdleTime     time.Duration
 	DatabaseQueryTimeout        time.Duration
 	DatabaseWriteTimeout        time.Duration
-	MigrationsDir               string
 }
 
 func Load() (Config, error) {
 	logLevel, err := logLevelFromEnv("LAYERLEAK_LOG_LEVEL", "info")
+	if err != nil {
+		return Config{}, err
+	}
+	apiAddr, err := listenAddrFromEnv("LAYERLEAK_API_ADDR", "127.0.0.1:8080")
 	if err != nil {
 		return Config{}, err
 	}
@@ -232,7 +234,7 @@ func Load() (Config, error) {
 
 	return Config{
 		LogLevel:                    logLevel,
-		APIAddr:                     envOrDefault("LAYERLEAK_API_ADDR", "127.0.0.1:8080"),
+		APIAddr:                     apiAddr,
 		APIMaxRequestBytes:          apiMaxRequestBytes,
 		APIScanTimeout:              apiScanTimeout,
 		APIMaxConcurrentScans:       apiMaxConcurrentScans,
@@ -277,15 +279,37 @@ func Load() (Config, error) {
 		DatabaseConnMaxIdleTime:     databaseConnMaxIdleTime,
 		DatabaseQueryTimeout:        databaseQueryTimeout,
 		DatabaseWriteTimeout:        databaseWriteTimeout,
-		MigrationsDir:               envOrDefault("LAYERLEAK_MIGRATIONS_DIR", "/app/migrations"),
 	}, nil
 }
 
+// logLevelFromEnv accepts exactly the four documented level names
+// (case-insensitively). slog would also accept forms such as "info+2", but a
+// misspelled level is far more likely to be a mistake than an intentional
+// offset, so anything else fails loudly.
 func logLevelFromEnv(key, fallback string) (string, error) {
 	value := strings.ToLower(envOrDefault(key, fallback))
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(value)); err != nil {
+	switch value {
+	case "debug", "info", "warn", "error":
+		return value, nil
+	}
+	return "", fmt.Errorf("parse %s: must be one of debug, info, warn, or error", key)
+}
+
+// listenAddrFromEnv validates a host:port listen address at load time so a
+// malformed value fails before the database is opened.
+func listenAddrFromEnv(key, fallback string) (string, error) {
+	value := envOrDefault(key, fallback)
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
 		return "", fmt.Errorf("parse %s: %w", key, err)
+	}
+	if err := validatePort(port); err != nil {
+		return "", fmt.Errorf("parse %s: %w", key, err)
+	}
+	if host != "" && net.ParseIP(host) == nil {
+		if err := validateHostname(strings.ToLower(host)); err != nil {
+			return "", fmt.Errorf("parse %s: %w", key, err)
+		}
 	}
 	return value, nil
 }
@@ -425,12 +449,13 @@ func boolFromEnv(key string, fallback bool) (bool, error) {
 		return fallback, nil
 	}
 
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("parse %s: %w", key, err)
+	switch strings.ToLower(value) {
+	case "1", "t", "true", "yes", "y", "on":
+		return true, nil
+	case "0", "f", "false", "no", "n", "off":
+		return false, nil
 	}
-
-	return parsed, nil
+	return false, fmt.Errorf("parse %s: must be one of 1, true, yes, on, 0, false, no, or off", key)
 }
 
 func int64FromEnv(key string, fallback int64) (int64, error) {

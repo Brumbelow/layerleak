@@ -196,23 +196,24 @@ set -a
 set +a
 ```
 
-Durations use Go syntax such as `30s`, `10m`, or `1h`. Positive resource bounds
-fail the scan instead of silently truncating it. A value of `0` disables a
-`MAX_*` bound unless the description says otherwise.
+Durations use Go syntax such as `30s`, `10m`, or `1h`. Resource bounds fail
+the scan instead of silently truncating it. Rows marked **must be positive**
+reject `0`; every other `MAX_*` bound accepts `0` to disable it. Boolean
+variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 
 ### Core and registry
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LAYERLEAK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. |
-| `LAYERLEAK_FINDINGS_DIR` | auto | Saved result directory. |
-| `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Unsafe opt-in for raw values and snippets. |
+| `LAYERLEAK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` (case-insensitive); any other spelling is rejected. |
+| `LAYERLEAK_FINDINGS_DIR` | auto | CLI only. Directory for saved scan records. |
+| `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Boolean. Unsafe opt-in for raw values and snippets. |
 | `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Manifest, config, tag, and auth request deadline. |
 | `LAYERLEAK_BLOB_TIMEOUT` | `10m` | Layer blob transfer deadline. |
 | `LAYERLEAK_SCAN_TIMEOUT` | `30m` | End-to-end CLI scan deadline. |
-| `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` | `2` | Attempts including the first request. |
-| `LAYERLEAK_REGISTRY_MAX_REDIRECTS` | `3` | Redirect cap; each destination is revalidated. |
-| `LAYERLEAK_MAX_AUTH_RESPONSE_BYTES` | `1048576` | Maximum registry token response size. |
+| `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` | `2` | Attempts including the first request; must be positive. |
+| `LAYERLEAK_REGISTRY_MAX_REDIRECTS` | `3` | Redirect cap; each destination is revalidated; must be positive. |
+| `LAYERLEAK_MAX_AUTH_RESPONSE_BYTES` | `1048576` | Maximum registry token response size; must be positive. |
 | `LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS` | empty | Comma-separated exact private registry `host[:port]` allowlist. |
 | `LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS` | empty | Comma-separated exact private auth `host[:port]` allowlist. |
 | `LAYERLEAK_REGISTRY_BASE_URL` | empty | Advanced registry endpoint override. |
@@ -228,20 +229,20 @@ control.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LAYERLEAK_MAX_FILE_BYTES` | `1048576` | Maximum decompressed bytes buffered for one file; must be positive. |
+| `LAYERLEAK_MAX_FILE_BYTES` | `1048576` | Maximum decompressed bytes buffered for one file; must be positive. Larger files are not scanned: they are reported with a `files_skipped_oversize` diagnostic and coverage becomes partial. |
 | `LAYERLEAK_MAX_LAYER_BYTES` | `536870912` | Maximum decompressed stream bytes for one layer. |
 | `LAYERLEAK_MAX_LAYER_ENTRIES` | `50000` | Maximum tar entries for one layer. |
 | `LAYERLEAK_MAX_IMAGE_LAYERS` | `512` | Maximum layers selected for one image. |
 | `LAYERLEAK_MAX_IMAGE_MANIFESTS` | `64` | Maximum platform manifests selected from one image index. |
 | `LAYERLEAK_MAX_IMAGE_LAYER_BYTES` | `4294967296` | Aggregate advertised compressed and expanded layer bytes. |
-| `LAYERLEAK_MAX_IMAGE_ARTIFACTS` | `250000` | Aggregate layer artifact count. |
+| `LAYERLEAK_MAX_IMAGE_ARTIFACTS` | `250000` | Aggregate tar entry count across all selected layers, including directories, links, whiteouts, and device nodes. |
 | `LAYERLEAK_MAX_RETAINED_BYTES` | `1073741824` | Bytes retained while reconstructing final state. |
 | `LAYERLEAK_MAX_MANIFEST_BYTES` | `8388608` | Maximum manifest response size. |
 | `LAYERLEAK_MAX_CONFIG_BYTES` | `8388608` | Maximum image config response size. |
 | `LAYERLEAK_MAX_TAG_RESPONSE_BYTES` | `8388608` | Maximum tag-list response page size. |
 | `LAYERLEAK_MAX_FINDINGS_PER_SCAN` | `10000` | Maximum findings retained for one scan. |
 | `LAYERLEAK_MAX_RAW_FINDING_BYTES` | `67108864` | Maximum raw value and context bytes retained when raw-secret persistence is enabled; exceeding it makes coverage partial. |
-| `LAYERLEAK_TAG_PAGE_SIZE` | `100` | Registry tag-list page size. |
+| `LAYERLEAK_TAG_PAGE_SIZE` | `100` | Registry tag-list page size; must be positive. |
 | `LAYERLEAK_MAX_REPOSITORY_TAGS` | `1000` | Maximum tags enumerated by `--all-tags`. |
 | `LAYERLEAK_MAX_REPOSITORY_TARGETS` | `250` | Maximum distinct targets scanned by `--all-tags`. |
 
@@ -249,24 +250,38 @@ control.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LAYERLEAK_API_ADDR` | `127.0.0.1:8080` | API listen address; image default is `0.0.0.0:8080`. |
-| `LAYERLEAK_API_MAX_REQUEST_BYTES` | `16384` | Maximum JSON request body. |
+| `LAYERLEAK_API_ADDR` | `127.0.0.1:8080` | API listen address as `host:port` (the host may be empty, a hostname, or an IP); validated at startup; image default is `0.0.0.0:8080`. |
+| `LAYERLEAK_API_MAX_REQUEST_BYTES` | `16384` | Maximum JSON request body; must be positive. |
 | `LAYERLEAK_API_SCAN_TIMEOUT` | `30m` | Deadline for an API scan. |
-| `LAYERLEAK_API_MAX_CONCURRENT_SCANS` | `1` | In-process scan concurrency. |
+| `LAYERLEAK_API_MAX_CONCURRENT_SCANS` | `1` | In-process scan concurrency; must be positive. |
 | `LAYERLEAK_API_READ_HEADER_TIMEOUT` | `5s` | HTTP header deadline. |
 | `LAYERLEAK_API_READ_TIMEOUT` | `15s` | HTTP request read deadline. |
 | `LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT` | `30s` | Non-scan response write deadline. |
 | `LAYERLEAK_API_IDLE_TIMEOUT` | `60s` | Keep-alive idle timeout. |
 | `LAYERLEAK_API_SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown deadline. |
 | `LAYERLEAK_API_READINESS_TIMEOUT` | `2s` | Database readiness query deadline. |
-| `LAYERLEAK_DATABASE_URL` | empty | PostgreSQL connection URL. |
-| `LAYERLEAK_DATABASE_MAX_OPEN_CONNS` | `10` | Open connection cap. |
+| `LAYERLEAK_DATABASE_URL` | empty | PostgreSQL connection URL. The password may be left out of the URL and supplied through `PGPASSWORD` or `PGPASSFILE`; the driver fills any field the URL omits from the standard `PG*` variables. |
+| `LAYERLEAK_DATABASE_MAX_OPEN_CONNS` | `10` | Open connection cap; must be positive. |
 | `LAYERLEAK_DATABASE_MAX_IDLE_CONNS` | `5` | Idle connection cap. |
 | `LAYERLEAK_DATABASE_CONN_MAX_LIFETIME` | `30m` | Connection lifetime. |
 | `LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME` | `5m` | Idle connection lifetime. |
 | `LAYERLEAK_DATABASE_QUERY_TIMEOUT` | `10s` | Read and readiness query deadline. |
 | `LAYERLEAK_DATABASE_WRITE_TIMEOUT` | `2m` | Transactional persistence deadline. |
-| `LAYERLEAK_MIGRATIONS_DIR` | `/app/migrations` | Migration directory used by the migration command. |
+
+### Compose-only variables
+
+`docker-compose.yml` reads these from `.env`; the Layerleak binaries never see
+them directly.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LAYERLEAK_IMAGE` | `ghcr.io/brumbelow/layerleak:latest` | Image used by the `api`, `migrate`, and `purge-raw-secrets` services. |
+| `LAYERLEAK_API_HOST` | `127.0.0.1` | Host interface the API port is published on. |
+| `LAYERLEAK_API_PORT` | `8080` | Host port published for the API. |
+| `LAYERLEAK_DB_NAME` | `layerleak` | Database created by the `db` service. |
+| `LAYERLEAK_DB_USER` | `layerleak` | Role created by the `db` service. |
+| `LAYERLEAK_DB_PASSWORD` | required | Password for that role. `.env.example` ships it empty and Compose refuses to start until it is set. |
+| `LAYERLEAK_API_STOP_GRACE_PERIOD` | `35s` | How long Compose waits for the API to drain before killing it; keep it above `LAYERLEAK_API_SHUTDOWN_TIMEOUT`. |
 
 ## PostgreSQL and migrations
 
@@ -282,7 +297,9 @@ go run ./cmd/migrate
 go run ./cmd/migrate
 ```
 
-The second run is intentionally a no-op. The migration command uses an advisory
+`LAYERLEAK_MIGRATIONS_DIR` is read only by the migration command; the
+container default is `/app/migrations`. The second run is intentionally a
+no-op. The migration command uses an advisory
 lock, a checksummed migration ledger, and one transaction per migration. It can
 adopt a complete legacy 0001-0003 schema and refuses drift, gaps, dirty state,
 or a partial legacy schema.
@@ -406,30 +423,37 @@ docker run --rm \
   ghcr.io/brumbelow/layerleak:latest
 ```
 
-For Compose, copy the example and replace the required password:
+For Compose, copy the example and set the required password. The example
+ships it empty, and `docker compose` refuses to start until it has a value:
 
 ```bash
 cp .env.example .env
-# Edit LAYERLEAK_DB_PASSWORD in .env.
+# Set LAYERLEAK_DB_PASSWORD in .env.
 docker compose config
-docker compose --profile tools run --rm migrate
-docker compose up -d api
+docker compose up -d
 docker compose ps
 curl --fail http://127.0.0.1:8080/readyz
 ```
 
 The Compose services use a digest-pinned PostgreSQL 16.15 image, wait for
-PostgreSQL health, run the API read-only with all capabilities dropped, and use
-the native readiness probe. The host port binds to `127.0.0.1` by default; set
-`LAYERLEAK_API_HOST` only when an authenticated network edge is ready. The
-migration stays explicit. Purge raw material only after reviewing the command:
+PostgreSQL health, run the idempotent migration command to completion before
+the API starts (a fresh volume becomes ready without a manual step), run the
+API read-only with all capabilities dropped, and use the native readiness
+probe. The host port binds to `127.0.0.1` by default; set `LAYERLEAK_API_HOST`
+only when an authenticated network edge is ready. The `api` service has a
+35 second `stop_grace_period`: whatever runs the container must allow more than
+`LAYERLEAK_API_SHUTDOWN_TIMEOUT` (for example `docker stop -t 35` or a
+Kubernetes `terminationGracePeriodSeconds` above 30), otherwise an in-flight
+scan is killed before it is persisted. Purge raw material only after reviewing
+the command:
 
 ```bash
 docker compose --profile tools run --rm purge-raw-secrets --confirm
 ```
 
-If a database password contains reserved URL characters, percent-encode it for
-the connection URL or choose a URL-safe generated password.
+Compose hands the database password to the containers as `PGPASSWORD`, so it
+may contain any characters. Only a password embedded in a connection URL must
+be percent-encoded.
 
 ## Verify a release
 

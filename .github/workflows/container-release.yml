@@ -936,7 +936,6 @@ jobs:
             --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
             -p 127.0.0.1:18080:8080 \
             -e LAYERLEAK_DATABASE_URL="${database_url}" \
-            -e LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings \
             "${image}" >/dev/null
           for attempt in {1..60}; do
             if curl --fail --silent http://127.0.0.1:18080/readyz >/dev/null; then

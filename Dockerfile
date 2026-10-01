@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1.7
-
 # Keep the readable tag next to the immutable multi-platform digest so dependency
-# updates remain reviewable.
+# updates remain reviewable. No `# syntax=` directive: the digest-pinned BuildKit
+# used by the release workflow supplies the Dockerfile frontend, so no floating
+# frontend image is fetched at build time.
 FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS build
 
 WORKDIR /src
@@ -20,10 +20,10 @@ ARG LAYERLEAK_VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
 	ldflags="-s -w -X github.com/brumbelow/layerleak/v3/internal/version.Version=${LAYERLEAK_VERSION}" \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-api ./cmd/api \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-migrate-up ./cmd/migrate \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-purge-raw-secrets ./cmd/purge \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-healthcheck ./cmd/healthcheck \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false -ldflags="${ldflags}" -o /out/layerleak-api ./cmd/api \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false -ldflags="${ldflags}" -o /out/layerleak-migrate-up ./cmd/migrate \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false -ldflags="${ldflags}" -o /out/layerleak-purge-raw-secrets ./cmd/purge \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -buildvcs=false -ldflags="${ldflags}" -o /out/layerleak-healthcheck ./cmd/healthcheck \
 	&& install -d -m 1777 /out/rootfs/tmp
 
 FROM scratch
@@ -39,7 +39,6 @@ COPY migrations /app/migrations
 WORKDIR /app
 
 ENV LAYERLEAK_API_ADDR=0.0.0.0:8080
-ENV LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings
 
 EXPOSE 8080
 

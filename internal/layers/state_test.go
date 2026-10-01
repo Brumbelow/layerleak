@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -844,6 +845,141 @@ func TestReplayReportsCoverageAndCancellation(t *testing.T) {
 	}
 }
 
+func TestReplayReportsForeignLayersAsUnsupportedWithoutOpeningBlobs(t *testing.T) {
+	regular := gzipLayer(t, []tarEntry{{name: "app/config", body: "clean"}})
+	for _, test := range []struct {
+		name      string
+		mediaType string
+	}{
+		{name: "docker foreign gzip", mediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+		{name: "docker foreign tar", mediaType: manifest.MediaTypeDockerSchema2ForeignLayer},
+		{name: "oci nondistributable zstd", mediaType: manifest.MediaTypeOCIImageLayerNonDistributableZstd},
+		{name: "unknown media type", mediaType: "application/octet-stream"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opened := 0
+			result, err := Replay(context.Background(), []manifest.Descriptor{
+				{Digest: "sha256:regular", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+				{Digest: "sha256:foreign", MediaType: test.mediaType, URLs: []string{"https://example.invalid/layer"}},
+			}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(context.Context, manifest.Descriptor) (io.ReadCloser, error) {
+				opened++
+				return io.NopCloser(bytes.NewReader(regular)), nil
+			}))
+
+			var unsupported *UnsupportedLayerError
+			if !errors.As(err, &unsupported) || !IsUnsupportedLayer(err) {
+				t.Fatalf("Replay() error = %v", err)
+			}
+			if unsupported.Digest != "sha256:foreign" || unsupported.MediaType != test.mediaType || unsupported.Index != 1 {
+				t.Fatalf("UnsupportedLayerError = %#v", unsupported)
+			}
+			if limits.IsExceeded(err) || manifest.IsIntegrityError(err) {
+				t.Fatalf("unsupported layer was classified as a limit or integrity failure: %v", err)
+			}
+			if opened != 0 {
+				t.Fatalf("opened %d blobs for an unscannable manifest", opened)
+			}
+			if result.Coverage.LayersSeen != 0 || result.Coverage.LayersCompleted != 0 || len(result.FinalFiles) != 0 {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestReplayScansOldGNUSparseAndContiguousFiles(t *testing.T) {
+	t.Run("gnu sparse", func(t *testing.T) {
+		// Written by GNU tar 1.35 with `tar --sparse --format=gnu`: a 2 MiB file
+		// whose only data fragment carries a marker in the middle of the hole.
+		layer, err := os.ReadFile("testdata/gnu-sparse.tar.gz")
+		if err != nil {
+			t.Fatalf("ReadFile() error = %v", err)
+		}
+		gzipReader, err := gzip.NewReader(bytes.NewReader(layer))
+		if err != nil {
+			t.Fatalf("gzip.NewReader() error = %v", err)
+		}
+		header, err := tar.NewReader(gzipReader).Next()
+		if err != nil {
+			t.Fatalf("tar.Next() error = %v", err)
+		}
+		if header.Typeflag != tar.TypeGNUSparse || header.Name != "sparse.log" || header.Size != 2<<20 {
+			t.Fatalf("fixture header = %#v", header)
+		}
+
+		result, err := replayTestLayers(t, []testLayer{{digest: "sha256:gnu-sparse", body: layer}}, ReplayOptions{MaxFileBytes: 4 << 20})
+		if err != nil {
+			t.Fatalf("Replay() error = %v", err)
+		}
+		files := make(map[string]Artifact)
+		for _, artifact := range result.FinalFiles {
+			files[artifact.Path] = artifact
+		}
+		// The sparse entry is a regular file whose logical content is read in
+		// full. Its holes are NUL bytes, so content classification excludes it
+		// exactly as it would any other regular file with the same bytes; what
+		// matters is that the file is seen and counted instead of being hidden
+		// as an "other" artifact while coverage claims completeness.
+		sparse, ok := files["sparse.log"]
+		if !ok || sparse.Type != ArtifactTypeRegularFile || sparse.Size != 2<<20 {
+			t.Fatalf("sparse.log artifact = %#v", sparse)
+		}
+		if sparse.ContentClass != ContentClassBinaryNUL || sparse.Scannable || len(sparse.Content) != 0 {
+			t.Fatalf("sparse.log classification = %#v", sparse)
+		}
+		plain, ok := files["app/plain.txt"]
+		if !ok || !plain.Scannable || string(plain.Content) != "plain\n" {
+			t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+		}
+		coverage := result.Coverage
+		if coverage.LayersCompleted != 1 || coverage.FilesSeen != 2 || coverage.FilesScanned != 1 || coverage.FilesExcludedBinary != 1 || coverage.EntriesSkippedUnsafe != 0 || coverage.ExpandedBytes < 2<<20 {
+			t.Fatalf("result.Coverage = %#v", coverage)
+		}
+	})
+
+	t.Run("gnu contiguous", func(t *testing.T) {
+		layer := gzipLayer(t, []tarEntry{{name: "app/contiguous", body: "contiguous-body", typeflag: tar.TypeCont}})
+		result, err := replayTestLayers(t, []testLayer{{digest: "sha256:contiguous", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20})
+		if err != nil {
+			t.Fatalf("Replay() error = %v", err)
+		}
+		if len(result.FinalFiles) != 1 || result.FinalFiles[0].Path != "app/contiguous" || string(result.FinalFiles[0].Content) != "contiguous-body" || !result.FinalFiles[0].Scannable {
+			t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+		}
+		if result.Coverage.FilesSeen != 1 || result.Coverage.FilesScanned != 1 {
+			t.Fatalf("result.Coverage = %#v", result.Coverage)
+		}
+	})
+}
+
+func TestReplayIgnoresRootDirectoryEntries(t *testing.T) {
+	entries := []tarEntry{
+		{name: "./", typeflag: tar.TypeDir},
+		{name: "./app/", typeflag: tar.TypeDir},
+		{name: "./app/safe", body: "safe"},
+		{name: ".", typeflag: tar.TypeDir},
+	}
+	layer := gzipLayer(t, entries)
+	result, err := replayTestLayers(t, []testLayer{{digest: "sha256:root", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if result.Coverage.EntriesSkippedUnsafe != 0 {
+		t.Fatalf("root directory entries were counted as unsafe: %#v", result.Coverage)
+	}
+	if len(result.FinalFiles) != 1 || result.FinalFiles[0].Path != "app/safe" {
+		t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+	}
+
+	// Root entries still count against the entry limits, as container runtimes count them.
+	if _, err := replayTestLayers(t, []testLayer{{digest: "sha256:root", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20, MaxLayerEntries: len(entries)}); err != nil {
+		t.Fatalf("Replay(MaxLayerEntries=%d) error = %v", len(entries), err)
+	}
+	_, err = replayTestLayers(t, []testLayer{{digest: "sha256:root", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20, MaxLayerEntries: len(entries) - 1})
+	if exceeded, ok := limits.AsExceeded(err); !ok || exceeded.Kind != limits.KindLayerEntries {
+		t.Fatalf("Replay(MaxLayerEntries=%d) error = %v", len(entries)-1, err)
+	}
+}
+
 func TestReplaySkipsUnsafeArchivePathsAndReportsIncompleteCoverage(t *testing.T) {
 	layer := gzipLayer(t, []tarEntry{
 		{name: "../../etc/passwd", body: "escape"},
@@ -943,7 +1079,7 @@ func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader() error = %v", err)
 		}
-		if typeflag == tar.TypeReg || typeflag == legacyTypeRegA {
+		if typeflag == tar.TypeReg || typeflag == legacyTypeRegA || typeflag == tar.TypeCont {
 			if _, err := tarWriter.Write([]byte(entry.body)); err != nil {
 				t.Fatalf("Write() error = %v", err)
 			}

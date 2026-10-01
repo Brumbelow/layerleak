@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -88,6 +89,30 @@ type Coverage struct {
 	RetainedBytes        int64
 }
 
+// UnsupportedLayerError reports a manifest that cannot be replayed because one
+// of its layers is foreign/non-distributable or uses an unknown media type.
+// It is an unsupported-platform outcome, never an integrity failure: the
+// descriptors themselves are well formed.
+type UnsupportedLayerError struct {
+	Index     int
+	Digest    string
+	MediaType string
+}
+
+func (e *UnsupportedLayerError) Error() string {
+	reason := "unsupported media type"
+	if manifest.IsForeignLayerMediaType(e.MediaType) {
+		reason = "non-distributable (foreign) media type"
+	}
+	return fmt.Sprintf("layer[%d] %s has %s %q and cannot be scanned", e.Index, strings.TrimSpace(e.Digest), reason, manifest.MediaTypeBase(e.MediaType))
+}
+
+// IsUnsupportedLayer reports whether err was caused by an unscannable layer.
+func IsUnsupportedLayer(err error) bool {
+	var target *UnsupportedLayerError
+	return errors.As(err, &target)
+}
+
 type BlobOpener interface {
 	OpenLayer(ctx context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error)
 }
@@ -123,17 +148,18 @@ func Replay(ctx context.Context, descriptors []manifest.Descriptor, options Repl
 	}
 
 	state := NewState()
+	// Decide up front whether the whole manifest can be replayed so that no
+	// blob is downloaded for an image whose later layers are unscannable.
+	for index, descriptor := range descriptors {
+		if !manifest.IsLayerMediaType(descriptor.MediaType) {
+			return state.Result(), &UnsupportedLayerError{Index: index, Digest: descriptor.Digest, MediaType: descriptor.MediaType}
+		}
+	}
 	for _, descriptor := range descriptors {
 		if err := contextError(ctx); err != nil {
 			return state.Result(), err
 		}
 		state.coverage.LayersSeen++
-		if manifest.IsForeignLayerMediaType(descriptor.MediaType) {
-			return state.Result(), fmt.Errorf("foreign layer media type is not supported: %s", descriptor.MediaType)
-		}
-		if !manifest.IsLayerMediaType(descriptor.MediaType) {
-			return state.Result(), fmt.Errorf("unsupported layer media type: %s", descriptor.MediaType)
-		}
 
 		stream, err := opener.OpenLayer(ctx, descriptor)
 		if err != nil {
@@ -248,7 +274,11 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 
 		entryPath, err := normalizePath(header.Name)
 		if err != nil {
-			working.coverage.EntriesSkippedUnsafe++
+			if !errors.Is(err, errRootEntry) {
+				// A `./` or `.` entry names the layer root itself (tar -C rootfs -c .
+				// always emits one); it carries nothing to record and is not unsafe.
+				working.coverage.EntriesSkippedUnsafe++
+			}
 			if err := drainEntry(tarReader); err != nil {
 				return err
 			}
@@ -364,7 +394,10 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			} else {
 				working.coverage.FilesExcludedBinary++
 			}
-		case tar.TypeReg: // archive/tar normalizes the legacy TypeRegA flag to TypeReg
+		case tar.TypeReg, tar.TypeGNUSparse, tar.TypeCont:
+			// archive/tar normalizes the legacy TypeRegA flag to TypeReg but keeps
+			// the old-GNU sparse ('S') and GNU contiguous ('7') flags on regular
+			// files; the entry reader already presents their logical content.
 			working.coverage.FilesSeen++
 			if header.Size <= options.MaxFileBytes {
 				prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.Size
@@ -1104,11 +1137,14 @@ func normalizePath(value string) (string, error) {
 
 	cleaned := path.Clean(value)
 	if cleaned == "" || cleaned == "." {
-		return "", fmt.Errorf("path is required")
+		return "", errRootEntry
 	}
 
 	return cleaned, nil
 }
+
+// errRootEntry marks an archive entry that names the layer root (`.` or `./`).
+var errRootEntry = errors.New("entry names the archive root")
 
 func validateLinkname(value string) error {
 	if len(value) > maxArchivePathBytes {

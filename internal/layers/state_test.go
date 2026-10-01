@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
@@ -980,6 +981,196 @@ func TestReplayIgnoresRootDirectoryEntries(t *testing.T) {
 	}
 }
 
+func TestReplayCapsZstdWindowIndependentlyOfLayerLimits(t *testing.T) {
+	// A valid frame header declaring a 512 MiB window (descriptor 0x98)
+	// followed by an empty final raw block. With the documented production
+	// default LAYERLEAK_MAX_LAYER_BYTES the decoder used to allocate 513 MiB of
+	// history for these ten bytes before noticing the stream was empty.
+	frame := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x98, 0x09, 0x00, 0x00, 0x78}
+	opener := OpenFunc(func(context.Context, manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(frame)), nil
+	})
+	for _, test := range []struct {
+		name          string
+		maxLayerBytes int64
+	}{
+		{name: "production default", maxLayerBytes: 512 << 20},
+		{name: "above the window maximum", maxLayerBytes: 4 << 30},
+		{name: "disabled", maxLayerBytes: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime.GC()
+			var before runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, err := Replay(context.Background(), []manifest.Descriptor{{Digest: "sha256:zstd-window", MediaType: manifest.MediaTypeOCIImageLayerZstd}}, ReplayOptions{
+				MaxFileBytes:  1 << 20,
+				MaxLayerBytes: test.maxLayerBytes,
+			}, opener)
+			var after runtime.MemStats
+			runtime.ReadMemStats(&after)
+			if !errors.Is(err, zstd.ErrWindowSizeExceeded) && !errors.Is(err, zstd.ErrDecoderSizeExceeded) {
+				t.Fatalf("Replay() error = %v", err)
+			}
+			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 16<<20 {
+				t.Fatalf("Replay() allocated %d bytes while rejecting the zstd window", allocated)
+			}
+		})
+	}
+}
+
+func TestReplayHonoursCancellationWhileDrainingSparseHoles(t *testing.T) {
+	// With both byte limits disabled nothing bounds a sparse hole except the
+	// caller's context. archive/tar synthesises hole bytes without touching
+	// the compressed stream, so the per-entry reader must observe ctx itself.
+	layer := gzipSparseLayer(t, "app/sparse", 512<<30)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	_, err := Replay(ctx, []manifest.Descriptor{{Digest: "sha256:sparse-cancel", MediaType: manifest.MediaTypeDockerSchema2LayerGzip}}, ReplayOptions{
+		MaxFileBytes:  1 << 20,
+		MaxLayerBytes: 0,
+		MaxTotalBytes: 0,
+	}, OpenFunc(func(context.Context, manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(layer)), nil
+	}))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Replay() took %v to observe cancellation inside a sparse hole", elapsed)
+	}
+}
+
+func TestReplaySkipsPAXGlobalHeadersWithoutMaterializingThem(t *testing.T) {
+	lower := gzipLayer(t, []tarEntry{{name: "pax_global_header", body: "real file"}})
+	upper := gzipLayer(t, []tarEntry{
+		{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, paxRecords: map[string]string{"comment": "generated"}},
+		{name: "app/x", body: "x"},
+	})
+
+	// MaxLayerEntries 1 proves the metadata record does not consume entry budget.
+	result, err := replayTestLayers(t, []testLayer{
+		{digest: "sha256:lower", body: lower},
+		{digest: "sha256:upper", body: upper},
+	}, ReplayOptions{MaxFileBytes: 1 << 20, MaxLayerEntries: 1})
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if len(result.FinalFiles) != 2 || result.FinalFiles[0].Path != "app/x" || result.FinalFiles[1].Path != "pax_global_header" {
+		t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+	}
+	if result.FinalFiles[1].Type != ArtifactTypeRegularFile || string(result.FinalFiles[1].Content) != "real file" || result.FinalFiles[1].LayerDigest != "sha256:lower" {
+		t.Fatalf("pax_global_header artifact = %#v", result.FinalFiles[1])
+	}
+	if len(result.DeletedArtifacts) != 0 {
+		t.Fatalf("result.DeletedArtifacts = %#v", result.DeletedArtifacts)
+	}
+	if result.Coverage.FilesSeen != 2 || result.Coverage.EntriesSkippedUnsafe != 0 {
+		t.Fatalf("result.Coverage = %#v", result.Coverage)
+	}
+}
+
+func TestReplayClassifiesTrailingDataAfterCompressedStream(t *testing.T) {
+	base := gzipLayer(t, []tarEntry{{name: "app/a", body: "a"}})
+	second := gzipLayer(t, []tarEntry{{name: "app/b", body: "b"}})
+
+	t.Run("concatenated gzip members", func(t *testing.T) {
+		// One tar stream compressed as two gzip members (as parallel gzip
+		// implementations emit); the multistream reader must join them.
+		archive := tarArchive(t, []tarEntry{{name: "app/a", body: "a"}, {name: "app/b", body: "b"}})
+		split := len(archive) / 2
+		layer := append(gzipBytes(t, archive[:split]), gzipBytes(t, archive[split:])...)
+		result, err := replayTestLayers(t, []testLayer{{digest: "sha256:members", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20})
+		if err != nil {
+			t.Fatalf("Replay() error = %v", err)
+		}
+		if len(result.FinalFiles) != 2 || result.Coverage.LayersCompleted != 1 {
+			t.Fatalf("result = %#v", result)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		suffix []byte
+	}{
+		{name: "trailing zeros", suffix: make([]byte, 512)},
+		{name: "trailing garbage", suffix: []byte("trailing-garbage")},
+		{name: "short trailing fragment", suffix: []byte{0x1f}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			layer := append(append([]byte(nil), base...), test.suffix...)
+			result, err := replayTestLayers(t, []testLayer{{digest: "sha256:trailing", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20})
+			var trailing *TrailingDataError
+			if !errors.As(err, &trailing) || !IsTrailingData(err) || trailing.Digest != "sha256:trailing" {
+				t.Fatalf("Replay() error = %v", err)
+			}
+			if limits.IsExceeded(err) {
+				t.Fatalf("trailing data classified as a limit failure: %v", err)
+			}
+			if len(result.FinalFiles) != 0 || result.Coverage.LayersCompleted != 0 {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+
+	t.Run("zstd trailing garbage", func(t *testing.T) {
+		layer := append(zstdLayer(t, []tarEntry{{name: "app/z", body: "z"}}), []byte("trailing-garbage")...)
+		_, err := Replay(context.Background(), []manifest.Descriptor{{Digest: "sha256:zstd-trailing", MediaType: manifest.MediaTypeOCIImageLayerZstd}}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(context.Context, manifest.Descriptor) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(layer)), nil
+		}))
+		if !IsTrailingData(err) {
+			t.Fatalf("Replay() error = %v", err)
+		}
+	})
+
+	t.Run("corrupt gzip checksum is not trailing data", func(t *testing.T) {
+		layer := append([]byte(nil), base...)
+		layer[len(layer)-8] ^= 0xff // CRC-32 of the single member
+		_, err := replayTestLayers(t, []testLayer{{digest: "sha256:checksum", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20})
+		if err == nil || IsTrailingData(err) || !errors.Is(err, gzip.ErrChecksum) {
+			t.Fatalf("Replay() error = %v", err)
+		}
+	})
+
+	t.Run("layer byte limit during drain stays a limit error", func(t *testing.T) {
+		layer := append(append([]byte(nil), base...), second...)
+		_, err := replayTestLayers(t, []testLayer{{digest: "sha256:members", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20, MaxLayerBytes: 2048})
+		if !limits.IsExceeded(err) || IsTrailingData(err) {
+			t.Fatalf("Replay() error = %v", err)
+		}
+	})
+}
+
+func TestReplayHardlinksToNonFilesDoNotCountAsFiles(t *testing.T) {
+	layer := gzipLayer(t, []tarEntry{
+		{name: "link", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+		{name: "hl", typeflag: tar.TypeLink, linkname: "link"},
+		{name: "d", typeflag: tar.TypeDir},
+		{name: "hld", typeflag: tar.TypeLink, linkname: "d"},
+		{name: "hlroot", typeflag: tar.TypeLink, linkname: "."},
+		{name: "file", body: "data"},
+		{name: "hlf", typeflag: tar.TypeLink, linkname: "file"},
+	})
+	result, err := replayTestLayers(t, []testLayer{{digest: "sha256:hardlinks", body: layer}}, ReplayOptions{MaxFileBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if len(result.FinalFiles) != 2 || result.FinalFiles[0].Path != "file" || result.FinalFiles[1].Path != "hlf" {
+		t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+	}
+	if result.FinalFiles[1].Type != ArtifactTypeHardlink || string(result.FinalFiles[1].Content) != "data" {
+		t.Fatalf("hardlink artifact = %#v", result.FinalFiles[1])
+	}
+	coverage := result.Coverage
+	if coverage.FilesSeen != 2 || coverage.FilesScanned != 2 || coverage.FilesExcludedBinary != 0 || coverage.FilesSkippedOversize != 0 || coverage.EntriesSkippedUnsafe != 0 {
+		t.Fatalf("result.Coverage = %#v", coverage)
+	}
+}
+
 func TestReplaySkipsUnsafeArchivePathsAndReportsIncompleteCoverage(t *testing.T) {
 	layer := gzipLayer(t, []tarEntry{
 		{name: "../../etc/passwd", body: "escape"},
@@ -1050,19 +1241,37 @@ func directoryPrefixChurnLayers(t testing.TB, unrelatedDirectories, replacements
 }
 
 type tarEntry struct {
-	name     string
-	body     string
-	typeflag byte
-	linkname string
-	format   tar.Format
+	name       string
+	body       string
+	typeflag   byte
+	linkname   string
+	format     tar.Format
+	paxRecords map[string]string
 }
 
 func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 	t.Helper()
+	return gzipBytes(t, tarArchive(t, entries))
+}
 
+func gzipBytes(t testing.TB, archive []byte) []byte {
+	t.Helper()
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
-	tarWriter := tar.NewWriter(gzipWriter)
+	if _, err := gzipWriter.Write(archive); err != nil {
+		t.Fatalf("gzipWriter.Write() error = %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("gzipWriter.Close() error = %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func tarArchive(t testing.TB, entries []tarEntry) []byte {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	tarWriter := tar.NewWriter(&buffer)
 	for _, entry := range entries {
 		typeflag := entry.typeflag
 		if typeflag == 0 {
@@ -1076,6 +1285,10 @@ func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 			Linkname: entry.linkname,
 			Format:   entry.format,
 		}
+		if typeflag == tar.TypeXGlobalHeader {
+			// archive/tar only accepts Name, Typeflag, PAXRecords and Format here.
+			header = &tar.Header{Name: entry.name, Typeflag: typeflag, PAXRecords: entry.paxRecords, Format: tar.FormatPAX}
+		}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader() error = %v", err)
 		}
@@ -1087,9 +1300,6 @@ func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 	}
 	if err := tarWriter.Close(); err != nil {
 		t.Fatalf("tarWriter.Close() error = %v", err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		t.Fatalf("gzipWriter.Close() error = %v", err)
 	}
 	return buffer.Bytes()
 }

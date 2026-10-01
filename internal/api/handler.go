@@ -965,6 +965,8 @@ func safeDiagnosticMessage(code string) string {
 		return "a selected manifest uses layers that cannot be scanned"
 	case "platform_not_found":
 		return "the requested platform was not found in the image"
+	case "layer_trailing_data":
+		return "a layer blob carried data after the end of its compressed stream"
 	default:
 		return "scan step failed"
 	}

@@ -1354,6 +1354,30 @@ func TestScanAcceptsOSOnlyAndVariantNormalisedSelectors(t *testing.T) {
 	}
 }
 
+func TestScanReportsTrailingLayerDataUnderDedicatedDiagnostic(t *testing.T) {
+	f := newRegistryFixture()
+	clean := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{{name: "app/config", body: "clean"}}))
+	trailing := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, append(gzipLayer(t, []tarEntry{{name: "app/other", body: "other"}}), make([]byte, 512)...))
+	amd64 := f.imageManifest(t, configBlob(t, f, "linux", "amd64"), []manifest.Descriptor{clean}, manifest.Platform{OS: "linux", Architecture: "amd64"})
+	arm64 := f.imageManifest(t, configBlob(t, f, "linux", "arm64"), []manifest.Descriptor{trailing}, manifest.Platform{OS: "linux", Architecture: "arm64"})
+	f.setIndex(t, amd64, arm64)
+
+	result, err := Scan(context.Background(), f.request(t, ""))
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusPartial || result.CompletedManifestCount != 1 || result.FailedManifestCount != 1 {
+		t.Fatalf("result = status %q, completed %d, failed %d", result.Status, result.CompletedManifestCount, result.FailedManifestCount)
+	}
+	diagnostic, ok := findDiagnostic(result.Diagnostics, "layer_trailing_data", arm64.Digest)
+	if !ok || !strings.Contains(diagnostic.Message, "trailing data") {
+		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)
+	}
+	if _, ok := findDiagnostic(result.Diagnostics, "manifest_failed", ""); ok {
+		t.Fatalf("trailing data was reported under the generic code: %#v", result.Diagnostics)
+	}
+}
+
 func TestScanVerifiesRootDigestBeforeParsing(t *testing.T) {
 	// Syntactically broken JSON: if the body were decoded first the failure
 	// would be invalid_manifest_document; the digest check must win.

@@ -1322,6 +1322,10 @@ func diagnosticForError(scope, subject string, err error) Diagnostic {
 		diagnostic.Code = "platform_not_found"
 		return diagnostic
 	}
+	if layers.IsTrailingData(err) {
+		diagnostic.Code = "layer_trailing_data"
+		return diagnostic
+	}
 	if integrityErr, ok := manifest.AsIntegrityError(err); ok {
 		diagnostic.Code = string(integrityErr.Kind)
 		return diagnostic

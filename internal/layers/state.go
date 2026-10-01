@@ -46,8 +46,14 @@ const (
 	retainedMapEntryMetadataBytes   = 32
 	retainedSliceEntryMetadataBytes = 32
 	retainedPathIndexMetadataBytes  = 256
-	minimumZstdDecoderLimit         = 1 << 20
-	defaultZstdDecoderLimit         = 64 << 20
+
+	// zstdDecoderWindowLimit bounds the zstd history window and therefore the
+	// memory a single frame header can make the decoder allocate. It is fixed
+	// on purpose: MAX_LAYER_BYTES bounds stream length, not decoder memory, and
+	// real layers use 8 MiB windows (the zstd CLI refuses >128 MiB by default).
+	// Streaming decode does not cap the decompressed size, so larger layers
+	// still decode as long as their window fits.
+	zstdDecoderWindowLimit = 128 << 20
 )
 
 type Artifact struct {
@@ -110,6 +116,28 @@ func (e *UnsupportedLayerError) Error() string {
 // IsUnsupportedLayer reports whether err was caused by an unscannable layer.
 func IsUnsupportedLayer(err error) bool {
 	var target *UnsupportedLayerError
+	return errors.As(err, &target)
+}
+
+// TrailingDataError reports bytes after the end of the compressed layer
+// stream. The blob digest may well verify; the layer still fails closed (as
+// containerd does) because the extra bytes are not part of the archive.
+type TrailingDataError struct {
+	Digest string
+	Cause  error
+}
+
+func (e *TrailingDataError) Error() string {
+	return fmt.Sprintf("layer %s has trailing data after the compressed stream: %v", strings.TrimSpace(e.Digest), e.Cause)
+}
+
+func (e *TrailingDataError) Unwrap() error {
+	return e.Cause
+}
+
+// IsTrailingData reports whether err was caused by data after the stream.
+func IsTrailingData(err error) bool {
+	var target *TrailingDataError
 	return errors.As(err, &target)
 }
 
@@ -205,7 +233,7 @@ func (s *State) DeletedArtifacts() []Artifact {
 }
 
 func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, blob io.Reader, options ReplayOptions) (returnErr error) {
-	reader, cleanup, err := decompressLayer(descriptor.MediaType, blob, options.MaxLayerBytes)
+	reader, cleanup, err := decompressLayer(descriptor.MediaType, blob)
 	if err != nil {
 		return err
 	}
@@ -261,6 +289,17 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
 		}
+		// Sparse holes are synthesised by archive/tar without touching the
+		// compressed stream, so the per-entry reader must observe ctx itself.
+		entryReader := newContextReader(ctx, tarReader)
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			// PAX global headers (git archive, tar --pax-option) describe the
+			// entries that follow; they are never content and runtimes skip them.
+			if err := drainEntry(entryReader); err != nil {
+				return err
+			}
+			continue
+		}
 		entryCount++
 		if err := logicalBudget.add(header.Size); err != nil {
 			return err
@@ -279,14 +318,14 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				// always emits one); it carries nothing to record and is not unsafe.
 				working.coverage.EntriesSkippedUnsafe++
 			}
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			continue
 		}
 		if err := validateLinkname(header.Linkname); err != nil {
 			working.coverage.EntriesSkippedUnsafe++
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			continue
@@ -298,7 +337,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				return err
 			}
 			opaqueDirectories = append(opaqueDirectories, directory)
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			continue
@@ -313,7 +352,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				}
 				whiteouts = append(whiteouts, target)
 			}
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			continue
@@ -321,7 +360,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			if err := working.preparePath(entryPath, true, descriptor.Digest, &retention); err != nil {
@@ -334,7 +373,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				return err
 			}
 		case tar.TypeSymlink:
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
@@ -354,38 +393,50 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				return err
 			}
 		case tar.TypeLink:
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			linkTarget, err := normalizePath(header.Linkname)
 			if err != nil {
-				working.coverage.EntriesSkippedUnsafe++
+				if !errors.Is(err, errRootEntry) {
+					working.coverage.EntriesSkippedUnsafe++
+				}
 				continue
 			}
 			target, ok := working.final[linkTarget]
 			if !ok {
-				working.coverage.EntriesSkippedUnsafe++
+				// A hardlink to a directory is invalid but harmless: runtimes
+				// refuse it without failing the layer, so it is ignored rather
+				// than counted as an unsafe entry that forces partial coverage.
+				if _, isDirectory := working.dirs[linkTarget]; !isDirectory {
+					working.coverage.EntriesSkippedUnsafe++
+				}
 				continue
 			}
-			working.coverage.FilesSeen++
-			copyContent := target.Content
+			// A hardlink is another name for its target. Links to regular files
+			// become hardlink artifacts sharing the target's content and class;
+			// links to symlinks or other artifacts take the target's type and are
+			// neither files seen nor binary exclusions.
+			linked := target
+			linked.Path = entryPath
+			linked.LayerDigest = descriptor.Digest
+			isFile := target.Type == ArtifactTypeRegularFile || target.Type == ArtifactTypeHardlink
+			if isFile {
+				linked.Type = ArtifactTypeHardlink
+				linked.Linkname = linkTarget
+				working.coverage.FilesSeen++
+			}
 			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
 				return err
 			}
-			if err := working.put(Artifact{
-				Path:         entryPath,
-				LayerDigest:  descriptor.Digest,
-				Type:         ArtifactTypeHardlink,
-				Linkname:     linkTarget,
-				Content:      copyContent,
-				Size:         target.Size,
-				ContentClass: target.ContentClass,
-				Scannable:    target.Scannable,
-			}, &retention); err != nil {
+			if err := working.put(linked, &retention); err != nil {
 				return err
 			}
 			if err := retainCurrentPath(working, currentPaths, entryPath, &retention); err != nil {
 				return err
+			}
+			if !isFile {
+				continue
 			}
 			if target.Scannable {
 				working.coverage.FilesScanned++
@@ -405,7 +456,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 					return err
 				}
 			}
-			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, tarReader, header.Size, options.MaxFileBytes)
+			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, entryReader, header.Size, options.MaxFileBytes)
 			if err != nil {
 				return err
 			}
@@ -426,7 +477,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				working.coverage.FilesExcludedBinary++
 			}
 		default:
-			if err := drainEntry(tarReader); err != nil {
+			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
 			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
@@ -447,7 +498,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		}
 	}
 	if _, err := io.Copy(io.Discard, limitedReader); err != nil {
-		return fmt.Errorf("drain layer: %w", err)
+		return classifyDrainError(descriptor, err)
 	}
 	if _, err := io.Copy(io.Discard, newContextReader(ctx, blob)); err != nil {
 		return fmt.Errorf("drain layer blob: %w", err)
@@ -474,6 +525,29 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 	s.coverage = working.coverage
 	committed = true
 	return nil
+}
+
+// classifyDrainError names bytes left after the archive's end-of-archive
+// marker. Once tar.Reader has returned io.EOF the decompressor is asked to
+// read on; a gzip reader then expects another member header and a zstd reader
+// another frame magic, so a header or magic failure there (or a fragment too
+// short to be either) means the blob carries data that is not part of the
+// archive. Limit, cancellation and checksum failures keep their own meaning.
+func classifyDrainError(descriptor manifest.Descriptor, err error) error {
+	if limits.IsExceeded(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("drain layer: %w", err)
+	}
+	trailing := false
+	switch manifest.LayerCompression(descriptor.MediaType) {
+	case "gzip":
+		trailing = errors.Is(err, gzip.ErrHeader) || errors.Is(err, io.ErrUnexpectedEOF)
+	case "zstd":
+		trailing = errors.Is(err, zstd.ErrMagicMismatch) || errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	if trailing {
+		return &TrailingDataError{Digest: descriptor.Digest, Cause: err}
+	}
+	return fmt.Errorf("drain layer: %w", err)
 }
 
 type logicalLayerBudget struct {
@@ -980,7 +1054,7 @@ func isPrintableByte(value byte) bool {
 	return value >= 0x20 && value <= 0x7e
 }
 
-func decompressLayer(mediaType string, reader io.Reader, maxLayerBytes int64) (io.Reader, func(), error) {
+func decompressLayer(mediaType string, reader io.Reader) (io.Reader, func(), error) {
 	switch manifest.LayerCompression(mediaType) {
 	case "":
 		return reader, func() {}, nil
@@ -994,13 +1068,12 @@ func decompressLayer(mediaType string, reader io.Reader, maxLayerBytes int64) (i
 			_ = gzipReader.Close()
 		}, nil
 	case "zstd":
-		decoderLimit := zstdDecoderLimit(maxLayerBytes)
 		decoder, err := zstd.NewReader(
 			reader,
 			zstd.WithDecoderConcurrency(1),
 			zstd.WithDecoderLowmem(true),
-			zstd.WithDecoderMaxWindow(decoderLimit),
-			zstd.WithDecoderMaxMemory(decoderLimit),
+			zstd.WithDecoderMaxWindow(zstdDecoderWindowLimit),
+			zstd.WithDecoderMaxMemory(zstdDecoderWindowLimit),
 			zstd.WithDecodeBuffersBelow(0),
 		)
 		if err != nil {
@@ -1012,19 +1085,6 @@ func decompressLayer(mediaType string, reader io.Reader, maxLayerBytes int64) (i
 	default:
 		return nil, nil, fmt.Errorf("unsupported layer compression for media type: %s", mediaType)
 	}
-}
-
-func zstdDecoderLimit(maxLayerBytes int64) uint64 {
-	if maxLayerBytes <= 0 {
-		return defaultZstdDecoderLimit
-	}
-	if maxLayerBytes < minimumZstdDecoderLimit {
-		return minimumZstdDecoderLimit
-	}
-	if maxLayerBytes > zstd.MaxWindowSize {
-		return zstd.MaxWindowSize
-	}
-	return uint64(maxLayerBytes)
 }
 
 type layerLimitReader struct {

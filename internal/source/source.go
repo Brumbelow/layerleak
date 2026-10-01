@@ -37,6 +37,11 @@ type Options struct {
 	// MaxArchiveEntries bounds the number of entries indexed in a tar
 	// archive. Zero or negative means DefaultMaxArchiveEntries.
 	MaxArchiveEntries int
+	// MaxImageLayers bounds the layer list of one docker save image, which is
+	// refused with the scanner's image_layers limit kind before any of it is
+	// hashed. Zero or negative means no bound, as LAYERLEAK_MAX_IMAGE_LAYERS=0
+	// does for the scanner.
+	MaxImageLayers int
 }
 
 const (
@@ -182,4 +187,18 @@ func contextError(ctx context.Context) error {
 		return nil
 	}
 	return ctx.Err()
+}
+
+// contextReader checks the context before every read, so a long stream stops
+// within one read of the context ending.
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (c contextReader) Read(buffer []byte) (int, error) {
+	if err := contextError(c.ctx); err != nil {
+		return 0, err
+	}
+	return c.reader.Read(buffer)
 }

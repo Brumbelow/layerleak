@@ -262,8 +262,13 @@ type directoryFS struct {
 	root *os.Root
 }
 
+// open opens a regular file of the layout. The open is non-blocking so a FIFO
+// planted in the layout (tar(1) extracts them without privileges) is refused
+// by the type check instead of blocking open(2) until a writer appears, which
+// no context or scan timeout could interrupt. Reads of a regular file are
+// unaffected by the flag.
 func (d *directoryFS) open(name string) (sizedReadCloser, error) {
-	file, err := d.root.Open(name)
+	file, err := d.root.OpenFile(name, os.O_RDONLY|nonBlockingOpenFlag, 0)
 	if err != nil {
 		return nil, err
 	}

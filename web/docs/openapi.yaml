@@ -104,6 +104,8 @@ paths:
                   x-contract-fixture: ../testdata/api/scan-completed.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/ImageNotFound"
         "408":
           $ref: "#/components/responses/RequestTimeout"
         "413":
@@ -348,7 +350,10 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     RequestTimeout:
-      description: The request was canceled before the bounded scan completed.
+      description: |
+        The request context ended (the client closed the connection) before the
+        bounded scan completed (`scan_canceled`). Timeouts inside the scan are
+        reported as 502 `scan_failed`; the API's own deadline as 504.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -398,7 +403,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     NotFound:
-      description: The requested stored resource was not found.
+      description: The requested stored resource was not found (`not_found`).
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -424,11 +429,33 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
-    ScanStorageUnavailable:
-      description: The scan returned a redacted result, but it could not be persisted.
+    ImageNotFound:
+      description: |
+        The registry answered 404 for the requested repository, tag or manifest
+        (`image_not_found`). A redacted failed `result` is included when the
+        scan recorded one. Stored-resource lookups use `not_found` instead.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ScanResponse"
+    ScanStorageUnavailable:
+      description: |
+        A dependency was unavailable. `storage_unavailable`: the scan returned
+        a redacted `result`, but it could not be persisted; no `scan_run_id` is
+        invented. `registry_rate_limited`: the registry or its token endpoint
+        answered 429 after the client's bounded retries; `Retry-After` carries
+        a suggested back-off in seconds.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Retry-After:
+          description: Suggested retry delay in seconds (`registry_rate_limited` only).
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:
@@ -439,7 +466,10 @@ components:
               externalValue: ../testdata/api/scan-storage-error.json
               x-contract-fixture: ../testdata/api/scan-storage-error.json
     Timeout:
-      description: The bounded API scan exceeded its deadline.
+      description: |
+        The API's own scan deadline (`LAYERLEAK_API_SCAN_TIMEOUT`) expired
+        (`scan_timeout`). A timeout inside a registry request is an upstream
+        failure and reports 502 `scan_failed` instead.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -448,7 +478,12 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     BadGateway:
-      description: The upstream registry scan failed. A redacted failed result is included when available.
+      description: |
+        The upstream registry scan failed. `scan_failed` covers transport
+        errors, registry 5xx responses and timeouts inside the scan;
+        `registry_unauthorized` means the registry or its token endpoint
+        answered 401 or 403. A redacted failed `result` is included when
+        available.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"

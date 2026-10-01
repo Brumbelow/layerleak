@@ -20,6 +20,7 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
@@ -341,16 +342,19 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	if err != nil {
-		statusCode, code, message := classifyScanError(err)
-		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", code, "status", statusCode, "request_id", requestIDFromWriter(writer))
+		failure := classifyScanError(scanCtx, request.Context(), err)
+		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", failure.code, "status", failure.status, "request_id", requestIDFromWriter(writer))
 		response := scanResponse{
 			ScanRunID: outcome.ScanRunID,
-			Error:     newErrorResponse(writer, code, message),
+			Error:     newErrorResponse(writer, failure.code, failure.message),
 		}
 		if hasResult(outcome.Result) {
 			response.Result = resultJSON
 		}
-		writeJSON(writer, statusCode, response)
+		if failure.retryAfter != "" {
+			writer.Header().Set("Retry-After", failure.retryAfter)
+		}
+		writeJSON(writer, failure.status, response)
 		return
 	}
 
@@ -720,29 +724,54 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 	return fmt.Errorf("request body must contain a single JSON object")
 }
 
-func classifyScanError(err error) (int, string, string) {
+// scanFailure is the HTTP mapping of a failed POST /api/v1/scans. Messages are
+// fixed strings: the underlying error chain carries registry hosts, redirect
+// targets and reference strings that must never reach a client.
+type scanFailure struct {
+	status     int
+	code       string
+	message    string
+	retryAfter string
+}
+
+// registryRateLimitRetryAfter is the Retry-After hint for 503
+// registry_rate_limited. The registry client has already retried with the
+// upstream Retry-After before giving up, so a longer back-off is suggested.
+const registryRateLimitRetryAfter = "60"
+
+// classifyScanError maps a scan failure to a response. Only the API's own scan
+// deadline (scanCtx) produces 504 and only an ended request context produces
+// 408: a context error nested inside the scan (the registry client bounds each
+// request with its own timeout) is an upstream failure and reports 502.
+func classifyScanError(scanCtx, requestCtx context.Context, err error) scanFailure {
 	switch {
 	case scanservice.IsSaveError(err):
-		return http.StatusServiceUnavailable, "storage_unavailable", "the scan result could not be stored"
+		return scanFailure{status: http.StatusServiceUnavailable, code: "storage_unavailable", message: "the scan result could not be stored"}
+	case requestCtx.Err() != nil:
+		return scanFailure{status: http.StatusRequestTimeout, code: "scan_canceled", message: "the request was canceled before the scan completed"}
+	case errors.Is(scanCtx.Err(), context.DeadlineExceeded):
+		return scanFailure{status: http.StatusGatewayTimeout, code: "scan_timeout", message: "the scan exceeded its configured deadline"}
 	case jobs.IsIncomplete(err):
 		var incomplete *jobs.IncompleteError
 		if errors.As(err, &incomplete) && incomplete != nil {
-			return http.StatusUnprocessableEntity, "scan_incomplete", fmt.Sprintf(
+			return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: fmt.Sprintf(
 				"scan coverage is %s: %d manifest(s) completed, %d failed",
 				incomplete.Status,
 				incomplete.CompletedManifestCount,
 				incomplete.FailedManifestCount,
-			)
+			)}
 		}
-		return http.StatusUnprocessableEntity, "scan_incomplete", "the scan did not cover every selected manifest"
+		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: "the scan did not cover every selected manifest"}
 	case limits.IsExceeded(err):
-		return http.StatusUnprocessableEntity, "scan_limit_exceeded", err.Error()
-	case errors.Is(err, context.DeadlineExceeded):
-		return http.StatusGatewayTimeout, "scan_timeout", "the scan exceeded its configured deadline"
-	case errors.Is(err, context.Canceled):
-		return http.StatusRequestTimeout, "scan_canceled", "the scan was canceled"
+		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_limit_exceeded", message: err.Error()}
+	case registry.IsNotFound(err):
+		return scanFailure{status: http.StatusNotFound, code: "image_not_found", message: "the requested image was not found in the registry"}
+	case registry.IsRateLimited(err):
+		return scanFailure{status: http.StatusServiceUnavailable, code: "registry_rate_limited", message: "the registry rate limited the scan; retry later", retryAfter: registryRateLimitRetryAfter}
+	case registry.IsUnauthorized(err):
+		return scanFailure{status: http.StatusBadGateway, code: "registry_unauthorized", message: "the registry refused access to the requested image"}
 	default:
-		return http.StatusBadGateway, "scan_failed", "the registry scan could not be completed"
+		return scanFailure{status: http.StatusBadGateway, code: "scan_failed", message: "the registry scan could not be completed"}
 	}
 }
 

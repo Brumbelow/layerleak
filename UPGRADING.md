@@ -5,17 +5,23 @@
 `github.com/brumbelow/layerleak` is frozen at `v1.0.0` forever, and the
 `v2.0.0`–`v2.5.0` GitHub and container tags were never valid Go modules. Pick
 the track that matches what you run today. [CHANGELOG.md](./CHANGELOG.md)
-lists every change; this guide only covers what you must do differently.
+lists every change since `v2.5.0`; this guide only covers what you must do
+differently. Where v1.0.0 and the v2.x tags behave differently, both are
+stated; behaviour that existed only in unreleased builds of `main` between
+`v2.5.0` and 3.0.0 is called out as such.
 
 ## What 3.0.0 does and does not break
 
 Unchanged:
 
-- The HTTP API stays at `/api/v1`. Existing paths, request bodies, response
-  fields and error codes keep their names and types; 3.0.0 only adds fields,
-  error codes and two opt-in features (bearer tokens and a metrics listener).
-  Scans remain synchronous.
-- The PostgreSQL schema stays at migration `0004`. No new migration ships.
+- The HTTP API stays at `/api/v1`. Existing paths, request bodies and
+  response fields keep their names and types; 3.0.0 adds fields, the `/livez`
+  and `/readyz` endpoints, error codes and two opt-in features (bearer tokens
+  and a metrics listener). Scans remain synchronous. The one wire change a
+  v2.x client can notice is the status and code of a failed
+  `POST /api/v1/scans`, which was always `500` before (see Track 3).
+- The PostgreSQL schema is exactly migration `0004`. A v2.x database
+  (`0001`–`0003`) needs that one migration and nothing beyond it ships.
 - The binary is still called `layerleak`, and `layerleak scan <reference>`
   with the default summary output exits `0` for a clean image as before.
 - Fingerprints are still `sha256` of the raw secret value, unsalted and
@@ -27,29 +33,37 @@ Changed:
   `go install github.com/brumbelow/layerleak/v3@v3.0.0`.
 - `result_schema_version` and `record_schema_version` are `2`. JSON Schemas
   are published at `web/docs/schemas/result-v2.schema.json` and
-  `web/docs/schemas/scan-record-v2.schema.json`; the field diff is below.
+  `web/docs/schemas/scan-record-v2.schema.json`; the field diff is below. No
+  tagged release wrote either field before.
 - Exit code `3` means the scan finished with usable but incomplete coverage
-  and `--allow-partial` was not given (it exited `1` before); `--fail-on`
-  chooses which confidence levels cause exit code `2`.
+  and `--allow-partial` was not given (such scans exited `1` before);
+  `--fail-on` chooses which confidence levels cause exit code `2`.
 - One scan-record file per scan under `./findings` (or `--output-dir`,
-  `LAYERLEAK_FINDINGS_DIR`); the legacy findings-array file, the nearest
-  `go.mod` directory heuristic and all raw local output are gone, and a
-  pre-existing directory is never `chmod`-ed.
+  `LAYERLEAK_FINDINGS_DIR`); the findings-array file, the nearest `go.mod`
+  directory heuristic and all raw local output are gone. A pre-existing
+  directory is never `chmod`-ed and a symbolic link in its place is refused.
 - Redacted values have a fixed-length mask that no longer reveals the length
-  or the tail of the secret.
+  or the tail of the secret, and multi-line values no longer reveal their
+  first line.
 - Environment and label findings cover the value alone, so their
   fingerprints change once; file findings are unaffected.
-- Eight detector identifiers were renamed, and identifier-only detectors no
-  longer claim high confidence.
+- Seven shipped detector identifiers were renamed, and identifier-only
+  detectors no longer claim high confidence.
 - Multi-platform images scan only the `linux` manifests (and entries with no
   OS) by default; other operating systems and non-image index entries are
   reported as `platform_skipped` / `manifest_skipped` diagnostics instead of
   failing the scan. A selected manifest whose layers cannot be scanned is
   `manifest_unsupported` (partial, acceptable with `--allow-partial`).
-- `LAYERLEAK_LOG_LEVEL` accepts exactly `debug`, `info`, `warn`, `error`.
+- `LAYERLEAK_LOG_LEVEL` accepts exactly `debug`, `info`, `warn`, `error`; the
+  `slog` offset forms such as `INFO+2` that v2.x accepted are rejected.
 - Go API: `registry.NewClient` returns `(*Client, error)`.
 
-## Track 1: v1.0.0 CLI users
+## Track 1: pre-3.0.0 CLI users (v1.0.0 and source builds of the v2.x tags)
+
+`go install github.com/brumbelow/layerleak@latest` has always resolved to
+`v1.0.0`, because the v2.x tags carry a `go.mod` without a `/v2` suffix. A
+binary you installed is therefore v1.0.0 unless you built it yourself from a
+v2.x checkout with `go build`.
 
 1. Install from the new module path. The binary name does not change:
 
@@ -58,26 +72,36 @@ Changed:
    layerleak version
    ```
 
-   `layerleak version` prints the version, commit, build time, Go version
-   and platform (`--format json` for the same as JSON); `layerleak --version`
-   still prints the first line. Remove any binary built from
+   `layerleak version` is new: it prints the version, commit, build time, Go
+   version and platform (`--format json` for the same as JSON). The
+   `layerleak --version` flag, added in v2.5.0, stays available as an alias;
+   v1.0.0 had no version flag at all. Remove any binary built from
    `github.com/brumbelow/layerleak@v1.0.0` that is earlier on your `PATH`.
 
-2. Replace the two-file output expectations. v1 wrote a findings array under
-   `findings/` (with raw `value` and `raw_context_snippet` fields when
-   `LAYERLEAK_PERSIST_RAW_SECRETS=1`, and a cap on low-confidence entries)
-   plus a companion record under `findings/scans/`, looked for the nearest
-   `go.mod` to place them and ran `chmod 0700` on the directory every time.
+2. Treat an existing `findings/` directory as sensitive, then replace the
+   output expectations. Every pre-3.0.0 build wrote one findings-array file
+   per scan into `findings/` under the nearest directory containing a
+   `go.mod` (falling back to the working directory) and capped low-confidence
+   entries at three per file-and-fingerprint group. v1.0.0 wrote the raw
+   secret and the raw context snippet into every entry, in a directory
+   created `0755` and files created with the process umask (normally `0644`):
+   a v1.0.0 `findings/` directory contains raw secrets in world-readable
+   files, so delete it or move it somewhere protected before you upgrade.
+   v2.0.0 switched to a `0700` directory, `0600` files and redacted fields,
+   and wrote raw values only when `LAYERLEAK_PERSIST_RAW_SECRETS=1` was set.
+   No tagged release wrote a scan record, a `findings/scans/` directory or a
+   `record_schema_version`, and none `chmod`-ed an existing directory; the
+   `findings/scans/` companion record existed only in unreleased builds.
    3.0.0 writes exactly one record per scan:
 
-   | | v1.0.0 | 3.0.0 |
-   | --- | --- | --- |
-   | Files | findings array plus `findings/scans/` record | one `<dir>/<utc-timestamp>-<reference-token>-<random>.json` |
-   | Directory | nearest `go.mod` directory, `chmod 0700` on every run | `--output-dir`, else `LAYERLEAK_FINDINGS_DIR` (relative to the working directory), else `./findings`; created `0700` when missing, never `chmod`-ed when present, a symbolic link in its place is refused |
-   | Record version | 1 | `record_schema_version: 2` |
-   | Record content | findings with optional raw fields | `created_at`, `result` (the `--format json` result), `findings[]` (every finding, actionable first, with `source_location`), `persistence` (`disabled`, `saved` with `scan_run_id`, or `failed` with `storage_unavailable`) |
-   | Raw values | optional, locally | never; raw persistence is PostgreSQL-only |
-   | File mode | directory `0700` | record `0600`, never overwrites an existing file |
+   | | v1.0.0 | v2.0.0–v2.5.0 | 3.0.0 |
+   | --- | --- | --- | --- |
+   | Files | one findings array `<dir>/<utc-timestamp>-<token>.json` per scan | same | one record `<dir>/<utc-timestamp>-<reference-token>-<random>.json` per scan |
+   | Directory | `findings/` under the nearest `go.mod` directory, else the working directory; created `0755` | same location; created `0700` | `--output-dir`, else `LAYERLEAK_FINDINGS_DIR` (relative to the working directory), else `./findings`; created `0700` when missing, never `chmod`-ed when present, a symbolic link in its place is refused |
+   | File mode | umask default (normally `0644`), truncates an existing file | `0600`, truncates an existing file | `0600`, never overwrites an existing file |
+   | Raw values | `value` and `context_snippet` are the raw secret and raw snippet, always | `redacted_value` and a redacted `context_snippet`; raw `value` and `raw_context_snippet` only with `LAYERLEAK_PERSIST_RAW_SECRETS=1` | never; raw persistence is PostgreSQL-only |
+   | Low-confidence entries | capped at three per group, with `occurrence_count` and `suppressed_occurrence_count` | same | every finding is listed |
+   | Record | none | none | `record_schema_version: 2` with `created_at`, `result` (the `--format json` result), `findings[]` (every finding, actionable first, with `source_location`) and `persistence` (`disabled`, `saved` with `scan_run_id`, or `failed` with `storage_unavailable`) |
 
    Consumers of the old array read `findings[]` from the record instead.
    New flags: `--output <file>` (`-` for stdout) writes the formatted result
@@ -86,7 +110,9 @@ Changed:
    `LAYERLEAK_DATABASE_URL` for one run. The record path is printed on
    stderr as `Scan record: "<path>"`.
 
-3. Update scripts that parse exit codes:
+3. Update scripts that parse exit codes. Every pre-3.0.0 build used `0`,
+   `1` and `2`, and exited `1` whenever a limit cut a scan short, even when
+   it had found secrets:
 
    | Code | Meaning |
    | --- | --- |
@@ -95,58 +121,66 @@ Changed:
    | `2` | Actionable findings at or above `--fail-on` (default `low`); findings take precedence over `3` |
    | `3` | Usable but incomplete coverage not accepted with `--allow-partial` (was `1`) |
 
-   `--fail-on low|medium|high|none` sets the lowest confidence of an
-   actionable finding that produces exit code `2`; `none` reports only.
+   `--fail-on low|medium|high|none` is new and sets the lowest confidence of
+   an actionable finding that produces exit code `2`; `none` reports only.
    Suppressed findings never affect the exit code. Scripts that retried on
    `1` should treat `3` as "investigate coverage".
 
-4. Add `--all-tags` to repository sweeps. A bare repository (`layerleak scan
-   mongo`) now scans `latest`; `layerleak scan mongo --all-tags` enumerates
-   every public tag, and `--all-tags` with a tag or digest is rejected.
+4. Add `--all-tags` to repository sweeps. Every pre-3.0.0 build scanned
+   every tag when given a bare repository (`layerleak scan mongo`); 3.0.0
+   scans `latest` instead, `layerleak scan mongo --all-tags` enumerates every
+   public tag, and `--all-tags` with a tag or digest is rejected.
 
-5. Update scripts that parse `detector_name`:
+5. Update scripts that parse `detector_name`. The table lists the release
+   that first emitted each old identifier; an eighth rename,
+   `planetscale_token` to `planetscale_service_token`, affects only unreleased
+   builds:
 
-   | v1.0.0 identifier | 3.0.0 identifier |
-   | --- | --- |
-   | `digitalocean_pat` | `digitalocean_personal_access_token` |
-   | `stripe_key` | `stripe_api_key` |
-   | `gitlab_token` | `gitlab_personal_access_token` |
-   | `jwt` | `json_web_token` |
-   | `hashicorp_vault_token` | `vault_token` |
-   | `docker_config_identitytoken` | `docker_config_identity_token` |
-   | `npmrc_auth` | `npmrc_basic_auth` |
-   | `planetscale_token` | `planetscale_service_token` |
+   | Old identifier | Emitted since | 3.0.0 identifier |
+   | --- | --- | --- |
+   | `stripe_key` | v1.0.0 | `stripe_api_key` |
+   | `gitlab_token` | v1.0.0 | `gitlab_personal_access_token` |
+   | `jwt` | v1.0.0 | `json_web_token` |
+   | `docker_config_identitytoken` | v1.0.0 | `docker_config_identity_token` |
+   | `npmrc_auth` | v1.0.0 | `npmrc_basic_auth` |
+   | `digitalocean_pat` | v2.5.0 | `digitalocean_personal_access_token` |
+   | `hashicorp_vault_token` | v2.5.0 | `vault_token` |
 
-   `twilio_account_sid` and `sentry_dsn` now report `medium` confidence,
-   so a `--fail-on high` pipeline no longer fails on them.
+   `twilio_account_sid` (added in v2.5.0 at `high`) now reports `medium`
+   confidence, so it no longer produces exit code `2` under `--fail-on high`;
+   `sentry_dsn` is new in 3.0.0 and also reports `medium`.
 
 6. Re-baseline suppressions keyed on the fingerprints of environment-variable
-   or label findings. They used to cover `KEY=value`; they now cover the
-   value alone, so their `fingerprint`, `match_start`, `match_end` and
-   `redacted_value` equal those of the same secret found in a file, and the
-   two no longer produce separate findings. This change happens once; file
-   findings keep their fingerprints.
+   or label findings. Every pre-3.0.0 build fingerprinted `KEY=value`; 3.0.0
+   fingerprints the value alone, so their `fingerprint`, `match_start`,
+   `match_end` and `redacted_value` equal those of the same secret found in a
+   file, and the two no longer produce separate findings. This change happens
+   once; file findings keep their fingerprints.
 
-7. Update anything that parsed `redacted_value`. v1 showed the first three
-   and last two characters around a mask whose length matched the secret.
-   3.0.0 masks values shorter than 12 characters completely (`********`) and
-   otherwise shows the first three characters followed by a fixed
-   eight-character mask (`ghp********`); multi-line values stay
-   `[REDACTED MULTILINE]`. Context snippets redact every copy of a matched
-   secret inside the window, not only the first.
+7. Update anything that parsed `redacted_value`. Every pre-3.0.0 build showed
+   the first three and last two characters around a mask five shorter than
+   the secret (values of six characters or fewer were masked completely), and
+   rendered a multi-line value as its first line followed by
+   `...redacted...`, which exposed that line. 3.0.0 masks values shorter than
+   12 characters completely (`********`), otherwise shows the first three
+   characters followed by a fixed eight-character mask (`ghp********`), and
+   renders every multi-line value as `[REDACTED MULTILINE]`. Context snippets
+   redact every copy of a matched secret inside the window, not only the
+   first.
 
 8. `--format json` now prints the result for failed scans too (exit code
    stays `1`, and the scan record is written), so automation can read
-   `status: failed` and the diagnostics. It printed nothing before.
+   `status: failed` and the diagnostics. Every pre-3.0.0 build returned the
+   error before printing anything.
 
-9. Accept the `sensitive_file_*` family: a sensitive file that cannot be read
-   as text (binary or over `LAYERLEAK_MAX_FILE_BYTES`) is reported by path
-   with an empty `redacted_value`, an empty `context_snippet`, `line_number`
-   `0`, `match_start` = `match_end` = `0` and a fingerprint of
-   `sha256(layer digest + "\n" + path)`. Parsers that required a non-empty
-   value or a positive span must accept them.
+9. Accept the `sensitive_file_*` family, new in 3.0.0: a sensitive file that
+   cannot be read as text (binary or over `LAYERLEAK_MAX_FILE_BYTES`) is
+   reported by path with an empty `redacted_value`, an empty
+   `context_snippet`, `line_number` `0`, `match_start` = `match_end` = `0`
+   and a fingerprint of `sha256(layer digest + "\n" + path)`. Parsers that
+   required a non-empty value or a positive span must accept them.
 
-10. New since v1.0.0 that you may want: `--format sarif` for code scanning,
+10. New since v2.5.0 that you may want: `--format sarif` for code scanning,
     `--platform linux` OS-only selection, `--username`/`--password-stdin`
     and `LAYERLEAK_REGISTRY_USERNAME`/`LAYERLEAK_REGISTRY_PASSWORD` for
     private registries, `LAYERLEAK_DOCKER_CONFIG` for a Docker `config.json`,
@@ -158,7 +192,10 @@ Changed:
 
 2. Pull `ghcr.io/brumbelow/layerleak:v3.0.0`, stop the API replicas and run
    the migration command against the existing database before starting the
-   new API:
+   new API. v2.x shipped migrations `0001`–`0003` and told you to apply them
+   with `psql` or the image's `layerleak-migrate-up` shell script; 3.0.0
+   replaces the script with a Go binary of the same name that keeps a
+   migration ledger and adds `0004`:
 
    ```bash
    docker run --rm -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
@@ -180,14 +217,15 @@ Changed:
    schema is exactly `0004` (`layerleak-migrate-up --status` exits `0`).
 
 3. Compose users: `.env.example` ships `LAYERLEAK_DB_PASSWORD` empty and
-   Compose refuses to start until it is set. The password reaches the
-   containers as `PGPASSWORD` rather than inside the connection URL, the
-   `api` service waits for the `migrate` service to complete, and a 35 second
-   `stop_grace_period` (`LAYERLEAK_API_STOP_GRACE_PERIOD`) protects in-flight
-   scans. Run `docker compose up -d` instead of running `migrate` by hand;
-   `migrate` is no longer in the `tools` profile. `LAYERLEAK_DATABASE_URL`
-   also accepts unix-socket URLs and libpq keyword strings, and `PGPASSWORD`
-   or `PGPASSFILE` can carry the password outside Compose too.
+   Compose refuses to start until it is set (v2.x defaulted it to
+   `layerleak`). The password reaches the containers as `PGPASSWORD` rather
+   than inside the connection URL, the `api` service waits for the `migrate`
+   service to complete, and a 35 second `stop_grace_period`
+   (`LAYERLEAK_API_STOP_GRACE_PERIOD`) protects in-flight scans. Run
+   `docker compose up -d` instead of running `migrate` by hand; `migrate` is
+   no longer behind the `manual` profile. `LAYERLEAK_DATABASE_URL` also
+   accepts unix-socket URLs and libpq keyword strings, and `PGPASSWORD` or
+   `PGPASSFILE` can carry the password outside Compose too.
 
 4. Review raw-secret persistence. `LAYERLEAK_PERSIST_RAW_SECRETS` is still off
    by default and the CLI no longer writes raw values locally at all. If an
@@ -210,27 +248,27 @@ Changed:
    from `/readyz` and refuses new scans with `503 server_shutting_down` for
    `LAYERLEAK_API_PRESTOP_DELAY` (default `0s`), then cancels in-flight scans
    and exits `0` within `LAYERLEAK_API_SHUTDOWN_TIMEOUT` (default `30s`);
-   one structured access record is logged per request; `GET /health`,
-   `/livez` and `/readyz` include `version`; `/readyz` caches its result for
-   `LAYERLEAK_API_READINESS_CACHE_TTL` (default `5s`); the API warns at
-   startup when it listens on a non-loopback address without bearer tokens.
-   Optional extras: `LAYERLEAK_API_BEARER_TOKENS` (or `_FILE`) and
-   `LAYERLEAK_API_METRICS_ADDR`; see [docs/api-operations.md](./docs/api-operations.md).
-   The container image no longer sets `LAYERLEAK_FINDINGS_DIR` (the API never
-   wrote local findings).
+   one structured access record is logged per request; `GET /livez` and
+   `GET /readyz` are new beside `GET /health`, all three include `version`,
+   and `/readyz` caches its result for `LAYERLEAK_API_READINESS_CACHE_TTL`
+   (default `5s`); the API warns at startup when it listens on a non-loopback
+   address without bearer tokens. Optional extras:
+   `LAYERLEAK_API_BEARER_TOKENS` (or `_FILE`) and `LAYERLEAK_API_METRICS_ADDR`;
+   see [docs/api-operations.md](./docs/api-operations.md).
 
 ## Track 3: API consumers
 
 `/api/v1` paths, request bodies and existing response fields are unchanged.
 Additions you may start reading:
 
-- `result_schema_version: 2` results. Stored results produced by an earlier
-  version are returned unchanged by `GET /api/v1/scans/{id}`, so branch on the
-  version:
+- `result_schema_version: 2` results. Results stored by a v2.x API carry no
+  `result_schema_version` field at all (`1` was written only by unreleased
+  builds) and are returned unchanged by `GET /api/v1/scans/{id}`, so branch
+  on the field being `2`:
 
-  | Field | v1 | v2 |
+  | Field | v2.x (no version field) | v2 |
   | --- | --- | --- |
-  | `result_schema_version` | `1` | `2` |
+  | `result_schema_version` | absent | `2` |
   | `scanned_at` | absent | RFC 3339 UTC scan start time, always present |
   | `scanner` | absent | `{ "name": "layerleak", "version": "<build version>" }`, always present |
   | `tags_enumerated`, `tags_resolved`, `tags_failed` | omitted when `0` | always present |
@@ -243,26 +281,33 @@ Additions you may start reading:
 
   Everything else (`status`, counters, `targets`, `coverage`, `diagnostics`,
   `findings` fields) keeps its name and type.
-- New `POST /api/v1/scans` error codes: `404 image_not_found`,
-  `503 registry_rate_limited` (with `Retry-After: 60`),
-  `502 registry_unauthorized`, and `503 server_shutting_down` while the
-  server drains. `GET /readyz` answers `503 not_ready`. `401 unauthorized`
-  (with `WWW-Authenticate: Bearer realm="layerleak"`) appears only when the
+- Failed scans are classified. A v2.x API answered every failed
+  `POST /api/v1/scans` with `500` and the code `scan_failed` or
+  `storage_failed` plus the raw error text. 3.0.0 answers `404
+  image_not_found`, `408 scan_canceled` (the client closed the connection),
+  `422 scan_incomplete` and `422 scan_limit_exceeded` (the error object adds
+  `limit_kind` and `limit`), `429 scan_capacity_exceeded` (`Retry-After: 5`),
+  `502 scan_failed` (transport errors, registry 5xx and a timeout or
+  cancellation inside a registry request), `502 registry_unauthorized`,
+  `503 storage_unavailable` (replaces `storage_failed`), `503
+  registry_rate_limited` (`Retry-After: 60`), `503 server_shutting_down`
+  while the server drains and `504 scan_timeout` when
+  `LAYERLEAK_API_SCAN_TIMEOUT` expires, each with a fixed message instead of
+  the raw error. Malformed requests gain `405 method_not_allowed` (a JSON
+  envelope with an `Allow` header where v2.x returned the router's plain-text
+  405), `413 request_too_large` and `415 unsupported_media_type` (v2.x had
+  no body-size or media-type check).
+  `GET /readyz` answers `503 not_ready`. `401 unauthorized` (with
+  `WWW-Authenticate: Bearer realm="layerleak"`) appears only when the
   operator enables bearer tokens; send `Authorization: Bearer <token>` on
   every `/api/` request then. See the README status table and
   `web/docs/openapi.yaml`.
-- Additive response fields: `limit_kind` and `limit` on
-  `scan_limit_exceeded` errors; `registry` (the normalised filter) on
+- Additive response fields: `registry` (the normalised filter) on
   repository scan and finding lists; `version` on `/health`, `/livez` and
   `/readyz`; and `next_cursor` on the three list endpoints. Pass it back as
   `cursor` to continue strictly after the last row; `limit` and `offset`
   keep working, but a cursor combined with a non-zero `offset`, a malformed
   cursor or one from another endpoint is `400 invalid_request`.
-- Status classification is stricter: `408 scan_canceled` now means only that
-  the client closed the connection, `504 scan_timeout` only that
-  `LAYERLEAK_API_SCAN_TIMEOUT` expired, and a timeout or cancellation inside
-  a registry request is `502 scan_failed`. `422 scan_limit_exceeded` carries
-  a fixed message naming the limit kind and value.
 - Two tightenings affect only malformed clients: the `{repository}` path
   segment is decoded once (`library%2Fapp` is `library/app`, but
   `library%252Fapp` is no longer read as `library/app`) and must match the
@@ -272,5 +317,6 @@ Additions you may start reading:
 - Redacted values and context snippets are shorter and never reveal a secret
   that appears twice in a window.
 
-Nothing in 3.0.0 requires an API consumer change; a client that validated
-`result_schema_version == 1` must accept `2`.
+Nothing in 3.0.0 requires an API consumer change beyond handling the new
+failure statuses; a client that validated `result_schema_version == 1` must
+accept `2`.

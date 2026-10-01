@@ -130,6 +130,10 @@ registry tests.
 
 ## API and result compatibility
 
+The Go module major is independent of the HTTP API path (`/api/v1`), the
+result and record schema versions, and the database schema version; bump those
+only when their own contracts change.
+
 The CLI JSON result has an explicit `result_schema_version`. Additive fields are
 preferred. Removing or renaming fields, changing exit codes, changing API paths,
 or changing defaults requires an intentional compatibility decision and release
@@ -179,14 +183,16 @@ scan, attest/sign, smoke, protected approval, tag, promote, release.
 The canonical install path is:
 
 ```text
-go install github.com/brumbelow/layerleak@latest
+go install github.com/brumbelow/layerleak/v3@latest
 ```
 
-The module path has no major suffix, so releases must remain on v1. Historical
-v2.x GitHub/container tags are not valid v2 Go module releases. Release source
-tags are prepared offline exactly as described in [RELEASING.md](./RELEASING.md);
-do not push them manually. The protected workflow alone pushes the prepared,
-immutable v1 tag after all release gates pass.
+The module path carries the `/v3` major suffix, so releases are `v3.x.y` tags
+whose `go.mod` declares `github.com/brumbelow/layerleak/v3`. The root path is
+frozen at v1.0.0 and the historical v2.x GitHub/container tags are not Go
+module releases. Release source tags are prepared offline exactly as described
+in [RELEASING.md](./RELEASING.md); do not push them manually. The protected
+workflow alone pushes the prepared, immutable v3 tag after all release gates
+pass.
 
 ## Documentation and pull requests
 

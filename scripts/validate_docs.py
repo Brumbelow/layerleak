@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -314,6 +316,31 @@ def validate_demo(root: Path):
         )
 
 
+CHANGELOG_RELEASE_HEADING = re.compile(r"^## \[v(\d+\.\d+\.\d+)\]", re.MULTILINE)
+
+
+def validate_release_version(root: Path, spec):
+    """The OpenAPI info.version must match the newest CHANGELOG release heading."""
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    match = CHANGELOG_RELEASE_HEADING.search(changelog)
+    if not match:
+        raise ValidationFailure("CHANGELOG.md has no release heading of the form ## [vX.Y.Z]")
+    expected = match.group(1)
+    info_version = str(spec.get("info", {}).get("version"))
+    if info_version != expected:
+        raise ValidationFailure(
+            f"web/docs/openapi.yaml info.version {info_version} differs from "
+            f"the CHANGELOG release heading v{expected}"
+        )
+    if os.environ.get("GITHUB_REF_TYPE") == "tag":
+        tag_version = re.sub(r"-rc\.\d+$", "", os.environ.get("GITHUB_REF_NAME", "").lstrip("v"))
+        if tag_version != expected:
+            raise ValidationFailure(
+                f"release tag {os.environ.get('GITHUB_REF_NAME')} does not match "
+                f"the documented version {expected}"
+            )
+
+
 def validate_repository(root: Path):
     root = root.resolve()
     spec_path = root / "web" / "docs" / "openapi.yaml"
@@ -324,6 +351,7 @@ def validate_repository(root: Path):
         raise ValidationFailure(f"invalid OpenAPI 3.1 document: {error}") from error
     if spec.get("openapi") != "3.1.0":
         raise ValidationFailure("web/docs/openapi.yaml must remain OpenAPI 3.1.0")
+    validate_release_version(root, spec)
     fixtures = validate_contract_fixtures(root, spec)
     validate_documented_examples(root, spec, fixtures)
     validate_local_references(root)

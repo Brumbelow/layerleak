@@ -44,9 +44,10 @@
               <a class="button-secondary" href="demo/">Open simulated demo</a>
             </div>
             <p class="muted">
-              This development copy documents the planned v1.1 line. The currently published
-              canonical stable CLI is v1.0.0. The v1.1 changelog and OpenAPI version remain frozen
-              so an accepted release candidate can be promoted from the same source commit.
+              This copy documents the 3.0.0 line on the
+              <code>github.com/brumbelow/layerleak/v3</code> module path. The changelog and OpenAPI
+              version are frozen at 3.0.0 so an accepted release candidate can be promoted from the
+              same source commit.
             </p>
           </div>
 
@@ -72,7 +73,7 @@
         <section class="docs-status-strip" aria-label="Project facts" data-reveal>
           <div>
             <span>Install</span>
-            <strong>github.com/brumbelow/layerleak@latest</strong>
+            <strong>github.com/brumbelow/layerleak/v3@latest</strong>
           </div>
           <div>
             <span>Runtime</span>
@@ -108,11 +109,12 @@
                 <h2>Quickstart</h2>
               </div>
               <p>
-                The module root is the supported CLI entrypoint. Install or build from there, then
+                The <code>/v3</code> module path is the supported CLI entrypoint. Install from there or
+                build the checkout, then
                 scan a public image reference. <code>GOBIN</code> or <code>GOPATH/bin</code> must be
                 on <code>PATH</code> after <code>go install</code>.
               </p>
-              <pre><code>go install github.com/brumbelow/layerleak@latest
+              <pre><code>go install github.com/brumbelow/layerleak/v3@latest
 layerleak --help
 layerleak scan library/nginx:latest --format json</code></pre>
               <p>
@@ -124,14 +126,14 @@ go build -o layerleak .
 ./layerleak scan alpine:latest --platform linux/amd64</code></pre>
               <p class="muted">
                 To pin a published release, replace <code>@latest</code> with the
-                <code>v1.x.y</code> tag you want. The module path is
-                <code>github.com/brumbelow/layerleak</code>, so <code>@latest</code> resolves to the
-                highest published <code>v1.x.y</code> tag, currently <code>v1.0.0</code>. A planned
-                command such as <code>go install github.com/brumbelow/layerleak@v1.1.0-rc.1</code>
-                becomes available only after that tag is published. Module-installed binaries report that
-                version through <code>layerleak --version</code>; local checkout builds report the
-                version Go embeds for the checkout, falling back to <code>dev</code> when no module
-                version is available.
+                <code>v3.x.y</code> tag you want. The module path is
+                <code>github.com/brumbelow/layerleak/v3</code>; the root path without
+                <code>/v3</code> stays at <code>v1.0.0</code> forever, so always include the suffix.
+                A command such as <code>go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1</code>
+                becomes available only after that tag is published, and the installed binary is still
+                named <code>layerleak</code>. Module-installed binaries report that version through
+                <code>layerleak --version</code>; local checkout builds report the version Go embeds
+                for the checkout, falling back to <code>dev</code> when no module version is available.
               </p>
             </section>
 

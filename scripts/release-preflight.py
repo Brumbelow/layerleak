@@ -16,7 +16,10 @@ from pathlib import Path
 
 GH_VERSION = '2.100.0'
 SOURCE_FINGERPRINT = '2B6DF408BD973740052925DC894C75E1B1D05EA2'
-VERSION = r'v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+# The released Go major. go.mod must declare the matching /vN module path.
+RELEASE_MAJOR = 3
+MODULE_PATH = f'github.com/brumbelow/layerleak/v{RELEASE_MAJOR}'
+VERSION = rf'v{RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
 MAX_TAG_INPUT = 16384
 RELEASE_TOOLS = frozenset({'gh', 'cosign', 'grype', 'docker', 'git', 'gpg', 'jq', 'curl'})
 
@@ -108,7 +111,7 @@ def validate_tag_object(value, version, source):
 
 def decode_tag(payload, version, source):
     if not re.fullmatch(VERSION + r'(-rc\.[1-9][0-9]*)?', version):
-        raise ValueError('invalid canonical v1 version')
+        raise ValueError(f'invalid canonical v{RELEASE_MAJOR} version')
     if not re.fullmatch(r'[0-9a-f]{40}', source):
         raise ValueError('source must be a full lowercase commit SHA')
     raw, value = decode_tag_bytes(payload)
@@ -116,7 +119,21 @@ def decode_tag(payload, version, source):
     return raw
 
 
+def check_module_path(go_mod=None):
+    """Refuse to release when go.mod does not declare the module path for RELEASE_MAJOR."""
+    go_mod = Path(go_mod) if go_mod else Path(__file__).resolve().parents[1] / 'go.mod'
+    declared = None
+    for line in go_mod.read_text(encoding='utf-8').splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == 'module':
+            declared = parts[1]
+            break
+    if declared != MODULE_PATH:
+        raise ValueError(f'go.mod declares {declared}, expected {MODULE_PATH}')
+
+
 def verify_tag(payload, version, source, existing=None):
+    check_module_path()
     raw = decode_tag(payload, version, source)
     key = Path(__file__).with_name('release-source-key.asc')
     with tempfile.TemporaryDirectory(prefix='release-verify-') as keyring:

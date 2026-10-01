@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 )
 
 func TestManifestURL(t *testing.T) {

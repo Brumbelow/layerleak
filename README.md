@@ -19,12 +19,11 @@ PostgreSQL for the bundled API.
 - [Security policy](./SECURITY.md)
 - [Contributing](./CONTRIBUTING.md)
 
-This development tree documents the planned v1.1 line. The currently
-published canonical stable release is v1.0.0. A v1.1 release-candidate command
+This development tree documents the 3.0.0 line on the
+`github.com/brumbelow/layerleak/v3` module path. The release-candidate command
 shown below becomes installable only after that exact tag is published. The
-v1.1 version labels in the changelog and OpenAPI document are intentionally
-frozen so an accepted release candidate can be promoted from the same source
-commit.
+3.0.0 labels in the changelog and OpenAPI document are intentionally frozen so
+an accepted release candidate can be promoted from the same source commit.
 
 ## Security model
 
@@ -51,25 +50,28 @@ or behind an authenticated gateway.
 Layerleak requires Go 1.27.1 or newer.
 
 ```bash
-go install github.com/brumbelow/layerleak@latest
+go install github.com/brumbelow/layerleak/v3@latest
 layerleak --version
 layerleak --help
 ```
 
-The module root is the canonical install target. Pin a stable or release
-candidate explicitly when reproducibility matters:
+The `/v3` module path is the canonical install target; the installed binary is
+still named `layerleak`. Pin a stable or release candidate explicitly when
+reproducibility matters:
 
 ```bash
-go install github.com/brumbelow/layerleak@v1.0.0
-go install github.com/brumbelow/layerleak@v1.1.0-rc.1
+go install github.com/brumbelow/layerleak/v3@v3.0.0
+go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1
 ```
 
-Today, `@latest` selects the published v1.0.0 stable release. Go deliberately
-excludes prereleases from `@latest` while a stable version is available, so the
-planned RC command works only after v1.1.0-rc.1 is published and must be selected
-explicitly. Checkout builds can report `dev` or a VCS-derived development
-version, including a dirty-worktree marker. Release-installed binaries report
-the resolved module version through `layerleak --version`.
+`@latest` on the `/v3` path selects the highest published v3 release. Go
+excludes prereleases from `@latest` once a stable version exists, so while only
+release candidates are published `@latest` resolves to the newest candidate.
+The root path `github.com/brumbelow/layerleak` without `/v3` stays at v1.0.0
+forever; always include `/v3`. Checkout builds report a VCS-derived development
+version, including a dirty-worktree marker, or `dev` without VCS information.
+Release-installed binaries report the resolved module version through
+`layerleak --version`.
 
 Build from source:
 
@@ -80,7 +82,7 @@ go build -o layerleak .
 ./layerleak --help
 ```
 
-The supported distribution paths are the module root above for the CLI and
+The supported distribution paths are the `/v3` module path above for the CLI and
 `ghcr.io/brumbelow/layerleak:<published-version>` for the API plus its bundled
 migration, purge, and healthcheck commands. The `cmd/*` packages are source
 build targets for development, not separately versioned install paths. Before
@@ -435,7 +437,7 @@ Releases publish one signed multi-platform image digest. RC tags never move
 `latest`; a stable tag and `latest` point to the exact accepted RC digest.
 
 ```bash
-version=v1.1.0-rc.1
+version=v3.0.0-rc.1
 image=ghcr.io/brumbelow/layerleak
 source_sha='<source-sha-from-release-manifest>'
 docker buildx imagetools inspect "${image}:${version}"
@@ -466,15 +468,16 @@ platform digests.
 
 ## Version history
 
-The canonical module path is `github.com/brumbelow/layerleak`, so installable
-releases stay on v1. The v1.1.0 line is preceded by one or more v1.1.0 release
-candidates.
+The canonical module path is `github.com/brumbelow/layerleak/v3`; 3.0.0 is its
+first release and is preceded by one or more release candidates.
 
-Historical GitHub/container tags v2.0.0-v2.5.0 did not use the required `/v2`
-Go module path. They are preserved for history but are not valid v2 module
-releases and are not selected by `go install ...@latest`. The v1.1 line
-contains and supersedes that work; its version number is not a source downgrade.
-A future true v2 requires a deliberate module-path and API migration.
+Two earlier lines exist and are frozen. v1.0.0 is the only release ever
+published on the root import path `github.com/brumbelow/layerleak`, so
+`go install github.com/brumbelow/layerleak@latest` always resolves to that
+build. Historical GitHub/container tags v2.0.0-v2.5.0 were created without the
+`/v2` module path Go requires, so they were never installable as Go modules and
+are preserved only for history. The 3.0.0 line contains and supersedes that
+work.
 
 See [CHANGELOG.md](./CHANGELOG.md) for release-line details and
 [RELEASING.md](./RELEASING.md) for the protected release procedure.

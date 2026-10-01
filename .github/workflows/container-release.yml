@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact v1 release, for example v1.1.0-rc.1 or v1.1.0
+        description: Exact v3 release, for example v3.0.0-rc.1 or v3.0.0
         required: true
         type: string
       source_sha:
@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ""
+      notes_baseline:
+        description: Existing tag that generated release notes compare against. Empty selects the newest published release (the previous RC for a later RC).
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -32,6 +37,9 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/brumbelow/layerleak
+  # The Go module path and its major version. Every version gate below derives from these.
+  MODULE_PATH: github.com/brumbelow/layerleak/v3
+  RELEASE_MAJOR: "3"
   GRYPE_VERSION: v0.99.1
   BUILDX_VERSION: v0.37.0
   BUILDKIT_IMAGE: moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
@@ -52,6 +60,7 @@ jobs:
       release_exists: ${{ steps.validate.outputs.release_exists }}
       source_date: ${{ steps.validate.outputs.source_date }}
       tag_object: ${{ steps.validate.outputs.tag_object }}
+      notes_baseline: ${{ steps.validate.outputs.notes_baseline }}
     steps:
       - name: Checkout release control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -87,10 +96,19 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_CANDIDATE: ${{ inputs.candidate_version }}
+          REQUESTED_NOTES_BASELINE: ${{ inputs.notes_baseline }}
           SOURCE_TAG: ${{ inputs.source_tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          if [[ "${MODULE_PATH}" != *"/v${RELEASE_MAJOR}" ]]; then
+            echo "MODULE_PATH ${MODULE_PATH} does not end in /v${RELEASE_MAJOR}; the workflow constants disagree." >&2
+            exit 1
+          fi
+          version_pattern="^v${RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$"
+          rc_pattern="^v${RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*$"
+          stable_pattern="^v${RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 
           if [[ "${GITHUB_REPOSITORY,,}" != "brumbelow/layerleak" ]]; then
             echo "Refusing to publish from ${GITHUB_REPOSITORY}." >&2
@@ -100,21 +118,37 @@ jobs:
             echo "The release control workflow must come from main, not ${GITHUB_WORKFLOW_REF}." >&2
             exit 1
           fi
-          if [[ ! "${REQUESTED_VERSION}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
-            echo "Version must be a canonical v1 stable or RC tag." >&2
+          if [[ ! "${REQUESTED_VERSION}" =~ ${version_pattern} ]]; then
+            echo "Version must be a canonical v${RELEASE_MAJOR} stable or RC tag." >&2
             exit 1
           fi
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "source_sha must be a full lowercase commit SHA." >&2
             exit 1
           fi
-          if [[ "$(awk '$1 == "module" { print $2 }' go.mod)" != "github.com/brumbelow/layerleak" ]]; then
-            echo "The root Go module path is not release-compatible." >&2
+          if [[ "$(awk '$1 == "module" { print $2 }' go.mod)" != "${MODULE_PATH}" ]]; then
+            echo "go.mod does not declare ${MODULE_PATH}; the module path must carry the released major." >&2
             exit 1
+          fi
+          base_version="${REQUESTED_VERSION%%-rc.*}"
+          spec_version="$(sed -n 's/^  version: *//p' web/docs/openapi.yaml | head -n 1)"
+          if [[ "${spec_version}" != "${base_version#v}" ]]; then
+            echo "web/docs/openapi.yaml info.version ${spec_version} does not match ${REQUESTED_VERSION}." >&2
+            exit 1
+          fi
+          if [[ -n "${REQUESTED_NOTES_BASELINE}" ]]; then
+            if [[ ! "${REQUESTED_NOTES_BASELINE}" =~ ^v[0-9]+\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+              echo "notes_baseline must be an existing version tag." >&2
+              exit 1
+            fi
           fi
 
           git fetch --quiet origin main --tags
           git cat-file -e "${REQUESTED_SOURCE_SHA}^{commit}"
+          if [[ -n "${REQUESTED_NOTES_BASELINE}" ]] && ! git show-ref --verify --quiet "refs/tags/${REQUESTED_NOTES_BASELINE}"; then
+            echo "notes_baseline ${REQUESTED_NOTES_BASELINE} is not an existing tag." >&2
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "${REQUESTED_SOURCE_SHA}" origin/main; then
             echo "The release commit is not reachable from origin/main." >&2
             exit 1
@@ -177,8 +211,8 @@ jobs:
               echo "Stable release dispatches must run from main, not ${GITHUB_REF}." >&2
               exit 1
             fi
-            if [[ ! "${REQUESTED_CANDIDATE}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*$ ]]; then
-              echo "A stable release requires an accepted v1 RC tag." >&2
+            if [[ ! "${REQUESTED_CANDIDATE}" =~ ${rc_pattern} ]]; then
+              echo "A stable release requires an accepted v${RELEASE_MAJOR} RC tag." >&2
               exit 1
             fi
             if [[ "${REQUESTED_CANDIDATE%%-rc.*}" != "${REQUESTED_VERSION}" ]]; then
@@ -198,7 +232,7 @@ jobs:
               latest_minor=-1
               latest_patch=-1
               while IFS= read -r stable_tag; do
-                if [[ "${stable_tag}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                if [[ "${stable_tag}" =~ ${stable_pattern} ]]; then
                   minor="${BASH_REMATCH[1]}"
                   patch="${BASH_REMATCH[2]}"
                   if (( minor > latest_minor || (minor == latest_minor && patch > latest_patch) )); then
@@ -207,10 +241,10 @@ jobs:
                     latest_patch="${patch}"
                   fi
                 fi
-              done < <(git tag --list 'v1.*')
+              done < <(git tag --list "v${RELEASE_MAJOR}.*")
 
               if [[ -n "${latest_stable}" && "${latest_stable}" != "${REQUESTED_VERSION}" ]]; then
-                [[ "${REQUESTED_VERSION}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+                [[ "${REQUESTED_VERSION}" =~ ${stable_pattern} ]]
                 requested_minor="${BASH_REMATCH[1]}"
                 requested_patch="${BASH_REMATCH[2]}"
                 if (( requested_minor < latest_minor ||
@@ -232,6 +266,7 @@ jobs:
             echo "release_exists=${release_exists}"
             echo "source_date=${source_date}"
             echo "tag_object=${tag_object}"
+            echo "notes_baseline=${REQUESTED_NOTES_BASELINE}"
           } >> "${GITHUB_OUTPUT}"
 
   verify:
@@ -331,6 +366,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=layerleak
             org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+          build-args: |
+            LAYERLEAK_VERSION=${{ needs.validate.outputs.version }}
           attests: |
             type=provenance,mode=max,version=v1
             type=sbom
@@ -1023,6 +1060,7 @@ jobs:
           RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
           IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          NOTES_BASELINE: ${{ needs.validate.outputs.notes_baseline }}
         run: |
           set -euo pipefail
           if [[ "${RELEASE_EXISTS}" == true ]]; then
@@ -1034,17 +1072,27 @@ jobs:
             exit 0
           fi
 
+          # Generated notes compare against the newest published release unless an
+          # explicit baseline was supplied: the previous stable for a stable release,
+          # the previous RC (or the previous stable) for a release candidate.
+          notes_baseline="${NOTES_BASELINE}"
+          if [[ -z "${notes_baseline}" ]]; then
+            if [[ "${PRERELEASE}" == true ]]; then
+              notes_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+                --jq '[.[] | select(.draft == false and .tag_name != "'"${RELEASE_VERSION}"'")] | sort_by(.published_at) | last | .tag_name // empty')"
+            else
+              notes_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name // empty')"
+            fi
+          fi
+          notes_args=(-f tag_name="${RELEASE_VERSION}")
+          if [[ -n "${notes_baseline}" ]]; then
+            notes_args+=(-f previous_tag_name="${notes_baseline}")
+          fi
           notes_file="${RUNNER_TEMP}/release-notes.md"
           generated_notes="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="${RELEASE_VERSION}" \
-            -f previous_tag_name=v1.0.0 \
-            --jq .body)"
+            "${notes_args[@]}" --jq .body)"
           {
-            echo "Canonical Go module releases continue on v1.x."
-            echo
-            echo "Historical v2.0.0-v2.5.0 GitHub and container releases did not use a /v2 module path and are not installable as v2 Go modules. This release contains and supersedes those changes; the v1 version is not a source downgrade."
-            echo
-            echo "The attached release manifest records the source commit, multi-platform image digests, scanner versions, SBOMs, and provenance."
+            cat .github/release-notes-preamble.md
             echo
             printf '%s\n' "${generated_notes}"
           } > "${notes_file}"
@@ -1109,7 +1157,8 @@ jobs:
       - stage-image
       - publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # proxy.golang.org may serve a cached negative answer for up to 30 minutes.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -1162,7 +1211,7 @@ jobs:
           install_bin="${RUNNER_TEMP}/public-install"
           mkdir -p "${install_bin}"
           for attempt in {1..30}; do
-            if GOBIN="${install_bin}" GOPROXY=https://proxy.golang.org go install "github.com/brumbelow/layerleak@${RELEASE_VERSION}"; then
+            if GOBIN="${install_bin}" GOPROXY=https://proxy.golang.org go install "${MODULE_PATH}@${RELEASE_VERSION}"; then
               break
             fi
             if [[ "${attempt}" -eq 30 ]]; then
@@ -1171,23 +1220,30 @@ jobs:
             fi
             sleep 10
           done
-          "${install_bin}/layerleak" --version | grep -F "${RELEASE_VERSION}"
-          if [[ "${PRERELEASE}" == true ]]; then
-            latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' github.com/brumbelow/layerleak@latest)"
-            test "${latest_module}" != "${RELEASE_VERSION}"
+          test "$("${install_bin}/layerleak" --version)" = "layerleak version ${RELEASE_VERSION}"
+
+          # Go resolves @latest to the highest release version, or to the highest
+          # prerelease while the module has no release version at all. The first RC
+          # of a new major is therefore expected to be @latest; once a stable
+          # release exists an RC must never become @latest.
+          stable_versions="$(GOPROXY=https://proxy.golang.org go list -m -versions "${MODULE_PATH}" 2>/dev/null | tr ' ' '\n' | grep -E "^v${RELEASE_MAJOR}\.[0-9]+\.[0-9]+$" || true)"
+          highest_stable="$(printf '%s\n' "${stable_versions}" | sort -V | tail -n 1)"
+          if [[ "${PRERELEASE}" == true && -n "${highest_stable}" ]]; then
+            expected_latest="${highest_stable}"
           else
-            for attempt in {1..30}; do
-              latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' github.com/brumbelow/layerleak@latest)"
-              if [[ "${latest_module}" == "${RELEASE_VERSION}" ]]; then
-                break
-              fi
-              if [[ "${attempt}" -eq 30 ]]; then
-                echo "The Go proxy did not advance @latest within five minutes." >&2
-                exit 1
-              fi
-              sleep 10
-            done
+            expected_latest="${RELEASE_VERSION}"
           fi
+          for attempt in {1..70}; do
+            latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' "${MODULE_PATH}@latest" 2>/dev/null || true)"
+            if [[ "${latest_module}" == "${expected_latest}" ]]; then
+              break
+            fi
+            if [[ "${attempt}" -eq 70 ]]; then
+              echo "The Go proxy reports @latest=${latest_module:-<none>}, expected ${expected_latest}, after 35 minutes." >&2
+              exit 1
+            fi
+            sleep 30
+          done
 
           docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_VERSION}" --raw > release-index.json
           release_digest="sha256:$(sha256sum release-index.json | awk '{print $1}')"

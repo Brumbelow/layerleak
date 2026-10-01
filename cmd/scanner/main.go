@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/brumbelow/layerleak/internal/cli"
+	"github.com/brumbelow/layerleak/v3/internal/cli"
 )
 
 func main() {

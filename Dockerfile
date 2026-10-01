@@ -14,13 +14,16 @@ COPY . .
 
 ARG TARGETOS
 ARG TARGETARCH
+# Release builds pass the version tag; local builds report "dev".
+ARG LAYERLEAK_VERSION=dev
 
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
-	CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-api ./cmd/api \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-migrate-up ./cmd/migrate \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-purge-raw-secrets ./cmd/purge \
-	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/layerleak-healthcheck ./cmd/healthcheck \
+	ldflags="-s -w -X github.com/brumbelow/layerleak/v3/internal/version.Version=${LAYERLEAK_VERSION}" \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-api ./cmd/api \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-migrate-up ./cmd/migrate \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-purge-raw-secrets ./cmd/purge \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -mod=readonly -trimpath -ldflags="${ldflags}" -o /out/layerleak-healthcheck ./cmd/healthcheck \
 	&& install -d -m 1777 /out/rootfs/tmp
 
 FROM scratch

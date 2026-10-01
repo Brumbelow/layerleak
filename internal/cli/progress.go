@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"golang.org/x/term"
 )
 

@@ -32,9 +32,6 @@ func Run() int {
 	return 0
 }
 
-// Version is the build-time version string, set via -ldflags.
-var Version = "dev"
-
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "layerleak",

@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/limits"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	distributionreference "github.com/distribution/reference"
 )
 

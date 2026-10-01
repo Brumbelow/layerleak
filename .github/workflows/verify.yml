@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(go list -m)" = "github.com/brumbelow/layerleak"
+          test "$(go list -m)" = "github.com/brumbelow/layerleak/v3"
           go mod verify
           go mod tidy -diff
 

@@ -9,10 +9,11 @@ systems or data you do not own.
 
 | Version | Support |
 | --- | --- |
-| Latest stable v1 release | Security fixes |
-| Current announced v1 release candidate | Release-blocking fixes until stable |
-| Older v1 releases | Unsupported; upgrade to latest |
-| Historical v2.0.0-v2.5.0 tags | Unsupported and not valid v2 Go modules |
+| Latest stable v3 release (`github.com/brumbelow/layerleak/v3`) | Security fixes |
+| Current announced v3 release candidate | Release-blocking fixes until stable |
+| Older v3 releases | Unsupported; upgrade to latest |
+| v1.0.0 on the root import path `github.com/brumbelow/layerleak` | Unsupported; migrate to `/v3` |
+| Historical v2.0.0-v2.5.0 GitHub/container tags | Unsupported and not Go modules |
 | Unreleased `main` | No production support guarantee |
 
 Tags are immutable. Fixes ship as a new patch or release candidate; existing
@@ -103,7 +104,7 @@ checksums. Verify digest-addressed images rather than trusting a mutable tag:
 
 ```bash
 image=ghcr.io/brumbelow/layerleak
-version=v1.1.0
+version=v3.0.0
 digest='sha256:<digest-from-release-manifest>'
 source_sha='<source-sha-from-release-manifest>'
 

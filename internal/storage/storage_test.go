@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
 )
 
 func TestPostgresConfigValidate(t *testing.T) {

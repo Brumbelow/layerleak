@@ -1,0 +1,3 @@
+Layerleak 3.x is the canonical Go module line, published as `github.com/brumbelow/layerleak/v3`. Install the CLI with `go install github.com/brumbelow/layerleak/v3@<version>`. The root import path `github.com/brumbelow/layerleak` stays frozen at v1.0.0, and the historical v2.0.0-v2.5.0 GitHub and container releases were never valid Go modules; this line contains and supersedes that work.
+
+The attached release manifest records the source commit, multi-platform image digests, scanner versions, SBOMs, and provenance. CHANGELOG.md and UPGRADING.md in the source tree describe the changes and the migration from earlier installs.

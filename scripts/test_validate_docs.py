@@ -1,9 +1,11 @@
 import importlib.util
 import json
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPOSITORY_ROOT / "scripts" / "validate_docs.py"
@@ -17,6 +19,7 @@ class DocumentationValidationTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         shutil.copytree(REPOSITORY_ROOT / "web", self.root / "web")
+        shutil.copy(REPOSITORY_ROOT / "CHANGELOG.md", self.root / "CHANGELOG.md")
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -33,6 +36,20 @@ class DocumentationValidationTests(unittest.TestCase):
         fixture.write_text(json.dumps(response))
 
         self.assert_invalid("scan-completed.json")
+
+    def test_rejects_openapi_version_that_differs_from_changelog_release(self):
+        spec_path = self.root / "web" / "docs" / "openapi.yaml"
+        spec = validate_docs.load_yaml(spec_path)
+        spec["info"]["version"] = "9.9.9"
+        spec_path.write_text(validate_docs.dump_yaml(spec))
+
+        self.assert_invalid("info.version 9.9.9 differs")
+
+    def test_rejects_release_tag_that_differs_from_documented_version(self):
+        with patch.dict(os.environ, {"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v9.9.9-rc.1"}):
+            self.assert_invalid("release tag v9.9.9-rc.1")
+        with patch.dict(os.environ, {"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v3.0.0-rc.1"}):
+            validate_docs.validate_repository(self.root)
 
     def test_rejects_broken_local_documentation_link(self):
         index = self.root / "web" / "index.html"

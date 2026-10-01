@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/brumbelow/layerleak/internal/detectionpolicy"
+	"github.com/brumbelow/layerleak/v3/internal/detectionpolicy"
 )
 
 type Confidence string

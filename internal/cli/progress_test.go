@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 )
 
 func newProgressRenderer(out io.Writer) *progressRenderer {

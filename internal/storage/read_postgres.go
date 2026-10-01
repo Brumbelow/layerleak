@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/lib/pq"
 )
 

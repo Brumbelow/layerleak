@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Layerleak API
-  version: 1.1.0
+  version: 3.0.0
   summary: PostgreSQL-backed API for redacted OCI image secret-scan results
   description: |
     Layerleak scans public OCI images synchronously and stores redacted results

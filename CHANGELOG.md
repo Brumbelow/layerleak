@@ -1,11 +1,22 @@
 # Changelog
 
 Notable user-visible changes are recorded here. Layerleak follows semantic
-versioning on the canonical `github.com/brumbelow/layerleak` v1 module line.
+versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 
 ## [Unreleased]
 
-## [v1.1.0]
+## [v3.0.0]
+
+### Module path and major version
+
+- The Go module path is now `github.com/brumbelow/layerleak/v3`; install with
+  `go install github.com/brumbelow/layerleak/v3@latest`. The binary is still
+  named `layerleak`.
+- The root import path `github.com/brumbelow/layerleak` is frozen at v1.0.0 and
+  the historical v2.0.0-v2.5.0 tags are not Go modules; see the historical
+  version note below.
+- The HTTP API path prefix (`/api/v1`) and the database schema version (`0004`)
+  do not change with the module major.
 
 ### Added
 
@@ -126,11 +137,13 @@ point.
 
 Go requires a `/vN` module-path suffix for major versions v2 and newer. The
 repository retained the root path while v2.0.0-v2.5.0 tags were created, so Go
-correctly excludes those tags from `go install github.com/brumbelow/layerleak@latest`.
-They remain visible for provenance; v1.1.0 contains and supersedes their work.
+correctly excludes those tags from `go install github.com/brumbelow/layerleak@latest`,
+which stays at v1.0.0. They remain visible for provenance. No v1.1.0 was ever
+published; canonical module releases resume at v3.0.0 on
+`github.com/brumbelow/layerleak/v3`, which contains and supersedes that work.
 
-[Unreleased]: https://github.com/Brumbelow/layerleak/compare/v1.1.0...HEAD
-[v1.1.0]: https://github.com/Brumbelow/layerleak/compare/v1.0.0...v1.1.0
+[Unreleased]: https://github.com/Brumbelow/layerleak/compare/v3.0.0...HEAD
+[v3.0.0]: https://github.com/Brumbelow/layerleak/compare/v2.5.0...v3.0.0
 [v2.5.0]: https://github.com/Brumbelow/layerleak/releases/tag/v2.5.0
 [v2.1.1]: https://github.com/Brumbelow/layerleak/releases/tag/v2.1.1
 [v2.1.0]: https://github.com/Brumbelow/layerleak/releases/tag/v2.1.0

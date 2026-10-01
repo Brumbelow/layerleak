@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
 
 func TestBuildScanRecordSanitizesErrorsAndPersistsPartialStatus(t *testing.T) {

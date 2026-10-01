@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 func main() {

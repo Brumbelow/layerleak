@@ -6,15 +6,19 @@ bad module version cannot be withdrawn reliably.
 
 ## Version policy
 
-The module path is `github.com/brumbelow/layerleak`. Valid release inputs are:
+The module path is `github.com/brumbelow/layerleak/v3`. Valid release inputs
+are:
 
 ```text
-v1.<minor>.<patch>-rc.<positive integer>
-v1.<minor>.<patch>
+v3.<minor>.<patch>-rc.<positive integer>
+v3.<minor>.<patch>
 ```
 
-Numeric identifiers cannot have leading zeroes. The workflow rejects v2 and v3
-tags because those majors require `/v2` or `/v3` in the module path.
+Numeric identifiers cannot have leading zeroes. The workflow rejects v1 and v2
+tags: v1 belongs to the frozen root-path module and v2 was never a valid module
+major. The workflow, `scripts/release-preflight.py` and `go.mod` must agree on
+the major; the preflight refuses a tag whose major does not match the module
+path.
 
 - Use a patch release for backward-compatible fixes.
 - Use a minor release for additive CLI, API, configuration, result-schema, or
@@ -25,9 +29,12 @@ tags because those majors require `/v2` or `/v3` in the module path.
 - Never move or reuse a version tag.
 
 Historical v2.0.0-v2.5.0 GitHub/container releases are preserved but are not
-valid v2 Go module releases. Generate new release notes from v1.0.0, not the
-historical GitHub “latest” release. The stable v1.1.0 release will restore the
-GitHub latest designation to the canonical module line.
+Go module releases, and v1.0.0 remains the only version of the root import
+path. Generated release notes compare against the newest published release by
+default (v2.5.0 for the first v3 release candidate and for v3.0.0, the previous
+candidate for a later candidate); the optional `notes_baseline` input overrides
+that. The stable v3.0.0 release restores the GitHub latest designation to the
+canonical module line.
 
 ## Reviewed release tools
 
@@ -84,7 +91,7 @@ head and the workflow execution commit. For stable, use the accepted RC's exact
 commit. Prepare the tag locally; only the protected workflow publishes its ref.
 
 ```bash
-version=v1.1.0-rc.1
+version=v3.0.0-rc.1
 source_sha='<full-approved-source-sha>'
 git verify-commit "${source_sha}"
 git tag -s "${version}" "${source_sha}" -m "${version}"
@@ -125,8 +132,8 @@ Complete these settings before the first RC:
    release.
 4. Protect `main` with pull requests, no force pushes or deletion, and all CI,
    CodeQL, and Codacy checks required.
-5. Add a tag ruleset for `v1.*` that blocks updates, deletion, and non-fast-
-   forward changes with no bypass. Personal repositories cannot select the
+5. Add a tag ruleset covering `v1.*`, `v2.*` and `v3.*` that blocks updates,
+   deletion, and non-fast-forward changes with no bypass. Personal repositories cannot select the
    GitHub Actions integration as a ruleset bypass actor, so leave initial tag
    creation enabled for the protected workflow. Prepare only the local handoff
    described above; do not push release tags manually.
@@ -150,7 +157,8 @@ attestation immediately after publication.
 The release workflow accepts a version, full source SHA, and source-tag handoff, then:
 
 1. checks the reviewed release tools, validates the source-tag handoff,
-   canonical v1 semver, module identity, `main` ancestry, existing tags,
+   canonical v3 semver, module identity (`github.com/brumbelow/layerleak/v3`),
+   the OpenAPI version, `main` ancestry, existing tags,
    candidate/release immutability, increasing stable versions, and RC/stable
    relationships;
 2. runs the reusable full gate: format, module integrity, vet, normal/race
@@ -176,18 +184,21 @@ The release workflow accepts a version, full source SHA, and source-tag handoff,
 10. verifies the Go proxy, image tags, release immutability and attestation,
     signature, and source-bound image attestations after publication.
 
-RC publication never changes the GHCR `latest` tag or Go module `@latest`.
-Stable publication points `v1.x.y` and `latest` to the accepted RC digest.
+RC publication never changes the GHCR `latest` tag. Go resolves `@latest` on
+the `/v3` path to the highest stable release, or to the newest release
+candidate while no stable v3 release exists, so the first candidate of a new
+major is expected to become `@latest`. Stable publication points `v3.x.y` and
+`latest` to the accepted RC digest.
 
-## Prepare v1.1.0-rc.1
+## Prepare v3.0.0-rc.1
 
 1. Merge the intended release changes to `main`.
 2. Confirm the **CI**, **CodeQL**, **Codacy Security Scan**, and **Pages**
    workflows are green on the exact commit.
 3. Review [CHANGELOG.md](./CHANGELOG.md), [README.md](./README.md), the OpenAPI
    document, migration notes, security policy, and third-party notices. Freeze
-   the changes under the final `v1.1.0` changelog heading and use `1.1.0` as the
-   OpenAPI version before RC. Do not embed an RC number in files that stable
+   the changes under the final `v3.0.0` changelog heading and use `3.0.0` as the
+   OpenAPI version before RC; the validate job refuses a mismatch. Do not embed an RC number in files that stable
    must reuse unchanged.
 4. From a clean checkout, run:
 
@@ -212,10 +223,11 @@ git rev-parse origin/main
    SHA. In **Actions → Release → Run workflow**, select `main` and enter:
 
 ```text
-version: v1.1.0-rc.1
+version: v3.0.0-rc.1
 source_sha: <the full main SHA>
 source_tag: <the single-line handoff>
 candidate_version: <leave empty>
+notes_baseline: <leave empty>
 ```
 
 7. Review the workflow summary, Grype reports, image/platform digests,
@@ -231,21 +243,23 @@ clean_root="$(mktemp -d)"
 GOBIN="${clean_root}/bin" \
 GOCACHE="${clean_root}/cache" \
 GOMODCACHE="${clean_root}/mod" \
-go install github.com/brumbelow/layerleak@v1.1.0-rc.1
+go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1
 "${clean_root}/bin/layerleak" --version
 "${clean_root}/bin/layerleak" scan --help
 
-go list -m github.com/brumbelow/layerleak@latest
-docker buildx imagetools inspect ghcr.io/brumbelow/layerleak:v1.1.0-rc.1
+go list -m github.com/brumbelow/layerleak/v3@latest
+docker buildx imagetools inspect ghcr.io/brumbelow/layerleak:v3.0.0-rc.1
 ```
 
 Confirm:
 
-- exact RC installation succeeds while `@latest` remains the previous stable;
+- exact RC installation succeeds; `@latest` on the `/v3` path resolves to the
+  candidate while no stable v3 release exists, and to the previous stable
+  otherwise;
 - GHCR contains linux/amd64 and linux/arm64 application manifests plus expected
   attestation manifests;
 - `latest` did not move;
-- migration succeeds twice against a fresh PostgreSQL 16.13 database;
+- migration succeeds twice against a fresh PostgreSQL 16 database;
 - the API refuses startup before migration; after schema 0004 is installed,
   `/health`, `/livez`, and `/readyz` become healthy. Readiness reports later
   database or schema degradation independently of liveness;
@@ -258,18 +272,19 @@ from the immutable candidate release's publication timestamp. Treat a
 correctness regression, security regression, migration problem, data-loss risk,
 false clean scan, signature or attestation failure, or unsupported-platform
 failure as release-blocking. Any code or image change requires
-`v1.1.0-rc.2`; do not repair or move RC.1.
+`v3.0.0-rc.2`; do not repair or move RC.1.
 
-## Promote v1.1.0
+## Promote v3.0.0
 
 Once an RC is accepted, prepare a new handoff for the stable version using the
 RC's exact source SHA, then run the same workflow from `main`:
 
 ```text
-version: v1.1.0
+version: v3.0.0
 source_sha: <accepted RC source SHA>
 source_tag: <the stable version handoff>
-candidate_version: v1.1.0-rc.1
+candidate_version: v3.0.0-rc.1
+notes_baseline: <leave empty>
 ```
 
 The workflow verifies the RC release and asset attestations, publication age,
@@ -280,11 +295,11 @@ commit, candidate, and digest in the workflow summary.
 
 After stable publication, verify:
 
-- `go install github.com/brumbelow/layerleak@v1.1.0` succeeds;
-- `go install github.com/brumbelow/layerleak@latest` installs v1.1.0;
-- GHCR `v1.1.0` and `latest` resolve to the accepted RC digest;
+- `go install github.com/brumbelow/layerleak/v3@v3.0.0` succeeds;
+- `go install github.com/brumbelow/layerleak/v3@latest` installs v3.0.0;
+- GHCR `v3.0.0` and `latest` resolve to the accepted RC digest;
 - RC tags remain unchanged;
-- GitHub marks v1.1.0 as latest and the release is immutable;
+- GitHub marks v3.0.0 as latest and the release is immutable;
 - both platforms pass migration/API smoke;
 - Pages serves the matching docs and OpenAPI file.
 
@@ -309,7 +324,7 @@ Verify a release digest:
 
 ```bash
 image=ghcr.io/brumbelow/layerleak
-version=v1.1.0
+version=v3.0.0
 digest='sha256:<digest-from-release-manifest>'
 source_sha='<source-sha-from-release-manifest>'
 

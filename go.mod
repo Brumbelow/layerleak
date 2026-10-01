@@ -1,4 +1,4 @@
-module github.com/brumbelow/layerleak
+module github.com/brumbelow/layerleak/v3
 
 go 1.27.1
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/brumbelow/layerleak/internal/api"
+	"github.com/brumbelow/layerleak/v3/internal/api"
 )
 
 func main() {

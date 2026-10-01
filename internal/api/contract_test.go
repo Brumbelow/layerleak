@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/findings"
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
@@ -78,7 +79,9 @@ const contractDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 func contractResult(status jobs.ResultStatus) jobs.Result {
 	target := contractTargetResult(status)
 	result := jobs.Result{
-		ResultSchemaVersion:    1,
+		ResultSchemaVersion:    jobs.ResultSchemaVersion,
+		ScannedAt:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
+		Scanner:                jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0"},
 		Status:                 status,
 		RequestedReference:     "library/example:latest",
 		Repository:             "library/example",

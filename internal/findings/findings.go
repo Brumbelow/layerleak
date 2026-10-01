@@ -89,7 +89,7 @@ type Finding struct {
 	DispositionReason   DispositionReason `json:"disposition_reason,omitempty"`
 	SourceType          SourceType        `json:"source_type"`
 	ManifestDigest      string            `json:"manifest_digest"`
-	Platform            manifest.Platform `json:"platform,omitempty"`
+	Platform            manifest.Platform `json:"platform,omitzero"`
 	FilePath            string            `json:"file_path,omitempty"`
 	LayerDigest         string            `json:"layer_digest,omitempty"`
 	Key                 string            `json:"key,omitempty"`

@@ -15,14 +15,28 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/version"
 )
 
+// ResultSchemaVersion is the result_schema_version every Result reports.
+// Version 2 (3.0.0) added scanned_at and scanner, typed tag statuses, always
+// present counters and omitted empty platforms.
+const ResultSchemaVersion = 2
+
+// ScannerName is the scanner.name every Result reports.
+const ScannerName = "layerleak"
+
 type Request struct {
-	Reference            manifest.Reference
-	Platform             string
-	Registry             *registry.Client
-	Detectors            detectors.Set
-	Logger               *slog.Logger
+	Reference manifest.Reference
+	Platform  string
+	Registry  *registry.Client
+	Detectors detectors.Set
+	Logger    *slog.Logger
+	// ScannerVersion is reported as scanner.version; empty means the build
+	// version of this binary.
+	ScannerVersion string
+	// Now supplies scanned_at; nil means time.Now.
+	Now                  func() time.Time
 	MaxFileBytes         int64
 	MaxLayerBytes        int64
 	MaxLayerEntries      int
@@ -108,6 +122,7 @@ type ProgressUpdate struct {
 	TagsTotal             int
 	TagsFailed            int
 	TargetsCompleted      int
+	TargetsPartial        int
 	TargetsFailed         int
 	TargetsTotal          int
 	FindingsFound         int
@@ -120,17 +135,25 @@ type ProgressUpdate struct {
 
 type ProgressFunc func(ProgressUpdate)
 
+// ScannerInfo identifies the scanner build that produced a Result.
+type ScannerInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 type Result struct {
 	ResultSchemaVersion          int                        `json:"result_schema_version"`
+	ScannedAt                    time.Time                  `json:"scanned_at"`
+	Scanner                      ScannerInfo                `json:"scanner"`
 	Status                       ResultStatus               `json:"status"`
 	RequestedReference           string                     `json:"requested_reference"`
 	Repository                   string                     `json:"repository"`
 	Mode                         string                     `json:"mode"`
 	ResolvedReference            string                     `json:"resolved_reference,omitempty"`
 	RequestedDigest              string                     `json:"requested_digest,omitempty"`
-	TagsEnumerated               int                        `json:"tags_enumerated,omitempty"`
-	TagsResolved                 int                        `json:"tags_resolved,omitempty"`
-	TagsFailed                   int                        `json:"tags_failed,omitempty"`
+	TagsEnumerated               int                        `json:"tags_enumerated"`
+	TagsResolved                 int                        `json:"tags_resolved"`
+	TagsFailed                   int                        `json:"tags_failed"`
 	TargetCount                  int                        `json:"target_count"`
 	CompletedTargetCount         int                        `json:"completed_target_count"`
 	FailedTargetCount            int                        `json:"failed_target_count"`
@@ -146,18 +169,36 @@ type Result struct {
 	SuppressedDetailedFindings   []findings.DetailedFinding `json:"-"`
 	TotalFindings                int                        `json:"total_findings"`
 	UniqueFingerprints           int                        `json:"unique_fingerprints"`
-	SuppressedFindingsCount      int                        `json:"suppressed_findings_count,omitempty"`
-	SuppressedUniqueFingerprints int                        `json:"suppressed_unique_fingerprints,omitempty"`
+	SuppressedFindingsCount      int                        `json:"suppressed_findings_count"`
+	SuppressedUniqueFingerprints int                        `json:"suppressed_unique_fingerprints"`
 	Coverage                     scanner.Coverage           `json:"coverage"`
 	Diagnostics                  []scanner.Diagnostic       `json:"diagnostics,omitempty"`
 }
 
+// TagStatus is the outcome of one tag in tag_results. Both scan modes use the
+// same vocabulary.
+type TagStatus string
+
+const (
+	// TagStatusResolved: the tag resolved to a digest that has not been scanned
+	// yet. It only appears in results of sweeps that stopped before the target.
+	TagStatusResolved TagStatus = "resolved"
+	// TagStatusScanned: every selected manifest of the tag's target completed.
+	TagStatusScanned TagStatus = "scanned"
+	// TagStatusPartial: the tag's target completed some but not all manifests.
+	TagStatusPartial TagStatus = "partial"
+	// TagStatusFailed: the tag could not be resolved or its target failed.
+	TagStatusFailed TagStatus = "failed"
+	// TagStatusSkipped: the sweep stopped before the tag's target was scanned.
+	TagStatusSkipped TagStatus = "skipped"
+)
+
 type TagResult struct {
-	Tag             string `json:"tag"`
-	RootDigest      string `json:"root_digest,omitempty"`
-	TargetReference string `json:"target_reference,omitempty"`
-	Status          string `json:"status"`
-	Error           string `json:"error,omitempty"`
+	Tag             string    `json:"tag"`
+	RootDigest      string    `json:"root_digest,omitempty"`
+	TargetReference string    `json:"target_reference,omitempty"`
+	Status          TagStatus `json:"status"`
+	Error           string    `json:"error,omitempty"`
 }
 
 type TargetResult struct {
@@ -192,57 +233,78 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	return scanSingleReference(ctx, request)
 }
 
+// newResult starts a Result with the schema version, timestamp and scanner
+// identity every result carries.
+func newResult(request Request, mode string) Result {
+	now := time.Now
+	if request.Now != nil {
+		now = request.Now
+	}
+	scannerVersion := strings.TrimSpace(request.ScannerVersion)
+	if scannerVersion == "" {
+		scannerVersion = version.Effective()
+	}
+	return Result{
+		ResultSchemaVersion: ResultSchemaVersion,
+		ScannedAt:           now().UTC().Truncate(time.Second),
+		Scanner:             ScannerInfo{Name: ScannerName, Version: scannerVersion},
+		RequestedReference:  request.Reference.Original,
+		Repository:          request.Reference.Repository,
+		Mode:                mode,
+	}
+}
+
 func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 	tags := scannedTags(request.Reference)
 	scanResult, err := scanTarget(ctx, request, request.Reference, tags, progressState{
-		tagsCompleted:  len(tags),
-		tagsTotal:      len(tags),
 		targetsTotal:   1,
 		currentTag:     firstTag(tags),
 		currentRef:     request.Reference.CanonicalString(""),
 		findingsBefore: 0,
 	})
-	result := Result{
-		ResultSchemaVersion:    1,
-		RequestedReference:     request.Reference.Original,
-		Repository:             request.Reference.Repository,
-		Mode:                   "reference",
-		ResolvedReference:      scanResult.ResolvedReference,
-		RequestedDigest:        scanResult.RequestedDigest,
-		TagsEnumerated:         len(tags),
-		TagsResolved:           len(tags),
-		TargetCount:            1,
-		ManifestCount:          scanResult.ManifestCount,
-		CompletedManifestCount: scanResult.CompletedManifestCount,
-		FailedManifestCount:    scanResult.FailedManifestCount,
-		Targets: []TargetResult{
-			targetResultFromScanResult(request.Reference, scanResult, tags),
-		},
-		Findings:                     scanResult.Findings,
-		DetailedFindings:             scanResult.DetailedFindings,
-		SuppressedFindings:           scanResult.SuppressedFindings,
-		SuppressedDetailedFindings:   scanResult.SuppressedDetailedFindings,
-		TotalFindings:                scanResult.TotalFindings,
-		UniqueFingerprints:           scanResult.UniqueFingerprints,
-		SuppressedFindingsCount:      scanResult.SuppressedFindingsCount,
-		SuppressedUniqueFingerprints: scanResult.SuppressedUniqueFingerprints,
-		Coverage:                     scanResult.Coverage,
-		Diagnostics:                  slices.Clone(scanResult.Diagnostics),
-	}
-	if err == nil && scanResult.Status == scanner.ResultStatusCompleted {
+	result := newResult(request, "reference")
+	result.ResolvedReference = scanResult.ResolvedReference
+	result.RequestedDigest = scanResult.RequestedDigest
+	result.TargetCount = 1
+	result.ManifestCount = scanResult.ManifestCount
+	result.CompletedManifestCount = scanResult.CompletedManifestCount
+	result.FailedManifestCount = scanResult.FailedManifestCount
+	result.Targets = []TargetResult{targetResultFromScanResult(request.Reference, scanResult, tags)}
+	result.Findings = scanResult.Findings
+	result.DetailedFindings = scanResult.DetailedFindings
+	result.SuppressedFindings = scanResult.SuppressedFindings
+	result.SuppressedDetailedFindings = scanResult.SuppressedDetailedFindings
+	result.TotalFindings = scanResult.TotalFindings
+	result.UniqueFingerprints = scanResult.UniqueFingerprints
+	result.SuppressedFindingsCount = scanResult.SuppressedFindingsCount
+	result.SuppressedUniqueFingerprints = scanResult.SuppressedUniqueFingerprints
+	result.Coverage = scanResult.Coverage
+	result.Diagnostics = slices.Clone(scanResult.Diagnostics)
+
+	tagStatus := TagStatusFailed
+	switch {
+	case err == nil && scanResult.Status == scanner.ResultStatusCompleted:
 		result.CompletedTargetCount = 1
-	} else if scanResult.CompletedManifestCount > 0 {
+		tagStatus = TagStatusScanned
+	case scanResult.CompletedManifestCount > 0:
 		result.PartialTargetCount = 1
-	} else {
+		tagStatus = TagStatusPartial
+	default:
 		result.FailedTargetCount = 1
 	}
-	if len(tags) > 0 && err == nil {
-		result.TagResults = []TagResult{{
+	// Reference mode never enumerates tags (tags_enumerated stays 0), but the
+	// requested tag is reported in tag_results whenever it resolved to a digest.
+	if len(tags) > 0 && strings.TrimSpace(scanResult.RequestedDigest) != "" {
+		tagResult := TagResult{
 			Tag:             tags[0],
 			RootDigest:      scanResult.RequestedDigest,
 			TargetReference: scanResult.ResolvedReference,
-			Status:          "scanned",
-		}}
+			Status:          tagStatus,
+		}
+		if err != nil {
+			tagResult.Error = err.Error()
+		}
+		result.TagResults = []TagResult{tagResult}
 	}
 	if err != nil {
 		result.Targets[0].Error = err.Error()
@@ -254,16 +316,7 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 	}
 	finalizeResult(&result, result.DetailedFindings, result.SuppressedDetailedFindings)
 
-	emitProgress(request, ProgressUpdate{
-		Phase:            ProgressPhaseCompleted,
-		Repository:       request.Reference.Repository,
-		TagsCompleted:    result.TagsResolved,
-		TagsTotal:        result.TagsEnumerated,
-		TargetsCompleted: result.CompletedTargetCount,
-		TargetsTotal:     result.TargetCount,
-		FindingsFound:    result.TotalFindings,
-		Message:          "Scan complete",
-	})
+	emitProgress(request, progressFromResult(request, result, ProgressPhaseCompleted, "Scan complete", "", ""))
 
 	if result.Status != ResultStatusCompleted {
 		return result, newIncompleteError(result, nil)
@@ -271,17 +324,33 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 	return result, nil
 }
 
-func scanRepository(ctx context.Context, request Request) (Result, error) {
-	result := Result{
-		ResultSchemaVersion: 1,
-		RequestedReference:  request.Reference.Original,
-		Repository:          request.Reference.Repository,
-		Mode:                "repository",
-		ResolvedReference:   request.Reference.RepositoryString(),
-		TagResults:          make([]TagResult, 0),
-		Targets:             make([]TargetResult, 0),
-		Coverage:            scanner.Coverage{Complete: true},
+// progressFromResult builds a progress update whose counters mirror the
+// result so far. Tag counters report resolved tags as completed and failed
+// tags separately; target counters include partial targets.
+func progressFromResult(request Request, result Result, phase ProgressPhase, message, currentTag, currentReference string) ProgressUpdate {
+	return ProgressUpdate{
+		Phase:            phase,
+		Repository:       request.Reference.Repository,
+		TagsCompleted:    result.TagsResolved,
+		TagsTotal:        result.TagsEnumerated,
+		TagsFailed:       result.TagsFailed,
+		TargetsCompleted: result.CompletedTargetCount,
+		TargetsPartial:   result.PartialTargetCount,
+		TargetsFailed:    result.FailedTargetCount,
+		TargetsTotal:     result.TargetCount,
+		FindingsFound:    result.TotalFindings,
+		CurrentTag:       currentTag,
+		CurrentReference: currentReference,
+		Message:          message,
 	}
+}
+
+func scanRepository(ctx context.Context, request Request) (Result, error) {
+	result := newResult(request, "repository")
+	result.ResolvedReference = request.Reference.RepositoryString()
+	result.TagResults = make([]TagResult, 0)
+	result.Targets = make([]TargetResult, 0)
+	result.Coverage = scanner.Coverage{Complete: true}
 
 	emitProgress(request, ProgressUpdate{
 		Phase:      ProgressPhaseListingTags,
@@ -298,22 +367,14 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 
 	groups := make(map[string]*targetGroup)
 	for _, tag := range tags {
-		emitProgress(request, ProgressUpdate{
-			Phase:         ProgressPhaseResolvingTags,
-			Repository:    request.Reference.Repository,
-			TagsCompleted: result.TagsResolved + result.TagsFailed,
-			TagsTotal:     result.TagsEnumerated,
-			TagsFailed:    result.TagsFailed,
-			CurrentTag:    tag,
-			Message:       "Resolving tag digest",
-		})
+		emitProgress(request, progressFromResult(request, result, ProgressPhaseResolvingTags, "Resolving tag digest", tag, ""))
 
 		resolved, err := request.Registry.ResolveManifest(ctx, request.Reference.Repository, tag)
 		if err != nil {
 			result.TagsFailed++
 			result.TagResults = append(result.TagResults, TagResult{
 				Tag:    tag,
-				Status: "failed",
+				Status: TagStatusFailed,
 				Error:  err.Error(),
 			})
 			if mustPreserveScanError(err) || limits.IsExceeded(err) {
@@ -326,7 +387,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			result.TagsFailed++
 			result.TagResults = append(result.TagResults, TagResult{
 				Tag:    tag,
-				Status: "failed",
+				Status: TagStatusFailed,
 				Error:  "resolved digest is empty",
 			})
 			continue
@@ -338,7 +399,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			Tag:             tag,
 			RootDigest:      resolved.Digest,
 			TargetReference: targetReference,
-			Status:          "resolved",
+			Status:          TagStatusResolved,
 		})
 
 		group, ok := groups[resolved.Digest]
@@ -371,13 +432,20 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
-	for _, group := range groupList {
+	// stopEarly records every target the sweep did not reach so the per-target
+	// accounting and tag_results describe the whole repository, then finalizes.
+	stopEarly := func(from int, cause error) {
+		markUnscannedTargets(&result, request, groupList[from:], cause)
+		finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+	}
+	for index, group := range groupList {
 		findingsRetained := len(allDetailedFindings) + len(allSuppressedDetailedFindings)
 		rawBytesRetained := detailedRawBytes(allDetailedFindings) + detailedRawBytes(allSuppressedDetailedFindings)
 		if request.MaxFindings > 0 && findingsRetained >= request.MaxFindings {
-			result.Diagnostics = append(result.Diagnostics, maxFindingsDiagnostic(request.MaxFindings, findingsRetained, group.digest))
+			diagnostic := maxFindingsDiagnostic(request.MaxFindings, findingsRetained, group.digest)
+			result.Diagnostics = append(result.Diagnostics, diagnostic)
 			result.Coverage.Complete = false
-			finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+			stopEarly(index, errors.New(diagnostic.Message))
 			return result, newIncompleteError(result, nil)
 		}
 		scanReference := request.Reference.WithDigest(group.digest)
@@ -386,6 +454,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			tagsTotal:        result.TagsEnumerated,
 			tagsFailed:       result.TagsFailed,
 			targetsCompleted: result.CompletedTargetCount,
+			targetsPartial:   result.PartialTargetCount,
 			targetsFailed:    result.FailedTargetCount,
 			targetsTotal:     result.TargetCount,
 			currentTag:       firstTag(group.tags),
@@ -395,41 +464,28 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			rawBytesRetained: rawBytesRetained,
 		})
 		targetResult := targetResultFromScanResult(scanReference, scanResult, group.tags)
+		result.ManifestCount += scanResult.ManifestCount
+		result.CompletedManifestCount += scanResult.CompletedManifestCount
+		result.FailedManifestCount += scanResult.FailedManifestCount
+		allDetailedFindings = append(allDetailedFindings, scanResult.DetailedFindings...)
+		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, scanResult.SuppressedDetailedFindings...)
+		result.Coverage = mergeCoverage(result.Coverage, scanResult.Coverage)
+		result.Diagnostics = append(result.Diagnostics, scanResult.Diagnostics...)
 		if err != nil {
 			targetResult.Error = err.Error()
 			result.Targets = append(result.Targets, targetResult)
+			tagStatus := TagStatusFailed
 			if scanResult.CompletedManifestCount > 0 {
 				result.PartialTargetCount++
+				tagStatus = TagStatusPartial
 			} else {
 				result.FailedTargetCount++
 			}
-			result.ManifestCount += scanResult.ManifestCount
-			result.CompletedManifestCount += scanResult.CompletedManifestCount
-			result.FailedManifestCount += scanResult.FailedManifestCount
-			allDetailedFindings = append(allDetailedFindings, scanResult.DetailedFindings...)
-			allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, scanResult.SuppressedDetailedFindings...)
-			result.Coverage = mergeCoverage(result.Coverage, scanResult.Coverage)
-			result.Diagnostics = append(result.Diagnostics, scanResult.Diagnostics...)
-			emitProgress(request, ProgressUpdate{
-				Phase:            ProgressPhaseTargetFailed,
-				Repository:       request.Reference.Repository,
-				TagsCompleted:    result.TagsResolved,
-				TagsTotal:        result.TagsEnumerated,
-				TagsFailed:       result.TagsFailed,
-				TargetsCompleted: result.CompletedTargetCount,
-				TargetsFailed:    result.FailedTargetCount,
-				TargetsTotal:     result.TargetCount,
-				FindingsFound:    len(allDetailedFindings),
-				CurrentTag:       firstTag(group.tags),
-				CurrentReference: scanReference.CanonicalString(""),
-				Message:          err.Error(),
-			})
-			if limits.IsExceeded(err) {
-				finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
-				return result, err
-			}
-			if mustPreserveScanError(err) {
-				finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+			setTagStatus(&result, group.tags, tagStatus, err.Error())
+			result.TotalFindings = len(allDetailedFindings)
+			emitProgress(request, progressFromResult(request, result, ProgressPhaseTargetFailed, err.Error(), firstTag(group.tags), scanReference.CanonicalString("")))
+			if limits.IsExceeded(err) || mustPreserveScanError(err) {
+				stopEarly(index+1, err)
 				return result, err
 			}
 			continue
@@ -438,57 +494,68 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 		result.Targets = append(result.Targets, targetResult)
 		if scanResult.Status == scanner.ResultStatusPartial {
 			result.PartialTargetCount++
+			setTagStatus(&result, group.tags, TagStatusPartial, "")
 		} else {
 			result.CompletedTargetCount++
+			setTagStatus(&result, group.tags, TagStatusScanned, "")
 		}
-		result.ManifestCount += scanResult.ManifestCount
-		result.CompletedManifestCount += scanResult.CompletedManifestCount
-		result.FailedManifestCount += scanResult.FailedManifestCount
-		allDetailedFindings = append(allDetailedFindings, scanResult.DetailedFindings...)
-		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, scanResult.SuppressedDetailedFindings...)
-		result.Coverage = mergeCoverage(result.Coverage, scanResult.Coverage)
-		result.Diagnostics = append(result.Diagnostics, scanResult.Diagnostics...)
-		if hasDiagnosticCode(scanResult.Diagnostics, "max_findings_exceeded") || hasDiagnosticCode(scanResult.Diagnostics, "max_raw_finding_bytes_exceeded") {
-			finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+		if hasDiagnosticCode(scanResult.Diagnostics, "max_findings_exceeded") {
+			stopEarly(index+1, errors.New("scan reached the max findings limit"))
 			return result, newIncompleteError(result, nil)
 		}
-		emitProgress(request, ProgressUpdate{
-			Phase:            ProgressPhaseTargetDone,
-			Repository:       request.Reference.Repository,
-			TagsCompleted:    result.TagsResolved,
-			TagsTotal:        result.TagsEnumerated,
-			TagsFailed:       result.TagsFailed,
-			TargetsCompleted: result.CompletedTargetCount,
-			TargetsFailed:    result.FailedTargetCount,
-			TargetsTotal:     result.TargetCount,
-			FindingsFound:    len(allDetailedFindings),
-			CurrentTag:       firstTag(group.tags),
-			CurrentReference: scanResult.ResolvedReference,
-			Message:          "Target scan complete",
-		})
+		result.TotalFindings = len(allDetailedFindings)
+		emitProgress(request, progressFromResult(request, result, ProgressPhaseTargetDone, "Target scan complete", firstTag(group.tags), scanResult.ResolvedReference))
 	}
 
 	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
 	if result.CompletedTargetCount+result.PartialTargetCount == 0 {
 		return result, allRepositoryTargetsFailedError(result.Targets)
 	}
-	emitProgress(request, ProgressUpdate{
-		Phase:            ProgressPhaseCompleted,
-		Repository:       request.Reference.Repository,
-		TagsCompleted:    result.TagsResolved,
-		TagsTotal:        result.TagsEnumerated,
-		TagsFailed:       result.TagsFailed,
-		TargetsCompleted: result.CompletedTargetCount,
-		TargetsFailed:    result.FailedTargetCount,
-		TargetsTotal:     result.TargetCount,
-		FindingsFound:    result.TotalFindings,
-		Message:          "Repository scan complete",
-	})
+	emitProgress(request, progressFromResult(request, result, ProgressPhaseCompleted, "Repository scan complete", "", ""))
 
 	if result.Status != ResultStatusCompleted {
 		return result, newIncompleteError(result, nil)
 	}
 	return result, nil
+}
+
+// setTagStatus records the outcome of a target on every tag that resolved to
+// it. An empty message keeps the tag's existing error text.
+func setTagStatus(result *Result, tags []string, status TagStatus, message string) {
+	for index := range result.TagResults {
+		if !slices.Contains(tags, result.TagResults[index].Tag) {
+			continue
+		}
+		result.TagResults[index].Status = status
+		if message != "" {
+			result.TagResults[index].Error = message
+		}
+	}
+}
+
+// markUnscannedTargets appends a failed TargetResult for every target a sweep
+// stopped before reaching and marks their tags skipped, so target_count always
+// equals completed + partial + failed and no tag stays "resolved".
+func markUnscannedTargets(result *Result, request Request, remaining []targetGroup, cause error) {
+	reason := "not scanned: the sweep stopped before this target"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		reason += ": " + cause.Error()
+	}
+	for _, group := range remaining {
+		reference := request.Reference.WithDigest(group.digest)
+		result.Targets = append(result.Targets, TargetResult{
+			Status:          ResultStatusFailed,
+			Reference:       reference.CanonicalString(""),
+			Tags:            slices.Clone(group.tags),
+			RequestedDigest: group.digest,
+			Error:           reason,
+		})
+		result.FailedTargetCount++
+		setTagStatus(result, group.tags, TagStatusSkipped, reason)
+	}
+	if len(remaining) > 0 {
+		result.Coverage.Complete = false
+	}
 }
 
 func detailedRawBytes(items []findings.DetailedFinding) int64 {
@@ -524,6 +591,7 @@ type progressState struct {
 	tagsTotal        int
 	tagsFailed       int
 	targetsCompleted int
+	targetsPartial   int
 	targetsFailed    int
 	targetsTotal     int
 	currentTag       string
@@ -557,6 +625,11 @@ func scanTarget(ctx context.Context, request Request, reference manifest.Referen
 		ConfigTimeout:      request.ConfigTimeout,
 		BlobTimeout:        request.BlobTimeout,
 		Progress: func(update scanner.ProgressUpdate) {
+			// The scanner's own completion is reported by the jobs layer as one
+			// target_done (or completed) update, so it is not forwarded twice.
+			if update.Phase == scanner.ProgressPhaseCompleted {
+				return
+			}
 			emitProgress(request, ProgressUpdate{
 				Phase:                 mapScannerPhase(update.Phase),
 				Repository:            request.Reference.Repository,
@@ -564,6 +637,7 @@ func scanTarget(ctx context.Context, request Request, reference manifest.Referen
 				TagsTotal:             state.tagsTotal,
 				TagsFailed:            state.tagsFailed,
 				TargetsCompleted:      state.targetsCompleted,
+				TargetsPartial:        state.targetsPartial,
 				TargetsFailed:         state.targetsFailed,
 				TargetsTotal:          state.targetsTotal,
 				FindingsFound:         state.findingsBefore + update.FindingsFound,
@@ -610,15 +684,11 @@ func firstTag(tags []string) string {
 	return tags[0]
 }
 
-func mapScannerPhase(phase scanner.ProgressPhase) ProgressPhase {
-	switch phase {
-	case scanner.ProgressPhaseManifestFailed:
-		return ProgressPhaseTargetFailed
-	case scanner.ProgressPhaseCompleted:
-		return ProgressPhaseTargetDone
-	default:
-		return ProgressPhaseScanning
-	}
+// mapScannerPhase keeps per-manifest scanner events in the scanning phase: a
+// failed manifest does not mean the target failed (it may finish partial), and
+// the jobs layer reports the target outcome itself.
+func mapScannerPhase(scanner.ProgressPhase) ProgressPhase {
+	return ProgressPhaseScanning
 }
 
 func sortTargetResults(items []TargetResult) {

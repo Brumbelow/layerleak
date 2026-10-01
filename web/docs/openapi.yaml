@@ -742,10 +742,15 @@ components:
       additionalProperties: false
       required:
         - result_schema_version
+        - scanned_at
+        - scanner
         - status
         - requested_reference
         - repository
         - mode
+        - tags_enumerated
+        - tags_resolved
+        - tags_failed
         - target_count
         - completed_target_count
         - failed_target_count
@@ -757,11 +762,33 @@ components:
         - findings
         - total_findings
         - unique_fingerprints
+        - suppressed_findings_count
+        - suppressed_unique_fingerprints
         - coverage
       properties:
         result_schema_version:
           type: integer
           minimum: 1
+          description: >-
+            Version of the result shape. Stored scans return the version they
+            were produced with; consumers branch on it. Version 2 (3.0.0)
+            added `scanned_at`, `scanner`, typed `tag_results.status`,
+            always-present counters and omitted empty `platform` objects. The
+            full schema is published at `schemas/result-v2.schema.json`.
+        scanned_at:
+          type: string
+          format: date-time
+          description: UTC time the scan started, RFC 3339.
+        scanner:
+          type: object
+          additionalProperties: false
+          required: [name, version]
+          properties:
+            name:
+              type: string
+              enum: [layerleak]
+            version:
+              type: string
         status:
           $ref: "#/components/schemas/ResultStatus"
         requested_reference:
@@ -857,10 +884,13 @@ components:
         status:
           type: string
           description: >-
-            `scanned` when the tag's manifest was scanned, `resolved` when it
-            shared a digest with another tag that was scanned, `failed` when
-            it could not be resolved or scanned.
-          enum: [scanned, resolved, failed]
+            `scanned` when every selected manifest of the tag's target
+            completed, `partial` when some did, `failed` when the tag could
+            not be resolved or its target failed, `skipped` when the sweep
+            stopped before reaching the tag's target, and `resolved` when the
+            tag resolved to a digest the sweep had not scanned yet (only in
+            results of sweeps that stopped during resolution).
+          enum: [scanned, partial, failed, skipped, resolved]
         error:
           $ref: "#/components/schemas/SanitizedError"
     TargetResult:

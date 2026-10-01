@@ -166,7 +166,7 @@ func buildTagRecords(tagResults []jobs.TagResult, targets []storage.TargetRecord
 	}
 
 	for _, item := range tagResults {
-		if item.Status != "failed" {
+		if item.Status != jobs.TagStatusFailed {
 			continue
 		}
 		appendTag(storage.TagRecord{
@@ -231,7 +231,7 @@ func firstNonEmpty(values ...string) string {
 func normalizedPublicResult(reference manifest.Reference, result jobs.Result) jobs.Result {
 	publicResult := result
 	if publicResult.ResultSchemaVersion <= 0 {
-		publicResult.ResultSchemaVersion = 1
+		publicResult.ResultSchemaVersion = jobs.ResultSchemaVersion
 	}
 	if strings.TrimSpace(publicResult.RequestedReference) == "" {
 		publicResult.RequestedReference = reference.Original

@@ -129,10 +129,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 
 			service := scanservice.New(cfg, store)
 			outcome, err := service.ScanAndSave(ctx, scanservice.Request{
-				Reference: ref,
-				Platform:  platform,
-				AllTags:   allTags,
-				Logger:    logger,
+				Reference:      ref,
+				Platform:       platform,
+				AllTags:        allTags,
+				ScannerVersion: effectiveVersion(),
+				Logger:         logger,
 				Progress: func(update jobs.ProgressUpdate) {
 					if err := progress.UpdateFromJob(update); err != nil {
 						logger.Debug("progress update failed", "error", err)
@@ -191,6 +192,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					tagsFailed:       result.TagsFailed,
 					tagsTotal:        result.TagsEnumerated,
 					targetsCompleted: result.CompletedTargetCount,
+					targetsPartial:   result.PartialTargetCount,
 					targetsFailed:    result.FailedTargetCount,
 					targetsTotal:     result.TargetCount,
 					findingsFound:    result.TotalFindings,
@@ -224,6 +226,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					tagsFailed:       result.TagsFailed,
 					tagsTotal:        result.TagsEnumerated,
 					targetsCompleted: result.CompletedTargetCount,
+					targetsPartial:   result.PartialTargetCount,
 					targetsFailed:    result.FailedTargetCount,
 					targetsTotal:     result.TargetCount,
 					findingsFound:    result.TotalFindings,

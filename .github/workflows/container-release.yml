@@ -948,6 +948,10 @@ jobs:
             sleep 1
           done
           curl --fail --silent http://127.0.0.1:18080/health
+          # The staged image was built with LAYERLEAK_VERSION set to the version
+          # it was first staged under: the candidate's version when a stable
+          # release promotes an accepted RC digest, otherwise this version.
+          test "$(curl --fail --silent http://127.0.0.1:18080/health | jq -r '.version')" = "${CANDIDATE_VERSION:-${RELEASE_VERSION}}"
 
           # API contract smoke: every response is a JSON envelope, including
           # 400/404/405, and the read endpoints answer against the real schema.

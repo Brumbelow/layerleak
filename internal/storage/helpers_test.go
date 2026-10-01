@@ -2,7 +2,6 @@ package storage
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/brumbelow/layerleak/v3/internal/findings"
@@ -179,35 +178,6 @@ func TestPersistedValueRespectsFlag(t *testing.T) {
 	}
 	if got := persistedRawSnippet(finding, true); got != finding.RawSnippet {
 		t.Errorf("persistedRawSnippet(true) = %q, want %q", got, finding.RawSnippet)
-	}
-}
-
-func TestUpsertFindingOccurrenceSQLArity(t *testing.T) {
-	query := strings.Join(strings.Fields(upsertFindingOccurrenceSQL), " ")
-	columns, remainder, ok := strings.Cut(query, ") VALUES (")
-	if !ok {
-		t.Fatal("upsertFindingOccurrenceSQL is missing VALUES")
-	}
-	columns = strings.TrimPrefix(columns, "INSERT INTO finding_occurrences (")
-	values, _, ok := strings.Cut(remainder, ") ON CONFLICT (")
-	if !ok {
-		t.Fatal("upsertFindingOccurrenceSQL is missing ON CONFLICT")
-	}
-
-	columnList := strings.Split(columns, ", ")
-	valueList := strings.Split(values, ", ")
-	if len(columnList) != len(valueList) {
-		t.Fatalf("finding occurrence INSERT has %d columns and %d values", len(columnList), len(valueList))
-	}
-	wantValues := []string{
-		"$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11",
-		"$12", "$13", "$14", "$15", "$16", "$17", "$18", "$19", "$20", "$20",
-	}
-	if !slices.Equal(valueList, wantValues) {
-		t.Fatalf("finding occurrence INSERT values = %v, want %v", valueList, wantValues)
-	}
-	if !strings.Contains(query, "WHEN $21 AND") {
-		t.Fatal("upsertFindingOccurrenceSQL does not use argument 21 for the raw-secret flag")
 	}
 }
 

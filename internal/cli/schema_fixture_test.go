@@ -79,14 +79,15 @@ func compareGolden(t *testing.T, path string, actual []byte) {
 // file and from image metadata, and diagnostics at both levels.
 func goldenOutcome() scanservice.Outcome {
 	const (
-		rootOne   = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-		rootTwo   = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-		amd64Man  = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
-		arm64Man  = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
-		layerOne  = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
-		fpToken   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		fpAWS     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		fpExample = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		rootOne     = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+		rootTwo     = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+		amd64Man    = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		arm64Man    = "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+		layerOne    = "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+		fpToken     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		fpAWS       = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		fpExample   = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		fpBaselined = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	)
 	amd64 := manifest.Platform{OS: "linux", Architecture: "amd64"}
 	arm64 := manifest.Platform{OS: "linux", Architecture: "arm64", Variant: "v8"}
@@ -121,6 +122,19 @@ func goldenOutcome() scanservice.Outcome {
 			MatchStart: 18, MatchEnd: 29, PresentInFinalImage: true,
 		},
 		Value: "synthetic-raw-example", RawSnippet: "url: https://user:synthetic-raw-example@example.test/", SourceLocation: "file:test/fixtures/config.yaml:3",
+	}
+	// A finding the caller accepted through --baseline: it keeps every field of
+	// the actionable finding it was, with the baselined disposition and no
+	// disposition_reason, and is listed among the suppressed findings.
+	baselinedFinding := findings.DetailedFinding{
+		Finding: findings.Finding{
+			DetectorName: "keyword_entropy", Confidence: "low", Disposition: findings.DispositionBaselined,
+			SourceType: findings.SourceTypeFileFinal, ManifestDigest: amd64Man, Platform: amd64,
+			FilePath: "app/config.yaml", LayerDigest: layerOne, LineNumber: 7,
+			RedactedValue: "9f2********", Fingerprint: fpBaselined, ContextSnippet: "legacy_api_secret: 9f2********",
+			MatchStart: 19, MatchEnd: 51, PresentInFinalImage: true,
+		},
+		Value: "synthetic-raw-baselined", RawSnippet: "legacy_api_secret: synthetic-raw-baselined", SourceLocation: "file:app/config.yaml:7",
 	}
 	oversize := scanner.Diagnostic{Code: "files_skipped_oversize", Scope: "manifest", Subject: amd64Man, Message: "1 file(s) exceeded the per-file scan limit", Limit: 1048576, Observed: 1}
 	unsupported := scanner.Diagnostic{Code: "manifest_unsupported", Scope: "manifest", Subject: arm64Man, Message: "layer uses a non-distributable (foreign) media type and cannot be scanned"}
@@ -161,10 +175,10 @@ func goldenOutcome() scanservice.Outcome {
 			},
 		},
 		DetailedFindings:           []findings.DetailedFinding{awsFinding, tokenFinding},
-		SuppressedDetailedFindings: []findings.DetailedFinding{exampleFinding},
+		SuppressedDetailedFindings: []findings.DetailedFinding{exampleFinding, baselinedFinding},
 		Findings:                   []findings.Finding{awsFinding.Finding, tokenFinding.Finding},
-		SuppressedFindings:         []findings.Finding{exampleFinding.Finding},
-		TotalFindings:              2, UniqueFingerprints: 2, SuppressedFindingsCount: 1, SuppressedUniqueFingerprints: 1,
+		SuppressedFindings:         []findings.Finding{exampleFinding.Finding, baselinedFinding.Finding},
+		TotalFindings:              2, UniqueFingerprints: 2, SuppressedFindingsCount: 2, SuppressedUniqueFingerprints: 2,
 		Coverage:    coverage(false, 52),
 		Diagnostics: []scanner.Diagnostic{oversize, unsupported},
 	}

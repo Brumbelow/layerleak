@@ -225,12 +225,32 @@
         "match_start": 18,
         "match_end": 29,
         "present_in_final_image": true
+      },
+      {
+        "detector_name": "keyword_entropy",
+        "confidence": "low",
+        "disposition": "baselined",
+        "source_type": "file_final",
+        "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "platform": {
+          "os": "linux",
+          "architecture": "amd64"
+        },
+        "file_path": "app/config.yaml",
+        "layer_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "line_number": 7,
+        "redacted_value": "9f2********",
+        "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "context_snippet": "legacy_api_secret: 9f2********",
+        "match_start": 19,
+        "match_end": 51,
+        "present_in_final_image": true
       }
     ],
     "total_findings": 2,
     "unique_fingerprints": 2,
-    "suppressed_findings_count": 1,
-    "suppressed_unique_fingerprints": 1,
+    "suppressed_findings_count": 2,
+    "suppressed_unique_fingerprints": 2,
     "coverage": {
       "complete": false,
       "layers_seen": 2,
@@ -324,6 +344,27 @@
       "match_end": 29,
       "present_in_final_image": true,
       "source_location": "file:test/fixtures/config.yaml:3"
+    },
+    {
+      "detector_name": "keyword_entropy",
+      "confidence": "low",
+      "disposition": "baselined",
+      "source_type": "file_final",
+      "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "file_path": "app/config.yaml",
+      "layer_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "line_number": 7,
+      "redacted_value": "9f2********",
+      "fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "context_snippet": "legacy_api_secret: 9f2********",
+      "match_start": 19,
+      "match_end": 51,
+      "present_in_final_image": true,
+      "source_location": "file:app/config.yaml:7"
     }
   ],
   "persistence": {

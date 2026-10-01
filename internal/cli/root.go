@@ -85,6 +85,7 @@ func newRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newScanCmd())
+	cmd.AddCommand(newBaselineCmd())
 	cmd.AddCommand(newDetectorsCmd())
 	cmd.AddCommand(newVersionCmd())
 

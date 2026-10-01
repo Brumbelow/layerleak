@@ -38,6 +38,15 @@ const (
 	// to preserve schema compatibility with existing scan_runs and
 	// finding_occurrences rows.
 	DispositionExample Disposition = "example"
+	// DispositionBaselined marks an actionable finding the caller accepted
+	// through a baseline file (`layerleak scan --baseline`), keyed on its
+	// fingerprint. It is a per-caller view applied by the CLI after the scan:
+	// baselined findings are reported among the suppressed findings on
+	// stdout, in the scan record and in SARIF, and never drive exit code 2.
+	// The database and the HTTP API keep the scanner's disposition because
+	// migration 0004 constrains finding_occurrences.disposition to
+	// actionable and example.
+	DispositionBaselined Disposition = "baselined"
 
 	DispositionReasonNone              DispositionReason = ""
 	DispositionReasonTestPath          DispositionReason = "test_path"

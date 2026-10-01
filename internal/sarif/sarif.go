@@ -49,6 +49,11 @@ type Options struct {
 	ExcludeSuppressed bool
 	// Rules lists detectors to describe even when they produced no result.
 	Rules []Rule
+	// Justification, when set, supplies the suppression justification for a
+	// non-actionable finding (for example the reason recorded in the
+	// caller's baseline file). An empty return keeps the default text. It
+	// must return redacted, caller-controlled text only.
+	Justification func(item findings.Finding) string
 }
 
 // Log is the top-level SARIF document.
@@ -181,7 +186,7 @@ func FromResult(result jobs.Result, options Options) Log {
 	rules, index := buildRules(options.Rules, items)
 	results := make([]Result, 0, len(items))
 	for _, item := range items {
-		results = append(results, encodeFinding(item, index[item.DetectorName]))
+		results = append(results, encodeFinding(item, index[item.DetectorName], options.Justification))
 	}
 
 	run := Run{
@@ -258,7 +263,7 @@ func buildRules(catalog []Rule, items []findings.Finding) ([]ReportingDescriptor
 	return rules, index
 }
 
-func encodeFinding(item findings.Finding, ruleIndex int) Result {
+func encodeFinding(item findings.Finding, ruleIndex int, justify func(findings.Finding) string) Result {
 	result := Result{
 		RuleID:              item.DetectorName,
 		RuleIndex:           ruleIndex,
@@ -268,14 +273,40 @@ func encodeFinding(item findings.Finding, ruleIndex int) Result {
 		PartialFingerprints: map[string]string{FingerprintKey: item.Fingerprint},
 		Properties:          findingProperties(item),
 	}
-	if item.Disposition != "" && item.Disposition != findings.DispositionActionable {
-		justification := "layerleak classified this finding as " + string(item.Disposition)
-		if item.DispositionReason != "" {
-			justification += " (" + string(item.DispositionReason) + ")"
-		}
+	if justification, suppressed := suppressionJustification(item, justify); suppressed {
 		result.Suppressions = []Suppression{{Kind: "external", Status: "accepted", Justification: justification}}
 	}
 	return result
+}
+
+// suppressionJustification reports whether item is suppressed and why. The
+// switch is exhaustive over findings.Disposition: a disposition this build
+// does not know is still reported as a suppression so a consumer never
+// mistakes it for an actionable result.
+func suppressionJustification(item findings.Finding, justify func(findings.Finding) string) (string, bool) {
+	var justification string
+	switch item.Disposition {
+	case findings.DispositionActionable, "":
+		return "", false
+	case findings.DispositionExample:
+		justification = "layerleak classified this finding as example"
+		if item.DispositionReason != "" {
+			justification += " (" + string(item.DispositionReason) + ")"
+		}
+	case findings.DispositionBaselined:
+		justification = "accepted by the caller's baseline file"
+	default:
+		justification = "layerleak classified this finding as " + string(item.Disposition)
+		if item.DispositionReason != "" {
+			justification += " (" + string(item.DispositionReason) + ")"
+		}
+	}
+	if justify != nil {
+		if custom := strings.TrimSpace(justify(item)); custom != "" {
+			justification = custom
+		}
+	}
+	return justification, true
 }
 
 // LevelForConfidence maps detector confidence to a SARIF level.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/config"
 	"github.com/brumbelow/layerleak/v3/internal/detectors"
@@ -47,6 +48,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var username string
 	var passwordStdin bool
 	var logFormat string
+	var baselinePath string
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
@@ -88,6 +90,20 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			credential, err := credentialFromFlags(username, passwordStdin, cmd.InOrStdin())
 			if err != nil {
 				return err
+			}
+			// The baseline is explicit (--baseline only; no implicit
+			// .layerleakignore) and validated before the scan starts.
+			var accepted *baseline
+			if strings.TrimSpace(baselinePath) != "" {
+				accepted, err = loadBaseline(baselinePath, time.Now())
+				if err != nil {
+					return exitError{code: exitCodeFailure, message: err.Error(), cause: err}
+				}
+				for _, warning := range accepted.Warnings {
+					if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
+						return err
+					}
+				}
 			}
 
 			cfg, err := config.Load()
@@ -199,7 +215,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					})
 				},
 			})
-			result := outcome.Result
+			// The database write inside ScanAndSave saw the scanner's
+			// dispositions; everything from here on (stdout, the scan record,
+			// SARIF, the exit code) is the caller's baselined view.
+			result, _ := applyBaseline(outcome.Result, accepted)
+			outcome.Result = result
 			scanErr := outcome.ScanError
 			saveErr := outcome.SaveError
 			operationErr := err
@@ -325,7 +345,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				case "summary":
 					return renderSummary(out, result)
 				case "sarif":
-					return renderSARIF(out, scanservice.PublicResult(result))
+					return renderSARIF(out, scanservice.PublicResult(result), accepted)
 				default:
 					return fmt.Errorf("unsupported output format: %s", outputFormat)
 				}
@@ -352,6 +372,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	cmd.Flags().BoolVar(&allTags, "all-tags", false, "Enumerate and scan every public tag in a bare repository reference")
 	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed (otherwise exit code 3)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "low", "Lowest confidence of an actionable finding that produces exit code 2: low, medium, high, or none to report only")
+	cmd.Flags().StringVar(&baselinePath, "baseline", "", "Baseline file (written by layerleak baseline create) whose fingerprints are reported with disposition baselined and never produce exit code 2. Nothing is read implicitly.")
 	cmd.Flags().StringVar(&progressSetting, "progress", string(progressModeAuto), "Progress mode: auto, tty, plain, or off")
 	cmd.Flags().StringVar(&logFormat, "log-format", "", "Log record format on stderr: json or text. Overrides LAYERLEAK_LOG_FORMAT (default json).")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory for the scan record. Overrides LAYERLEAK_FINDINGS_DIR; the default is ./findings under the working directory.")
@@ -389,12 +410,17 @@ func parseOutputFormat(value string) (string, error) {
 // renderSARIF writes the result as a SARIF 2.1.0 log. The rule list comes
 // from the default detector catalog so every detector is described (with the
 // catalog description) even when it produced no result, and
-// tool.driver.version is this binary's version.
-func renderSARIF(out io.Writer, result jobs.Result) error {
-	return sarif.Encode(out, sarif.FromResult(result, sarif.Options{
+// tool.driver.version is this binary's version. Baselined findings carry
+// the baseline entry's reason as their suppression justification.
+func renderSARIF(out io.Writer, result jobs.Result, accepted *baseline) error {
+	options := sarif.Options{
 		ToolVersion: effectiveVersion(),
 		Rules:       sarifRules(detectors.Default().Describe()),
-	}))
+	}
+	if accepted != nil {
+		options.Justification = accepted.justification
+	}
+	return sarif.Encode(out, sarif.FromResult(result, options))
 }
 
 func sarifRules(catalog []detectors.Info) []sarif.Rule {
@@ -543,7 +569,10 @@ type summaryRow struct {
 	value any
 }
 
+// summaryRows lists the counters. suppressed_findings_count includes the
+// baselined findings; the summary shows the two groups separately.
 func summaryRows(result jobs.Result) []summaryRow {
+	baselined := countBaselined(result.SuppressedFindings)
 	rows := []summaryRow{
 		{"Requested Reference", sanitizeProgressValue(result.RequestedReference)},
 		{"Repository", sanitizeProgressValue(result.Repository)},
@@ -575,7 +604,8 @@ func summaryRows(result jobs.Result) []summaryRow {
 		summaryRow{"Files Skipped Oversize", result.Coverage.FilesSkippedOversize},
 		summaryRow{"Total Findings", result.TotalFindings},
 		summaryRow{"Unique Fingerprints", result.UniqueFingerprints},
-		summaryRow{"Suppressed Example Findings", result.SuppressedFindingsCount},
+		summaryRow{"Suppressed Example Findings", max(result.SuppressedFindingsCount-baselined, 0)},
+		summaryRow{"Baselined Findings", baselined},
 	)
 }
 

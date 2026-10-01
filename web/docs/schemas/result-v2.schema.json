@@ -82,8 +82,8 @@
     "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
     "disposition": {
       "type": "string",
-      "enum": ["actionable", "example"],
-      "description": "actionable findings count toward total_findings and the exit code; example findings are placeholders, fixtures or demo values reported separately."
+      "enum": ["actionable", "example", "baselined"],
+      "description": "actionable findings count toward total_findings and the exit code; example findings are placeholders, fixtures or demo values reported separately; baselined findings were actionable but are accepted by the caller's baseline file (layerleak scan --baseline) and are reported among the suppressed findings. baselined appears only in CLI output and scan records: the database and the HTTP API keep the scanner's disposition."
     },
     "dispositionReason": {
       "type": "string",

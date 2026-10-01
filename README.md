@@ -120,10 +120,10 @@ unless the rebuild reproduces the candidate's binaries byte for byte, so
 ### GitHub Action
 
 The repository root is a composite action that downloads the archive for the
-runner, verifies it as above (checksum and attestation everywhere, the cosign
-bundle on Linux x86_64 runners with the cosign release pinned in
-`scripts/release-tools.sh`) and runs `layerleak scan`. Pin it to a release tag;
-the matching archives are downloaded from that release:
+runner, verifies it as above (checksum, the checksums file's cosign bundle with
+the cosign release pinned in `scripts/release-tools.sh`, and the archive
+attestation) and runs `layerleak scan`. Pin it to a release tag; the matching
+archives are downloaded from that release:
 
 ```yaml
 name: Image secrets
@@ -136,7 +136,7 @@ jobs:
       - id: scan
         uses: brumbelow/layerleak@v3.0.0
         with: { image: "ghcr.io/${{ github.repository }}:${{ github.sha }}", fail-on: none }
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         if: ${{ always() && steps.scan.outputs.sarif-file != '' }}
         with: { sarif_file: "${{ steps.scan.outputs.sarif-file }}" }
 ```
@@ -150,6 +150,7 @@ jobs:
 | `allow-partial` | `false` | Passes `--allow-partial`. |
 | `platform` | every `linux` manifest | Passed to `--platform`. |
 | `output-file` | `$RUNNER_TEMP/layerleak/results.<ext>` | Where the formatted result is written. |
+| `extra-args` | empty | Further `layerleak scan` flags, split on whitespace and appended last (for example `--all-tags --max-repository-tags 50`). |
 
 Outputs: `exit-code` (the CLI exit code, see the table under "Scan images"),
 `result-file` (the written file) and `sarif-file` (the same path when `format`
@@ -157,8 +158,8 @@ is `sarif`, otherwise empty). The step fails exactly when the CLI exits
 non-zero, so `fail-on: none` plus `if: always()` on the upload step gives a
 report-only scan. The action never prints findings; only the redacted
 `summary` format is echoed to the log, and the scan runs with `--no-artifacts`.
-It needs `curl`, `tar`/`unzip` and the GitHub CLI, all present on GitHub-hosted
-runners.
+It needs `curl`, `tar` (or `unzip`/`7z` on Windows) and the GitHub CLI, all
+present on GitHub-hosted Linux, macOS and Windows runners.
 
 Build from source:
 

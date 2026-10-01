@@ -121,7 +121,9 @@ func decodeBaseline(reader io.Reader) (baselineDocument, error) {
 	if err := probe.Decode(&version); err != nil {
 		return baselineDocument{}, fmt.Errorf("not a JSON object: %w", err)
 	}
-	if probe.More() {
+	// Decoder.More reports false before a stray '}' or ']', so check the bytes
+	// after the first value directly: only JSON whitespace may follow it.
+	if len(bytes.Trim(data[probe.InputOffset():], " \t\r\n")) != 0 {
 		return baselineDocument{}, errors.New("malformed: trailing content after the document")
 	}
 	if version.BaselineSchemaVersion == nil {

@@ -375,7 +375,9 @@ components:
         The scan exceeded a configured resource limit (`scan_limit_exceeded`)
         or could not cover every selected manifest (`scan_incomplete`). When
         useful work completed, `scan_run_id` and a persisted redacted `result`
-        accompany the error.
+        accompany the error. A `scan_limit_exceeded` message has the fixed
+        form `the scan exceeded the configured <kind> limit of <limit>` and
+        the error object carries `limit_kind` and `limit`.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -524,8 +526,26 @@ components:
           examples: [invalid_request]
         message:
           type: string
+          description: Fixed, neutral text; never upstream error chains, reference strings or request bodies.
         request_id:
           type: string
+        limit_kind:
+          type: string
+          description: >-
+            Present with `scan_limit_exceeded` only: the exceeded bound.
+          enum:
+            - layer_bytes
+            - layer_entries
+            - manifest_bytes
+            - config_bytes
+            - tag_response_bytes
+            - repository_tags
+            - repository_targets
+        limit:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Present with `scan_limit_exceeded` only; the configured value of `limit_kind`.
 
     ScanRequest:
       type: object

@@ -66,6 +66,9 @@ type errorResponse struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	RequestID string `json:"request_id,omitempty"`
+	// LimitKind and Limit accompany scan_limit_exceeded only.
+	LimitKind string `json:"limit_kind,omitempty"`
+	Limit     int64  `json:"limit,omitempty"`
 }
 
 type scanRequest struct {
@@ -348,6 +351,8 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 			ScanRunID: outcome.ScanRunID,
 			Error:     newErrorResponse(writer, failure.code, failure.message),
 		}
+		response.Error.LimitKind = failure.limitKind
+		response.Error.Limit = failure.limit
 		if hasResult(outcome.Result) {
 			response.Result = resultJSON
 		}
@@ -732,6 +737,8 @@ type scanFailure struct {
 	code       string
 	message    string
 	retryAfter string
+	limitKind  string
+	limit      int64
 }
 
 // registryRateLimitRetryAfter is the Retry-After hint for 503
@@ -763,7 +770,7 @@ func classifyScanError(scanCtx, requestCtx context.Context, err error) scanFailu
 		}
 		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: "the scan did not cover every selected manifest"}
 	case limits.IsExceeded(err):
-		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_limit_exceeded", message: err.Error()}
+		return limitExceededFailure(err)
 	case registry.IsNotFound(err):
 		return scanFailure{status: http.StatusNotFound, code: "image_not_found", message: "the requested image was not found in the registry"}
 	case registry.IsRateLimited(err):
@@ -773,6 +780,29 @@ func classifyScanError(scanCtx, requestCtx context.Context, err error) scanFailu
 	default:
 		return scanFailure{status: http.StatusBadGateway, code: "scan_failed", message: "the registry scan could not be completed"}
 	}
+}
+
+// limitExceededFailure builds the scan_limit_exceeded response from the
+// typed limit alone. The wrapped chain names blobs, manifests and repositories
+// and changes with internal wording, so it never reaches the client.
+func limitExceededFailure(err error) scanFailure {
+	failure := scanFailure{
+		status:  http.StatusUnprocessableEntity,
+		code:    "scan_limit_exceeded",
+		message: "the scan exceeded a configured resource limit",
+	}
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok || exceeded == nil {
+		return failure
+	}
+	failure.limitKind = string(exceeded.Kind)
+	failure.limit = exceeded.Limit
+	kind := strings.ReplaceAll(strings.TrimSpace(string(exceeded.Kind)), "_", " ")
+	if kind == "" {
+		kind = "resource"
+	}
+	failure.message = fmt.Sprintf("the scan exceeded the configured %s limit of %d", kind, exceeded.Limit)
+	return failure
 }
 
 func hasResult(result jobs.Result) bool {

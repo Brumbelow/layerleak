@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 )
@@ -212,5 +213,59 @@ func TestHandleScanKeepsIncompleteOverRegistryCause(t *testing.T) {
 	errorObject, _ := decodeErrorBody(t, recorder.Body.Bytes())
 	if errorObject["code"] != "scan_incomplete" {
 		t.Fatalf("code = %v", errorObject["code"])
+	}
+}
+
+// TestHandleScanLimitExceededUsesFixedMessage pins API-26: the
+// scan_limit_exceeded message is built from the limit kind and value, never
+// from the wrapped error chain, and the additive limit fields are machine
+// readable.
+func TestHandleScanLimitExceededUsesFixedMessage(t *testing.T) {
+	scanner := &stubScanner{
+		outcome: scanservice.Outcome{ScanRunID: 42, Result: jobs.Result{RequestedReference: "library/app:latest", Status: jobs.ResultStatusFailed}},
+		err: scanErrorFor(fmt.Errorf("read config blob: %w", limits.NewExceeded(
+			limits.KindConfigBytes, 128, "config blob sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		))),
+	}
+	recorder := httptest.NewRecorder()
+	NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, newJSONScanRequest(`{"reference":"library/app:latest"}`))
+
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	errorObject, document := decodeErrorBody(t, recorder.Body.Bytes())
+	if errorObject["code"] != "scan_limit_exceeded" {
+		t.Fatalf("code = %v", errorObject["code"])
+	}
+	if errorObject["message"] != "the scan exceeded the configured config bytes limit of 128" {
+		t.Fatalf("message = %v", errorObject["message"])
+	}
+	if errorObject["limit_kind"] != "config_bytes" || errorObject["limit"] != json.Number("128") && errorObject["limit"] != float64(128) {
+		t.Fatalf("limit fields = %v / %v", errorObject["limit_kind"], errorObject["limit"])
+	}
+	if document["scan_run_id"] != float64(42) {
+		t.Fatalf("scan_run_id = %v", document["scan_run_id"])
+	}
+	body := recorder.Body.String()
+	for _, leaked := range []string{"read config blob", "config blob sha256", "bbbbbbbb"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("body leaked %q: %s", leaked, body)
+		}
+	}
+}
+
+// TestHandleScanNonLimitErrorsOmitLimitFields keeps the additive fields out of
+// every other error object.
+func TestHandleScanNonLimitErrorsOmitLimitFields(t *testing.T) {
+	scanner := &stubScanner{err: scanErrorFor(fmt.Errorf("synthetic upstream detail"))}
+	recorder := httptest.NewRecorder()
+	NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, newJSONScanRequest(`{"reference":"library/app:latest"}`))
+
+	errorObject, _ := decodeErrorBody(t, recorder.Body.Bytes())
+	if _, ok := errorObject["limit_kind"]; ok {
+		t.Fatalf("limit_kind present: %s", recorder.Body.String())
+	}
+	if _, ok := errorObject["limit"]; ok {
+		t.Fatalf("limit present: %s", recorder.Body.String())
 	}
 }

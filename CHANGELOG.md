@@ -489,6 +489,12 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   the `repository_targets` limit; `target_count` then reports the bound plus
   one and the tags that were not resolved appear in `tag_results` as
   `skipped` without a `root_digest`. Local sweeps are bounded the same way.
+- The documentation site describes 3.0.0 end to end, and its browser demo
+  replays a real `layerleak scan` of a synthetic OCI layout; a golden test
+  (`go test ./internal/cli -run TestDemoFixtureMatchesRealScan -update-demo`)
+  keeps the demo in step with the CLI, and the documentation validator now
+  checks the site and README variable tables against each other in both
+  directions.
 
 ### Security
 

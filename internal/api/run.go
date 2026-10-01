@@ -192,18 +192,7 @@ func Run() error {
 	}
 	defer func() { _ = store.Close() }()
 	if !cfg.PersistRawSecrets {
-		warningCtx, cancel := context.WithTimeout(context.Background(), cfg.APIReadinessTimeout)
-		counts, countErr := store.CountRawSecrets(warningCtx)
-		cancel()
-		if countErr != nil {
-			slog.Warn("could not inspect historical raw secret storage", "error_type", fmt.Sprintf("%T", countErr))
-		} else if counts.Total() > 0 {
-			slog.Warn(
-				"database still contains raw secret material from an earlier opt-in; run layerleak-purge-raw-secrets --confirm to remove it",
-				"finding_values", counts.FindingValues,
-				"occurrence_snippets", counts.OccurrenceSnippets,
-			)
-		}
+		warnAboutRawSecrets(store, cfg.DatabaseQueryTimeout, logger)
 	}
 
 	server := NewServer(scanservice.New(cfg, store), store, ServerOptions{
@@ -228,6 +217,31 @@ func Run() error {
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return server.ListenAndServe(signalCtx)
+}
+
+type rawSecretCounter interface {
+	CountRawSecrets(ctx context.Context) (storage.RawSecretCounts, error)
+}
+
+// warnAboutRawSecrets logs when the database still holds raw secret material
+// from an earlier opt-in. It is a startup inventory over the findings tables,
+// so it runs under the database query timeout rather than the readiness
+// probe budget; the probe budget is sized for a ping and a ledger lookup.
+func warnAboutRawSecrets(store rawSecretCounter, timeout time.Duration, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	counts, err := store.CountRawSecrets(ctx)
+	if err != nil {
+		logger.Warn("could not inspect historical raw secret storage", "error_type", fmt.Sprintf("%T", err))
+		return
+	}
+	if counts.Total() > 0 {
+		logger.Warn(
+			"database still contains raw secret material from an earlier opt-in; run layerleak-purge-raw-secrets --confirm to remove it",
+			"finding_values", counts.FindingValues,
+			"occurrence_snippets", counts.OccurrenceSnippets,
+		)
+	}
 }
 
 func newDefaultLogger(levelName string) (*slog.Logger, error) {

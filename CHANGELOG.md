@@ -183,6 +183,41 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - `FuzzDetectorSetScan`, `BenchmarkDefaultSetScan*` and the
   `internal/scanner/testdata/corpus` fixtures (real positives and discarded
   placeholders, vendor shapes stored base64-encoded) drive the detector tests.
+- Local image inputs: `layerleak scan` reads images from the filesystem with
+  `oci:<dir>[:<tag>][@<digest>]` (OCI image layout), `oci-archive:<file.tar>`
+  (a layout inside a tar) and `docker-archive:<file.tar>[:<repo>[:<tag>]]`
+  (`docker save` output); `--all-tags` enumerates the tags the source holds.
+  The source string is the `repository` of the result, record and database
+  row, `resolved_reference` carries the manifest digest, and platform policy,
+  limits, coverage, diagnostics, exit codes and schema versions are unchanged.
+  Every blob is verified against its descriptor digest and size, archives are
+  indexed once in memory under bounded entry counts and never extracted, entry
+  names with `..` or absolute paths make an archive unusable, links are never
+  followed and a layout directory is opened as an `os.Root`. Registry
+  credentials are refused for a local source (exit 1) and the HTTP API stays
+  registry-only (`400 invalid_request`).
+- `layerleak scan --baseline <file>` accepts reviewed findings by fingerprint
+  (`baseline_schema_version` 1 entries with `fingerprint`, optional
+  `detector`, `reason` and RFC 3339 `expires`). Matched actionable findings are
+  reported with the new `disposition: baselined` among `suppressed_findings`,
+  excluded from `total_findings` and `unique_fingerprints`, counted in the
+  suppressed counters, shown as "Baselined Findings" in the summary, written to
+  SARIF as accepted `external` suppressions carrying the reason, and never
+  produce exit code 2. Expired entries warn with a fingerprint prefix only;
+  malformed files exit 1 before the scan; nothing is read implicitly. The
+  baseline is a per-caller view: the database and the HTTP API keep the
+  scanner's disposition.
+- `layerleak baseline create --from <result.json|scan-record.json>
+  [--output] [--reason] [--force]` writes a baseline with one entry
+  (fingerprint and detector only, never values) per actionable finding, mode
+  `0600`, no overwrite without `--force`.
+- `layerleak detectors list [--format table|json]` prints the read-only
+  detector catalog (id, confidence tier, strategy, description);
+  `docs/detectors.md` is generated from the same data by a golden test and
+  SARIF `rules[].shortDescription` carries the description.
+- `LAYERLEAK_LOG_FORMAT` (`json` default, `text`) and
+  `layerleak scan --log-format json|text` select the log encoding for both the
+  CLI and `layerleak-api`; invalid values are rejected at config load.
 
 ### Changed
 
@@ -401,6 +436,13 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   the counters as present from version 2, so stored 2.x results returned by
   `GET /api/v1/scans/{id}` stay valid; `TagResult.status` gains `partial` and
   `skipped`; `disposition_reason` gains `default_credentials`.
+- `scanner.Request.Registry` and `jobs.Request.Registry` take the new
+  `scanner.BlobSource` interface, satisfied by `*registry.Client` and by the
+  local readers in `internal/source`; registry scans are unchanged.
+- The JSON Schemas `result-v2.schema.json` and `scan-record-v2.schema.json`
+  add `baselined` to the `disposition` enum (additive). The OpenAPI
+  `disposition` enum is unchanged because the value never reaches the
+  database.
 
 ### Security
 
@@ -528,6 +570,11 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   repository named `scans` or `findings`.
 - `408 scan_canceled` now means only that the client went away; registry
   timeouts surface as `502 scan_failed`.
+- `oci:`, `oci-archive:` and `docker-archive:` are reserved reference schemes
+  in the CLI and the API: a Docker Hub library repository literally named
+  `oci`, `oci-archive` or `docker-archive` must be written with its registry
+  (`docker.io/library/oci:1.0`). A local path cannot contain `@`, and a layout
+  or archive path cannot contain a colon outside a Windows drive letter.
 
 ## [v2.5.0] - 2026-05-20
 

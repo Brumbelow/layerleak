@@ -162,6 +162,18 @@ The following are deployment responsibilities, not built-in controls:
   keep the API private. Never embed credentials in image references or
   endpoint overrides.
 
+- Local image inputs (`oci:`, `oci-archive:`, `docker-archive:`) are
+  operator-trusted paths: the CLI verifies every blob against its descriptor
+  digest and size, indexes archives in memory under bounded entry counts
+  without extracting them, refuses `..` and absolute entry names, never follows
+  links and opens a layout directory as an `os.Root`. The HTTP API rejects
+  local sources with `400 invalid_request`.
+- Baseline files hold fingerprints and detector identifiers only, never
+  values, but an unsalted fingerprint list is still an offline oracle for
+  values an attacker can guess. Treat baseline files like scan records: mode
+  `0600`, not published. A baseline only changes the CLI's view and exit code;
+  the database and the API keep the scanner's disposition.
+
 ## Verify release integrity
 
 Release notes include a source SHA, image index digest, both platform digests,

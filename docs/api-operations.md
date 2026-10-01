@@ -108,15 +108,17 @@ drain starts, is still persisted under `LAYERLEAK_DATABASE_WRITE_TIMEOUT`
 
 ## Logging
 
-Logs are JSON lines on stderr at `LAYERLEAK_LOG_LEVEL` (exactly `debug`,
-`info`, `warn` or `error`). One `api request` record is written per request,
+Logs are written to stderr at `LAYERLEAK_LOG_LEVEL` (one of `debug`, `info`,
+`warn` or `error`, case-insensitive) as JSON lines by default;
+`LAYERLEAK_LOG_FORMAT=text` switches both the API and the CLI to `key=value`
+records. One `api request` record is written per request,
 probes included, with `method`, `route` (the mux pattern, never the path),
 `status`, `bytes`, `duration_ms`, `request_id` and `remote_addr`; set `warn`
 if the probe noise matters. A failed scan adds an `api scan failed` record
 with `error_type`, `error_code`, `status` and `request_id`; a failed read adds
 `api storage request failed` with `operation` and `error_type`. Panics log
 `panic_type` and the goroutine `stack`, never the panic value. net/http's own
-errors and the fatal startup error go through the same JSON logger. Secrets,
+errors and the fatal startup error go through the same logger. Secrets,
 reference strings, paths, request bodies and query strings never appear in
 logs.
 

@@ -15,9 +15,13 @@ with `?disposition=suppressed` (or `all`).
 | --- | --- | --- |
 | `actionable` | Looks like a real secret in a real location; listed under `findings` and counted in `total_findings`. | Yes: exit `2` when its confidence is at or above `--fail-on` |
 | `example` | Matched, but the location or value marks it as sample, test or placeholder material; listed under `suppressed_findings`. | No |
+| `baselined` | An actionable finding whose fingerprint (and detector, when the entry names one) is listed in the caller's `--baseline` file; listed under `suppressed_findings`. | No |
 
-These are the only two values (`internal/findings/findings.go`). In SARIF
-output an `example` finding is a result with an accepted `suppressions` entry.
+These are the only three values (`internal/findings/findings.go`). In SARIF
+output an `example` or `baselined` finding is a result with an accepted
+`suppressions` entry; a baselined suppression carries the entry's reason.
+`baselined` is applied by the CLI after the scan, so the PostgreSQL row and
+the HTTP API keep the scanner's `actionable` disposition for the same finding.
 
 ## Reasons
 

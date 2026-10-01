@@ -79,6 +79,19 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   (`FuzzImageConfig`) plus table-driven replay fixtures (GNU sparse and
   contiguous files, root entries, PAX globals, device nodes, hardlink rules,
   trailing data, repeated digests, deep paths).
+- API error codes for typed registry outcomes: `404 image_not_found`,
+  `503 registry_rate_limited` (with `Retry-After: 60`) and
+  `502 registry_unauthorized`; `503 server_shutting_down` while draining.
+- API responses gain additive fields: `limit_kind` and `limit` on
+  `scan_limit_exceeded` errors, `registry` on repository list responses, and
+  `version` on `/health`, `/livez` and `/readyz`.
+- One structured access-log record per API request (method, route pattern,
+  status, bytes, duration, request id, remote address; never the path, query
+  or body), and JSON logging for net/http's own errors and the fatal startup
+  error.
+- `LAYERLEAK_API_PRESTOP_DELAY` (default `0s`) and
+  `LAYERLEAK_API_READINESS_CACHE_TTL` (default `5s`) for graceful drain and
+  readiness caching.
 
 ### Changed
 
@@ -186,6 +199,28 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   failed"; budget diagnostics appear exactly once.
 - Platform strings for os-only platforms render as `linux` rather than
   `linux/`.
+- `POST /api/v1/scans` classifies failures by the API's own contexts:
+  `504 scan_timeout` only when `LAYERLEAK_API_SCAN_TIMEOUT` expired,
+  `408 scan_canceled` only when the client closed the connection, and a
+  timeout or cancellation inside a registry request is `502 scan_failed`.
+- `422 scan_limit_exceeded` carries a fixed message naming the limit kind and
+  value instead of the raw error chain.
+- Graceful shutdown: on SIGTERM the API answers `503 not_ready` from
+  `/readyz`, refuses new scans with `503 server_shutting_down` for the
+  pre-stop delay while in-flight requests continue, then cancels in-flight
+  scans and shuts down within `LAYERLEAK_API_SHUTDOWN_TIMEOUT`, exiting 0.
+- Paths with repeated slashes or dot segments answer a JSON 404; the API never
+  emits an HTML redirect. Panics are logged with type and stack (never the
+  value) and `http.ErrAbortHandler` propagates.
+- `?registry=` is validated as `host[:port]` (400 otherwise) and normalised
+  like storage. `/readyz` reuses its result for the cache TTL and serialises
+  concurrent probes; the startup raw-secret inventory runs under the database
+  query timeout.
+- OpenAPI documents every `ScanSummary` field and enum with closed schemas,
+  `TagResult.status`, the sanitised error and diagnostic strings, 405 with
+  `Allow` on every operation, the unknown-route 404 and the always-present
+  `Cache-Control` and `X-Content-Type-Options` headers; the README lists
+  every API status code.
 
 ### Security
 
@@ -261,6 +296,13 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   it should read `raw_retention_truncated` (coverage stays complete).
 - `--platform` error messages changed wording (`platform selector must be os,
   os/arch or os/arch/variant`).
+- The `{repository}` path segment is percent-decoded once (`library%252Fapp`
+  is no longer read as `library/app`), must match the OCI repository-name
+  grammar (400 otherwise), and `/api/v1/repositories/scans` and
+  `/api/v1/repositories/findings` are 404 rather than the history of a
+  repository named `scans` or `findings`.
+- `408 scan_canceled` now means only that the client went away; registry
+  timeouts surface as `502 scan_failed`.
 
 ## [v2.5.0] - 2026-05-20
 

@@ -1,0 +1,13 @@
+{
+  "name": "file_etc_shadow_hash_actionable",
+  "source_type": "file_final",
+  "path": "etc/shadow",
+  "key": "",
+  "content": "root:$6$rounds=5000$saltsalt$Ab1cD2eF3gAb1cD2eF3gAb1cD2eF3gAb1cD2eF3gAb1cD2eF3gAb1cD2eF3gAb1cD2eF3gAb1cD2eF3ghIjKl9:19000:0:99999:7:::\ndaemon:*:19000:0:99999:7:::\nbin:*:19000:0:99999:7:::\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "shadow_password_hash"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

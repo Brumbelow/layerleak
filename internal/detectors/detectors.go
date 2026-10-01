@@ -180,6 +180,7 @@ func Default() Set {
 	rules = append(rules, httpHeaderCredentialDetectors()...)
 	rules = append(rules, cloudStateDetectors()...)
 	rules = append(rules, cloudFormatDetectors()...)
+	rules = append(rules, frameworkSecretDetectors()...)
 	rules = append(rules, contextEntropyDetector{})
 	return Set{detectors: rules}
 }
@@ -393,6 +394,9 @@ type pathRegexDetector struct {
 	group          int
 	base           Confidence
 	validator      func(string) bool
+	// skip drops a match by its position in the content, for context the
+	// value alone cannot show (an XML comment around it).
+	skip func(content string, start int) bool
 }
 
 func newPathRegexDetector(name string, pathExpression, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool) pathRegexDetector {
@@ -404,6 +408,13 @@ func newPathRegexDetector(name string, pathExpression, expression *regexp.Regexp
 		base:           base,
 		validator:      validator,
 	}
+}
+
+// skipping returns the detector with a positional filter applied after the
+// value validator.
+func (d pathRegexDetector) skipping(skip func(content string, start int) bool) pathRegexDetector {
+	d.skip = skip
+	return d
 }
 
 func (d pathRegexDetector) Name() string {
@@ -421,7 +432,17 @@ func (d pathRegexDetector) Scan(input ScanInput) []Match {
 	}
 	// A rule gated on a file format knows what it is reading, so it outranks
 	// the shape-only rules on the same span.
-	return scanRegexMatches(d.name, d.rule, d.group, d.base, priorityStructured, d.validator, input, input)
+	matches := scanRegexMatches(d.name, d.rule, d.group, d.base, priorityStructured, d.validator, input, input)
+	if d.skip == nil {
+		return matches
+	}
+	kept := matches[:0]
+	for _, match := range matches {
+		if !d.skip(input.Content, match.Start) {
+			kept = append(kept, match)
+		}
+	}
+	return kept
 }
 
 type keyValueDetector struct {

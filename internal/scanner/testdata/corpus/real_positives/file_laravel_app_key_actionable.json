@@ -1,0 +1,13 @@
+{
+  "name": "file_laravel_app_key_actionable",
+  "source_type": "file_final",
+  "path": "var/www/.env",
+  "key": "",
+  "content": "APP_NAME=Laravel\nAPP_ENV=production\nAPP_KEY=base64:WGs5ZkwybVE4dlI0dFk3d1oxYUIzY0Q1ZUY2Z0g4aks=\nAPP_DEBUG=false\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "laravel_app_key"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

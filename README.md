@@ -42,8 +42,10 @@ bounded and fail closed:
   scan.
 
 Layerleak does not verify whether a detected credential is live. The API has no
-built-in authentication or authorization; expose it only on a trusted network
-or behind an authenticated gateway.
+authorization model: it is open by default, and the opt-in
+`LAYERLEAK_API_BEARER_TOKENS` shared-token check is defence in depth for the
+`/api/` paths, not access control. Expose it only on a trusted network or
+behind an authenticated gateway either way.
 
 ## Install the CLI
 
@@ -298,6 +300,8 @@ apply. Hosts matched by `NO_PROXY` are connected directly with address pinning.
 | `LAYERLEAK_API_PRESTOP_DELAY` | `0s` | Drain window after `SIGTERM`/`SIGINT`: `/readyz` answers 503 `not_ready` and new scans are refused with 503 `server_shutting_down` while in-flight requests keep running; when it elapses, in-flight scans are cancelled with 503 `server_shutting_down`. May be `0s`. Keep `LAYERLEAK_API_STOP_GRACE_PERIOD` above this plus `LAYERLEAK_API_SHUTDOWN_TIMEOUT`. |
 | `LAYERLEAK_API_READINESS_TIMEOUT` | `2s` | Database readiness query deadline. |
 | `LAYERLEAK_API_READINESS_CACHE_TTL` | `5s` | How long a `/readyz` result (success or failure) is reused before the ping and schema-contract validation run again; concurrent probes share one check. `0s` validates on every probe. |
+| `LAYERLEAK_API_BEARER_TOKENS` | empty | Opt-in authentication: comma-separated bearer tokens, each at least 32 printable ASCII characters. When set, every `/api/` request needs `Authorization: Bearer <token>` (401 `unauthorized` otherwise); `/health`, `/livez` and `/readyz` stay open. Tokens are kept only as SHA-256 digests and compared in constant time. Mutually exclusive with `LAYERLEAK_API_BEARER_TOKENS_FILE`. |
+| `LAYERLEAK_API_BEARER_TOKENS_FILE` | empty | Path of a file with one bearer token per line (blank lines ignored, at most 64 KiB), read once at startup; the same rules as `LAYERLEAK_API_BEARER_TOKENS` apply. Use it to mount tokens as a secret instead of an environment variable. |
 | `LAYERLEAK_DATABASE_URL` | empty | PostgreSQL connection URL. The password may be left out of the URL and supplied through `PGPASSWORD` or `PGPASSFILE`; the driver fills any field the URL omits from the standard `PG*` variables. |
 | `LAYERLEAK_DATABASE_MAX_OPEN_CONNS` | `10` | Open connection cap; must be positive. |
 | `LAYERLEAK_DATABASE_MAX_IDLE_CONNS` | `5` | Idle connection cap. |
@@ -434,6 +438,23 @@ decoded once, and must match the OCI repository-name grammar (lowercase; 400
 otherwise). The finding list accepts `disposition=actionable|suppressed|all`
 and defaults to actionable.
 
+Authentication is off by default. Setting `LAYERLEAK_API_BEARER_TOKENS` (or
+`LAYERLEAK_API_BEARER_TOKENS_FILE`) turns on a shared-token check for every
+`/api/` path: requests must send `Authorization: Bearer <token>`, and a missing,
+malformed or unknown token answers 401 `unauthorized` with
+`WWW-Authenticate: Bearer realm="layerleak"` and the usual error envelope. The
+health endpoints never require a token. Tokens are at least 32 characters, are
+held in memory only as SHA-256 digests, are compared in constant time, and never
+reach the logs (a short digest prefix identifies which token was used at debug
+level). The API warns at startup when it listens on a non-loopback address
+without tokens. This is defence in depth, not authorization: keep the gateway.
+
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $LAYERLEAK_API_TOKEN" \
+  http://127.0.0.1:8080/api/v1/repositories
+```
+
 Every response is JSON and carries `X-Request-ID`, `Cache-Control: no-store`
 and `X-Content-Type-Options: nosniff`. A caller-supplied `X-Request-ID` of up
 to 128 characters from `A-Z a-z 0-9 - _ .` is echoed; anything else is replaced
@@ -458,6 +479,7 @@ request bodies are never echoed. Status codes and `code` values:
 | --- | --- | --- | --- |
 | 200 | | every endpoint | the documented response |
 | 400 | `invalid_request` | every endpoint | error envelope |
+| 401 | `unauthorized` | every `/api/` path when `LAYERLEAK_API_BEARER_TOKENS` is set; `WWW-Authenticate: Bearer realm="layerleak"` | error envelope |
 | 404 | `not_found` | reads, unknown paths | error envelope |
 | 404 | `image_not_found` | `POST /api/v1/scans` | envelope, plus `result` when available |
 | 405 | `method_not_allowed` | every endpoint; `Allow` names the accepted method | error envelope |

@@ -194,6 +194,7 @@ func Run() error {
 	if !cfg.PersistRawSecrets {
 		warnAboutRawSecrets(store, cfg.DatabaseQueryTimeout, logger)
 	}
+	warnAboutOpenListener(cfg.APIAddr, len(cfg.APIBearerTokenDigests) > 0, logger)
 
 	server := NewServer(scanservice.New(cfg, store), store, ServerOptions{
 		Addr:              cfg.APIAddr,
@@ -212,6 +213,7 @@ func Run() error {
 			ReadinessCacheTTL:  cfg.APIReadinessCacheTTL,
 			ResponseTimeout:    cfg.APIResponseWriteTimeout,
 			Logger:             logger,
+			BearerTokenDigests: cfg.APIBearerTokenDigests,
 		},
 	})
 
@@ -243,6 +245,24 @@ func warnAboutRawSecrets(store rawSecretCounter, timeout time.Duration, logger *
 			"occurrence_snippets", counts.OccurrenceSnippets,
 		)
 	}
+}
+
+// warnAboutOpenListener logs once at startup when the API accepts
+// unauthenticated requests on an address other than loopback, the deployment
+// mistake the opt-in bearer tokens exist to catch. The container image binds
+// 0.0.0.0 by design, so this is a warning, not an error.
+func warnAboutOpenListener(addr string, authenticated bool, logger *slog.Logger) {
+	if authenticated {
+		return
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "localhost" {
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return
+	}
+	logger.Warn("api authentication is disabled on a non-loopback address; set LAYERLEAK_API_BEARER_TOKENS or place the API behind an authenticated gateway", "api_addr", addr)
 }
 
 func newDefaultLogger(levelName string) (*slog.Logger, error) {

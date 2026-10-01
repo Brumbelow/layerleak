@@ -59,6 +59,7 @@ type Handler struct {
 	logger    *slog.Logger
 	draining  atomic.Bool
 	serve     http.Handler
+	auth      *bearerAuth
 
 	// readiness caches the last store check for ReadinessCacheTTL. The mutex
 	// also serialises probes so one slow check is not run by every prober.
@@ -84,6 +85,11 @@ type HandlerOptions struct {
 	ReadinessCacheTTL time.Duration
 	// Logger receives request and lifecycle logs. Nil uses slog.Default().
 	Logger *slog.Logger
+	// BearerTokenDigests enables bearer-token authentication for every
+	// /api/ path: each entry is the SHA-256 digest of an accepted token.
+	// Empty keeps the API open. A digest of the wrong length is a
+	// programming error and panics at construction.
+	BearerTokenDigests [][]byte
 }
 
 const shuttingDownMessage = "the API is shutting down; retry against another instance"
@@ -242,6 +248,10 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 
 func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) *Handler {
 	options = options.withDefaults()
+	auth, err := newBearerAuth(options.BearerTokenDigests)
+	if err != nil {
+		panic("api: " + err.Error())
+	}
 	handler := &Handler{
 		scanner:   scanner,
 		store:     store,
@@ -249,6 +259,7 @@ func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOp
 		scanSlots: make(chan struct{}, options.MaxConcurrentScans),
 		requestID: options.RequestID,
 		logger:    options.Logger,
+		auth:      auth,
 	}
 
 	mux := http.NewServeMux()
@@ -1110,6 +1121,9 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 		}
 		if !isCleanPath(request.URL.Path) {
 			h.handleNotFound(wrapped, request)
+			return
+		}
+		if !h.authorize(wrapped, request, requestID) {
 			return
 		}
 		next.ServeHTTP(wrapped, request)

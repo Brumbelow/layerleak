@@ -12,19 +12,23 @@ import (
 )
 
 type Config struct {
-	LogLevel                    string
-	APIAddr                     string
-	APIMaxRequestBytes          int64
-	APIScanTimeout              time.Duration
-	APIMaxConcurrentScans       int
-	APIReadHeaderTimeout        time.Duration
-	APIReadTimeout              time.Duration
-	APIResponseWriteTimeout     time.Duration
-	APIIdleTimeout              time.Duration
-	APIShutdownTimeout          time.Duration
-	APIPreStopDelay             time.Duration
-	APIReadinessTimeout         time.Duration
-	APIReadinessCacheTTL        time.Duration
+	LogLevel                string
+	APIAddr                 string
+	APIMaxRequestBytes      int64
+	APIScanTimeout          time.Duration
+	APIMaxConcurrentScans   int
+	APIReadHeaderTimeout    time.Duration
+	APIReadTimeout          time.Duration
+	APIResponseWriteTimeout time.Duration
+	APIIdleTimeout          time.Duration
+	APIShutdownTimeout      time.Duration
+	APIPreStopDelay         time.Duration
+	APIReadinessTimeout     time.Duration
+	APIReadinessCacheTTL    time.Duration
+	// APIBearerTokenDigests holds the SHA-256 digest of every accepted API
+	// bearer token (LAYERLEAK_API_BEARER_TOKENS or _FILE). Nil disables
+	// authentication; the plaintext tokens are never retained.
+	APIBearerTokenDigests       [][]byte
 	RegistryBaseURL             string
 	RegistryAuthURL             string
 	AllowedPrivateRegistryHosts []string
@@ -120,6 +124,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	apiReadinessCacheTTL, err := nonNegativeDurationFromEnv("LAYERLEAK_API_READINESS_CACHE_TTL", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	apiBearerTokenDigests, err := bearerTokenDigestsFromEnv("LAYERLEAK_API_BEARER_TOKENS", "LAYERLEAK_API_BEARER_TOKENS_FILE")
 	if err != nil {
 		return Config{}, err
 	}
@@ -265,6 +273,7 @@ func Load() (Config, error) {
 		APIPreStopDelay:             apiPreStopDelay,
 		APIReadinessTimeout:         apiReadinessTimeout,
 		APIReadinessCacheTTL:        apiReadinessCacheTTL,
+		APIBearerTokenDigests:       apiBearerTokenDigests,
 		RegistryBaseURL:             registryBaseURL,
 		RegistryAuthURL:             registryAuthURL,
 		AllowedPrivateRegistryHosts: allowedPrivateRegistryHosts,

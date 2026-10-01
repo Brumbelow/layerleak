@@ -153,8 +153,9 @@ jobs:
 | `extra-args` | empty | Further `layerleak scan` flags, split on whitespace and appended last (for example `--all-tags --max-repository-tags 50`). |
 
 Outputs: `exit-code` (the CLI exit code, see the table under "Scan images"),
-`result-file` (the written file) and `sarif-file` (the same path when `format`
-is `sarif`, otherwise empty). The step fails exactly when the CLI exits
+`result-file` (the written file), `sarif-file` (the same path when `format`
+is `sarif`, otherwise empty) and `version` (the release that was downloaded
+and verified). The step fails exactly when the CLI exits
 non-zero, so `fail-on: none` plus `if: always()` on the upload step gives a
 report-only scan. The action never prints findings; only the redacted
 `summary` format is echoed to the log, and the scan runs with `--no-artifacts`.
@@ -269,9 +270,11 @@ A second SIGINT or SIGTERM after the first terminates the process immediately.
 
 Every result has a top-level `status` (`completed`, `partial`, or `failed`), a
 coverage object, per-target, per-platform and per-tag status, and
-diagnostics. `--format json` prints the result for failed scans too (exit code
-`1`), so automation can read the diagnostics; cancellation is the only silent
-path. Likely test, fixture, example, and demo placeholders are retained
+diagnostics. `--format json` prints the result for failed scans that produced
+one (exit code `1`), so automation can read the diagnostics. Cancellation (a
+signal or `LAYERLEAK_SCAN_TIMEOUT`) and failures before any result exists
+(invalid input, an unreadable local source, an error opening the store) print
+only the error on stderr and exit `1`. Likely test, fixture, example, and demo placeholders are retained
 separately as suppressed findings and do not drive exit code `2`.
 
 ### SARIF
@@ -637,9 +640,10 @@ its own:
 | --- | --- | --- |
 | `LAYERLEAK_MIGRATIONS_DIR` | `/app/migrations` | Directory holding the shipped `migrations/*.sql`; from a checkout use `$PWD/migrations`. |
 | `LAYERLEAK_MIGRATION_TIMEOUT` | `30m` | Overall deadline for one run of the command; `0` disables it. |
-| `LAYERLEAK_MIGRATION_LOCK_TIMEOUT` | `15s` | How long each of three attempts waits for the migration advisory lock. |
+| `LAYERLEAK_MIGRATION_LOCK_TIMEOUT` | `15s` | `lock_timeout` for table locks taken inside each migration transaction; a migration that hits it is retried up to three times. The wait for the migration advisory lock itself is bounded only by `LAYERLEAK_MIGRATION_TIMEOUT`. |
 
-The migration command uses an advisory lock with bounded waits, a checksummed
+The migration command uses an advisory lock (its wait bounded by
+`LAYERLEAK_MIGRATION_TIMEOUT`), bounded per-migration lock waits, a checksummed
 migration ledger, and one transaction per migration. It can adopt a complete
 legacy 0001-0003 schema and refuses drift, gaps, dirty state, or a partial
 legacy schema. On a populated database, stop API replicas and long-running
@@ -953,6 +957,33 @@ build. Historical GitHub/container tags v2.0.0-v2.5.0 were created without the
 `/v2` module path Go requires, so they were never installable as Go modules and
 are preserved only for history. The 3.0.0 line contains and supersedes that
 work.
+
+### What 3.0.0 does and does not break
+
+Unchanged: the binary name (`layerleak`), the HTTP API paths under `/api/v1`
+and the names and types of existing response fields (3.0.0 only adds fields
+and error codes), the unsalted `sha256` fingerprint of a raw value, and
+synchronous API scans.
+
+Changed, and worth checking before you upgrade:
+
+- the Go module path is `github.com/brumbelow/layerleak/v3`, and building
+  from source needs Go 1.27.1 or newer;
+- the database must be at migration `0004` before the API starts
+  (`layerleak-migrate-up` adopts a v2.x 0001-0003 schema);
+- results carry `result_schema_version` 2 and the local output is one scan
+  record per scan (`record_schema_version` 2) under `./findings`, with no raw
+  values written locally;
+- a bare repository scans `latest`; add `--all-tags` to sweep every tag;
+- exit code `3` reports incomplete coverage that `--allow-partial` did not
+  accept, and `--fail-on` chooses the confidence that produces exit code `2`;
+- some detector identifiers were renamed, `redacted_value` has a new shape,
+  and generic keyword and assignment findings in image-config environment
+  variables and labels have new fingerprints;
+- multi-platform images scan only `linux` manifests by default.
+
+[UPGRADING.md](./UPGRADING.md) walks through each change for CLI users,
+container and PostgreSQL installs, and API consumers.
 
 See [CHANGELOG.md](./CHANGELOG.md) for release-line details and
 [RELEASING.md](./RELEASING.md) for the protected release procedure.

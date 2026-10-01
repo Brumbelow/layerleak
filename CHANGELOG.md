@@ -430,7 +430,7 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Environment-variable and label findings cover the value alone, so their
   `fingerprint`, `match_start`, `match_end` and `redacted_value` equal those of
   the same secret found in a file and the two no longer produce separate
-  findings. These fingerprints change once; see UPGRADING.md.
+  findings. These fingerprints change once; see [UPGRADING.md](./UPGRADING.md).
 - Detector identifiers were renamed: `digitalocean_pat` ->
   `digitalocean_personal_access_token`, `stripe_key` -> `stripe_api_key`,
   `gitlab_token` -> `gitlab_personal_access_token`, `jwt` -> `json_web_token`,
@@ -578,6 +578,9 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   `raw_retention_truncated`).
 
 ### Compatibility
+
+[UPGRADING.md](./UPGRADING.md) walks through every item below for CLI users,
+container and PostgreSQL installs, and API consumers.
 
 - Automation that relied on a bare repository scanning every tag must add
   `--all-tags` or API `"all_tags": true`.

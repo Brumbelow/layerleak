@@ -50,6 +50,9 @@
               <code>github.com/brumbelow/layerleak/v3</code> module path. The changelog and OpenAPI
               version are frozen at 3.0.0 so an accepted release candidate can be promoted from the
               same source commit; a release command shown here works once that tag is published.
+              Upgrading from v1.0.0 or a v2.x container install? Read the
+              <a href="https://github.com/Brumbelow/layerleak/blob/main/UPGRADING.md">upgrade guide</a>
+              first.
             </p>
           </div>
 
@@ -698,7 +701,7 @@ go run ./cmd/migrate</code></pre>
                 pending or a legacy schema is waiting to be adopted, and <code>1</code> on any error
                 such as checksum drift. <code>--dry-run</code> lists what a run would adopt and apply
                 and changes nothing; <code>--version</code> prints the build version. The command
-                holds an advisory lock with bounded waits, records checksums in a migration ledger,
+                holds an advisory lock (its wait bounded by <code>LAYERLEAK_MIGRATION_TIMEOUT</code>) with bounded per-migration lock waits, records checksums in a migration ledger,
                 runs one transaction per migration, and refuses drift, gaps, dirty state, or a
                 partial legacy schema. There is no <code>down</code> command.
               </p>
@@ -711,7 +714,7 @@ go run ./cmd/migrate</code></pre>
                   <tbody>
                     <tr><td><code>LAYERLEAK_MIGRATIONS_DIR</code></td><td><code>/app/migrations</code></td><td>Directory holding the shipped <code>migrations/*.sql</code>; from a checkout use <code>$PWD/migrations</code>.</td></tr>
                     <tr><td><code>LAYERLEAK_MIGRATION_TIMEOUT</code></td><td><code>30m</code></td><td>Overall deadline for one run of the command; <code>0</code> disables it.</td></tr>
-                    <tr><td><code>LAYERLEAK_MIGRATION_LOCK_TIMEOUT</code></td><td><code>15s</code></td><td>How long each of three attempts waits for the migration advisory lock.</td></tr>
+                    <tr><td><code>LAYERLEAK_MIGRATION_LOCK_TIMEOUT</code></td><td><code>15s</code></td><td><code>lock_timeout</code> for table locks inside each migration transaction, retried up to three times; the advisory-lock wait is bounded only by <code>LAYERLEAK_MIGRATION_TIMEOUT</code>.</td></tr>
                   </tbody>
                 </table>
               </div>

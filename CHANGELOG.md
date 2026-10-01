@@ -69,6 +69,16 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Windows consoles are switched into virtual-terminal mode for the dynamic
   progress display, with a plain-text fallback when the console refuses.
 - Booleans accept `yes`/`no`/`on`/`off` as well as `1`/`true`/`0`/`false`.
+- `--platform` accepts `os`, `os/arch` and `os/arch/variant`; omitted parts
+  match anything and variants are normalised like containerd
+  (`linux/arm64/v8` equals `linux/arm64`, `linux/arm` equals `linux/arm/v7`).
+- New diagnostic codes: `platform_skipped`, `manifest_skipped`,
+  `manifest_unsupported`, `platform_not_found`, `layer_trailing_data` and
+  `raw_retention_truncated`.
+- Fuzz targets for layer replay (`FuzzApplyLayer`) and image-config parsing
+  (`FuzzImageConfig`) plus table-driven replay fixtures (GNU sparse and
+  contiguous files, root entries, PAX globals, device nodes, hardlink rules,
+  trailing data, repeated digests, deep paths).
 
 ### Changed
 
@@ -145,6 +155,37 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   checksum-pinned Grype directly instead of a third-party action.
 - Multi-platform selection and layer handling: see the detector, layer and
   scanner entries added by the 3.0.0 fix waves below.
+- Default platform policy: without `--platform` only `linux` manifests of a
+  multi-platform index are scanned; other operating systems are reported as
+  `platform_skipped` and attestation, in-toto, nested-index and other
+  non-image entries as `manifest_skipped` instead of failing the scan.
+  `layerleak scan golang:latest` now completes where it exited 1.
+- A selected manifest whose layers are foreign or non-distributable (Windows
+  base layers) is reported as `manifest_unsupported`: that platform fails, the
+  remaining platforms run, the scan is partial and `--allow-partial` can
+  accept it. Genuine digest, size and media-type mismatches stay fail-closed.
+- `--platform` is enforced for single-manifest images: a selector that does
+  not match the image config fails with `platform_not_found` instead of
+  silently scanning another platform.
+- Document validation accepts Docker foreign and OCI non-distributable layer
+  media types and non-image index entries; digest, size and platform syntax
+  are still validated for every entry.
+- The root manifest digest and size are verified before any JSON is parsed; a
+  malformed body under a digest reference fails with
+  `descriptor_digest_mismatch` rather than `invalid_manifest_document`.
+- Old-GNU sparse (`S`) and GNU contiguous (`7`) tar entries are scanned as
+  regular files; a `./` or `.` root directory entry is no longer counted as an
+  unsafe entry; PAX global headers are skipped; hardlinks to symlinks or other
+  non-file entries are not counted as files or binary exclusions.
+- `LAYERLEAK_MAX_RAW_FINDING_BYTES` no longer stops detection: once spent,
+  remaining findings are recorded without raw values, coverage stays complete
+  and one `raw_retention_truncated` diagnostic replaces
+  `max_raw_finding_bytes_exceeded`, which is no longer emitted.
+- A findings budget already exhausted when a scan starts yields a partial
+  result with `max_findings_exceeded` instead of "all selected manifests
+  failed"; budget diagnostics appear exactly once.
+- Platform strings for os-only platforms render as `linux` rather than
+  `linux/`.
 
 ### Security
 
@@ -170,6 +211,16 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   a `change-me` password; both are blank so a forgotten edit fails loudly.
 - The GitHub CLI pin moves to 2.102.0 (GHSA-wjmr-j3rp-mh2g,
   GHSA-4mq3-hpgx-9cx8, GHSA-39wj-f2f4-978v).
+- The zstd decoder window is capped at a fixed 128 MiB regardless of
+  `LAYERLEAK_MAX_LAYER_BYTES`; a ten-byte hostile frame no longer allocates
+  513 MiB at the default configuration.
+- Cancellation and timeouts are observed while draining sparse-file holes even
+  when both byte limits are disabled.
+- Bytes after the end of a layer's compressed stream still fail the layer
+  closed, now under the dedicated `layer_trailing_data` code.
+- Layer replay cost per archive entry no longer grows with path depth,
+  closing an algorithmic slowdown that hostile deep-path layers could exploit
+  within the default entry limits.
 
 ### Removed
 
@@ -203,6 +254,13 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   longer passes it; the API never wrote local findings.
 - Compose users run `docker compose up -d` instead of running `migrate` by
   hand; `migrate` left the `tools` profile.
+- Multi-platform images scan only `linux` manifests by default; pass
+  `--platform` (for example `--platform windows/amd64`) to attempt another
+  operating system.
+- `max_raw_finding_bytes_exceeded` is no longer emitted; consumers keying on
+  it should read `raw_retention_truncated` (coverage stays complete).
+- `--platform` error messages changed wording (`platform selector must be os,
+  os/arch or os/arch/variant`).
 
 ## [v2.5.0] - 2026-05-20
 

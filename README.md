@@ -356,9 +356,9 @@ Health endpoints:
 
 | Endpoint | Meaning |
 | --- | --- |
-| `GET /health` | Process liveness; does not query PostgreSQL. |
-| `GET /livez` | Kubernetes-style process liveness alias. |
-| `GET /readyz` | Readiness; requires a database ping and exact schema version `0004`. |
+| `GET /health` | Process liveness and the build `version`; does not query PostgreSQL. |
+| `GET /livez` | Kubernetes-style process liveness alias with the same body. |
+| `GET /readyz` | Readiness; requires a database ping and exact schema version `0004`. The result is reused for `LAYERLEAK_API_READINESS_CACHE_TTL`, and the endpoint answers 503 `not_ready` while the process drains before shutdown. |
 
 API endpoints:
 
@@ -390,12 +390,22 @@ repository sweep:
 }
 ```
 
-List endpoints accept `limit` and `offset`; `limit` defaults to 50 and is capped
-at 200. Repository scan and finding endpoints accept `registry` (default
-`docker.io`). The finding list accepts
-`disposition=actionable|suppressed|all` and defaults to actionable.
+List endpoints accept `limit` and `offset`; `limit` defaults to 50 and values
+above 200 are clamped to 200 (the response reports the effective `limit`).
+Repository scan and finding endpoints accept `registry` as `host` or
+`host:port` (default `docker.io`; `index.docker.io` and `registry-1.docker.io`
+normalise to `docker.io`; anything else is 400) and echo the normalised value
+as `registry`. The `{repository}` segment accepts a literal `/` or `%2F`, is
+decoded once, and must match the OCI repository-name grammar (lowercase; 400
+otherwise). The finding list accepts `disposition=actionable|suppressed|all`
+and defaults to actionable.
 
-Every response includes `X-Request-ID`. Error bodies use this shape:
+Every response is JSON and carries `X-Request-ID`, `Cache-Control: no-store`
+and `X-Content-Type-Options: nosniff`. A caller-supplied `X-Request-ID` of up
+to 128 characters from `A-Z a-z 0-9 - _ .` is echoed; anything else is replaced
+by a generated id. Unknown or non-canonical paths (repeated slashes, dot
+segments) answer 404 `not_found`; a wrong method answers 405 with `Allow`. The
+API never redirects. Error bodies use this shape:
 
 ```json
 {
@@ -407,16 +417,50 @@ Every response includes `X-Request-ID`. Error bodies use this shape:
 }
 ```
 
-When a scan produced a usable redacted result but PostgreSQL persistence
-failed, `POST /api/v1/scans` returns HTTP 503 with `storage_unavailable`, the
-neutral message `the scan result could not be stored`, and the available
-result. It does not invent a `scan_run_id`. Failed and incomplete responses
-retain their actual `status`, coverage, and sanitized diagnostics.
+Messages are fixed neutral strings; upstream error text, reference strings and
+request bodies are never echoed. Status codes and `code` values:
+
+| Status | `code` | Where | Body |
+| --- | --- | --- | --- |
+| 200 | | every endpoint | the documented response |
+| 400 | `invalid_request` | every endpoint | error envelope |
+| 404 | `not_found` | reads, unknown paths | error envelope |
+| 404 | `image_not_found` | `POST /api/v1/scans` | envelope, plus `result` when available |
+| 405 | `method_not_allowed` | every endpoint; `Allow` names the accepted method | error envelope |
+| 408 | `scan_canceled` | `POST /api/v1/scans`; the client closed the connection before the scan finished | error envelope |
+| 413 | `request_too_large` | `POST /api/v1/scans` | error envelope |
+| 415 | `unsupported_media_type` | `POST /api/v1/scans` | error envelope |
+| 422 | `scan_incomplete` | `POST /api/v1/scans` | envelope, plus `result` and `scan_run_id` when persisted |
+| 422 | `scan_limit_exceeded` | `POST /api/v1/scans`; the error object adds `limit_kind` and `limit` | envelope, plus `result` and `scan_run_id` when persisted |
+| 429 | `scan_capacity_exceeded` | `POST /api/v1/scans`; `Retry-After: 5` | error envelope |
+| 500 | `internal_error` | every endpoint | error envelope |
+| 502 | `scan_failed` | `POST /api/v1/scans`; transport errors, registry 5xx and timeouts inside the scan | envelope, plus `result` when available |
+| 502 | `registry_unauthorized` | `POST /api/v1/scans`; the registry or its token endpoint answered 401/403 | envelope, plus `result` when available |
+| 503 | `storage_unavailable` | reads: a database query failed; `POST /api/v1/scans`: the scan finished but could not be persisted | reads: envelope; scans: envelope plus `result` |
+| 503 | `registry_rate_limited` | `POST /api/v1/scans`; the registry answered 429 after bounded retries; `Retry-After: 60` | envelope, plus `result` when available |
+| 503 | `server_shutting_down` | `POST /api/v1/scans` while draining, and any request the drain cancelled | error envelope |
+| 503 | `not_ready` | `GET /readyz` | error envelope |
+| 504 | `scan_timeout` | `POST /api/v1/scans`; `LAYERLEAK_API_SCAN_TIMEOUT` expired | envelope, plus `result` when available |
+
+`result` is included in a `POST /api/v1/scans` error body whenever the scan
+produced a redacted result; `scan_run_id` is included only when that result was
+persisted. A 503 `storage_unavailable` on a scan never invents a `scan_run_id`.
+Failed and incomplete responses retain their actual `status`, coverage, and
+sanitized diagnostics; `error` fields inside `result` are replaced with
+`scan step failed` and diagnostic messages with fixed text chosen from the
+diagnostic `code`.
 
 Unknown request fields and extra JSON values are rejected. Request size,
 concurrency, database work, and scan duration are bounded by configuration. See
 the versioned [OpenAPI 3.1 specification](./web/docs/openapi.yaml) for request,
 response, pagination, and error schemas.
+
+The API logs one JSON record per request (method, route pattern, status,
+bytes, duration, request id, remote address; never the path, query or body).
+On `SIGTERM` or `SIGINT` it drains: `/readyz` answers 503 and new scans are
+refused for `LAYERLEAK_API_PRESTOP_DELAY` while in-flight requests continue,
+then in-flight scans are cancelled with 503 `server_shutting_down` and the
+server stops within `LAYERLEAK_API_SHUTDOWN_TIMEOUT`, exiting 0.
 
 ## Container and Compose deployment
 

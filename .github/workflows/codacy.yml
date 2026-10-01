@@ -24,6 +24,17 @@ on:
 permissions:
   contents: read
 
+env:
+  # Issue budget for the Codacy analysis step: the run fails when Codacy reports
+  # more issues than this. The maintainer configured upload-only analysis
+  # (2147483647, the CLI's maximum) and that stays in force through the first
+  # v3.0.0 release candidate, so every finding reaches code scanning without
+  # blocking CI on the as yet unreviewed baseline. After the rc.1 SARIF
+  # baseline has been triaged, set this to the "Codacy reported N issues" total
+  # printed by the combine step plus a small margin, so new findings fail the
+  # job while existing ones are worked down. Lowering it is a reviewed change.
+  CODACY_MAX_ALLOWED_ISSUES: "2147483647"
+
 jobs:
   codacy-security-scan:
     permissions:
@@ -48,7 +59,7 @@ jobs:
           output: results.sarif
           format: sarif
           gh-code-scanning-compat: true
-          max-allowed-issues: 2147483647
+          max-allowed-issues: ${{ env.CODACY_MAX_ALLOWED_ISSUES }}
 
       # Post-process SARIF so each of Codacy's per-tool runs gets a unique
       # automationDetails.id (github/codeql-action@v4 enforces "one run per
@@ -82,7 +93,10 @@ jobs:
             map(select((.results | length) > 0))
           )' results.sarif > results-combined.sarif
           total="$(jq '.runs | length' results-combined.sarif)"
+          issues="$(jq '[.runs[].results | length] | add // 0' results-combined.sarif)"
           echo "Codacy reported ${total} tool run(s) with results."
+          # The figure to derive CODACY_MAX_ALLOWED_ISSUES from once the baseline is triaged.
+          echo "Codacy reported ${issues} issues (budget ${CODACY_MAX_ALLOWED_ISSUES})."
           mkdir -p sarif-chunks
           chunks=0
           for ((start = 0; start < total; start += 20)); do

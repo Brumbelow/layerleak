@@ -66,6 +66,12 @@ Expected protections include:
   parsing or scanning;
 - archive traversal, unsafe link targets, decompression, resource exhaustion,
   redirects, and private-network egress are treated as hostile-input concerns;
+- redirects are re-validated hop by hop and never downgrade https to http,
+  even to an allowlisted host; deprecated site-local (`fec0::/10`) and
+  IPv4-compatible (`::/96`) IPv6 ranges count as non-public;
+- when `HTTPS_PROXY` selects a proxy, that proxy becomes the egress control
+  (DNS pinning is skipped for proxied requests) while the https-only rule and
+  the allowlists still apply; this is a documented trust boundary;
 - private registry and auth destinations require exact explicit allowlisting;
 - scan limits fail closed and incomplete coverage is visible in status,
   diagnostics, persistence, and exit behavior;
@@ -93,6 +99,10 @@ The following are deployment responsibilities, not built-in controls:
 - A private-host allowlist grants the scanner network reachability to that exact
   destination. Keep allowlists minimal and review redirects and DNS controls in
   the deployment environment.
+- PostgreSQL connections should use `sslmode=verify-full` with the server CA
+  mounted for any database that is not on the same host. Omitting `sslmode`
+  is not safe: lib/pq's implicit default `require` encrypts the connection but
+  does not verify the server certificate.
 - Registry credentials are not a supported user-facing feature. Do not embed
   credentials in image references or endpoint overrides.
 

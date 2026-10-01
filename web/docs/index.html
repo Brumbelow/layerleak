@@ -531,7 +531,9 @@ layerleak scan docker-archive:save.tar:app:1.2</code></pre>
                 (<code>completed</code>, <code>partial</code>, or <code>failed</code>), a coverage
                 object, per-target, per-platform, and per-tag status, and diagnostics.
                 <code>--format json</code> prints the result for failed scans too, so automation can
-                read the diagnostics; cancellation is the only silent path.
+                read the diagnostics. The silent paths are cancellation and failures before any result
+                exists (invalid input, an unreadable local source, or an error opening the store):
+                those print only the error on stderr and exit <code>1</code>.
               </p>
 
               <h3 class="schema-heading">Exit codes</h3>

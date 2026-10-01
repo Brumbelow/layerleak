@@ -287,10 +287,19 @@ components:
       name: repository
       in: path
       required: true
-      description: Repository path, for example `library/alpine`. Percent-encode path separators as `%2F` in request URLs.
+      description: |
+        Repository path such as `library/alpine`, without the registry host.
+        A literal `/` and a percent-encoded `%2F` are both accepted and
+        decoded exactly once; `%252F` is rejected. The name must match the
+        OCI distribution grammar (lowercase components joined by `.`, `_`,
+        `__` or `-`), otherwise the response is 400 `invalid_request`. The
+        `/scans` and `/findings` suffixes must be separate path segments:
+        `/api/v1/repositories/scans` is 404 `not_found`.
       schema:
         type: string
         minLength: 1
+        maxLength: 255
+        pattern: '^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$'
     Registry:
       name: registry
       in: query

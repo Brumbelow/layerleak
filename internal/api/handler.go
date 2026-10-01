@@ -13,6 +13,8 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -691,22 +693,57 @@ func mapFindingSummary(item storage.FindingSummary) findingSummaryItem {
 	}
 }
 
-func repositoryPathValue(path, suffix string) (string, bool, error) {
-	const prefix = "/api/v1/repositories/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+const (
+	repositoriesPrefix      = "/api/v1/repositories/"
+	maxRepositoryNameLength = 255
+)
+
+// repositoryNamePattern is the OCI distribution <name> grammar: lowercase
+// path components joined by single separators (. _ __ or one or more -) and
+// slashes. Registry hosts are never part of the path.
+var repositoryNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$`)
+
+// repositoryPathValue extracts the repository from a subtree path whose final
+// segment is suffix, for example "/scans". requestPath is request.URL.Path,
+// which net/url has already percent-decoded once; it is not decoded again, so
+// "%252F" stays "%2F" and fails validation. ok is false when no repository
+// segment precedes the suffix (a 404); err reports a name outside the
+// distribution grammar (a 400).
+func repositoryPathValue(requestPath, suffix string) (string, bool, error) {
+	rest, hasPrefix := strings.CutPrefix(requestPath, repositoriesPrefix)
+	if !hasPrefix {
 		return "", false, nil
 	}
-
-	rawRepository := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	repository, err := url.PathUnescape(strings.Trim(rawRepository, "/"))
-	if err != nil {
-		return "", false, fmt.Errorf("repository path is invalid")
-	}
-	if strings.TrimSpace(repository) == "" {
+	repository, hasSuffix := strings.CutSuffix(rest, suffix)
+	if !hasSuffix || repository == "" {
 		return "", false, nil
 	}
-
+	if err := validateRepositoryName(repository); err != nil {
+		return "", false, err
+	}
 	return repository, true, nil
+}
+
+func validateRepositoryName(name string) error {
+	if len(name) > maxRepositoryNameLength || !repositoryNamePattern.MatchString(name) {
+		return fmt.Errorf("repository must be a lowercase OCI repository path such as library/alpine")
+	}
+	return nil
+}
+
+// isCleanPath reports whether requestPath is already in the canonical form
+// http.ServeMux would redirect to. Unclean paths (repeated slashes, dot
+// segments) are answered with the JSON 404 before the mux sees them, so the
+// API never emits a text/html redirect.
+func isCleanPath(requestPath string) bool {
+	if requestPath == "" || requestPath[0] != '/' {
+		return false
+	}
+	cleaned := path.Clean(requestPath)
+	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned == requestPath
 }
 
 func parsePagination(values url.Values) (int, int, error) {
@@ -922,6 +959,10 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 		if h.isDraining() && request.Context().Err() != nil {
 			// The drain cancelled the base context before this request ran.
 			writeAPIError(wrapped, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
+			return
+		}
+		if !isCleanPath(request.URL.Path) {
+			h.handleNotFound(wrapped, request)
 			return
 		}
 

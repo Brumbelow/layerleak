@@ -189,8 +189,11 @@ No 3.x minor release is planned, so nothing is "deferred": an item is either in
   over chunked streams either misses matches that straddle chunks or re-scans
   overlaps; raising `MAX_FILE_BYTES` is the supported knob and oversize files
   are reported with a diagnostic.
-- Path-only findings and annotation scanning (LAY-13, LAY-21): low signal; file
-  names and annotations are already visible in the record.
+- Annotation scanning (LAY-13) and magic-byte sniffing of layer compression
+  (LAY-21): annotations are low signal and already visible in the record, and
+  the declared layer media type is part of the integrity contract, so a blob
+  whose bytes disagree with it fails closed instead of being re-interpreted.
+  (Path-only findings, LAY-12, are built: see the `sensitive_file_*` family.)
 - Index right-sizing and reading the write-only `tags`/`manifests` tables
   (DB-16, DB-18), the `down` admin command (DB-09): no operator need was
   identified and `down` invites data loss.

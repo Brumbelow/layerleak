@@ -341,6 +341,27 @@ def validate_release_version(root: Path, spec):
             )
 
 
+README_VARIABLE_ROW = re.compile(r"^\| `(LAYERLEAK_[A-Z_]+)` \|", re.MULTILINE)
+WEB_VARIABLE = re.compile(r"LAYERLEAK_[A-Z][A-Z_]+")
+
+
+def validate_web_variables(root: Path):
+    """Every LAYERLEAK_* variable the docs site mentions must have a README table row."""
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    documented = set(README_VARIABLE_ROW.findall(readme))
+    if len(documented) < 50:
+        raise ValidationFailure(
+            f"README documents only {len(documented)} LAYERLEAK_ variables; the tables look damaged"
+        )
+    site = (root / "web" / "docs" / "index.html").read_text(encoding="utf-8")
+    mentioned = set(WEB_VARIABLE.findall(site))
+    missing = sorted(mentioned - documented)
+    if missing:
+        raise ValidationFailure(
+            "web/docs/index.html mentions variables without a README table row: " + ", ".join(missing)
+        )
+
+
 def validate_repository(root: Path):
     root = root.resolve()
     spec_path = root / "web" / "docs" / "openapi.yaml"
@@ -356,6 +377,7 @@ def validate_repository(root: Path):
     validate_documented_examples(root, spec, fixtures)
     validate_local_references(root)
     validate_demo(root)
+    validate_web_variables(root)
 
 
 def main() -> int:
@@ -366,7 +388,7 @@ def main() -> int:
         print(f"documentation validation failed: {error}", file=sys.stderr)
         return 1
     print(
-        "OpenAPI contract, response examples, local links, and synthetic demo are valid"
+        "OpenAPI contract, response examples, local links, variable tables, and synthetic demo are valid"
     )
     return 0
 

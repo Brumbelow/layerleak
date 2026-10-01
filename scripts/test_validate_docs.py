@@ -20,6 +20,7 @@ class DocumentationValidationTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         shutil.copytree(REPOSITORY_ROOT / "web", self.root / "web")
         shutil.copy(REPOSITORY_ROOT / "CHANGELOG.md", self.root / "CHANGELOG.md")
+        shutil.copy(REPOSITORY_ROOT / "README.md", self.root / "README.md")
 
     def tearDown(self):
         self.temporary_directory.cleanup()

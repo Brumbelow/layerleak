@@ -394,6 +394,14 @@ func (w *archiveWalk) readGzip(outerPath string, content []byte) {
 	}
 	if nestedArchiveKind(decompressed) == "tar" {
 		w.readTar(bytes.NewReader(decompressed))
+		// Every decompressed byte counts against the nested, layer and image
+		// byte budgets, not only regular-entry content: headers, other
+		// entries, padding and data after the end-of-archive marker were
+		// inflated too. Entry content is a subset of decompressed, which is
+		// within the allowance, so nothing is charged twice.
+		if inflated := int64(len(decompressed)); inflated > w.bytesRead {
+			w.bytesRead = inflated
+		}
 		return
 	}
 	if !w.admitEntry() {

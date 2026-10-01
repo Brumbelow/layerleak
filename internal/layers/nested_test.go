@@ -568,6 +568,35 @@ func TestReplayNestedArchiveMalformedAndBombsAreBoundedSkips(t *testing.T) {
 			t.Fatalf("skips = %v", skips)
 		}
 	})
+
+	t.Run("tar in gzip is charged every decompressed byte", func(t *testing.T) {
+		// A tar holding only a directory followed by 7 MiB of zeros: the walk
+		// reads no regular content, yet all of it was inflated. Twenty copies
+		// must exhaust an 8 MiB image budget after the first, not inflate
+		// 140 MiB for free.
+		inner := append(tarArchive(t, []tarEntry{{name: "d/", typeflag: tar.TypeDir}}), make([]byte, 7<<20)...)
+		bomb := gzipFile(t, "", inner)
+		entries := make([]tarEntry, 0, 20)
+		for index := range 20 {
+			entries = append(entries, tarEntry{name: fmt.Sprintf("a%02d.tgz", index), body: string(bomb)})
+		}
+		options := nestedOptions(64<<20, 10000)
+		options.MaxTotalBytes = 8 << 20
+		result := replayOne(t, gzipLayer(t, entries), options)
+		// Each refused archive is charged the one overflow-probe byte that
+		// proved its allowance spent, as for a plain gzip member.
+		if got := result.Coverage.NestedBytesExpanded; got < int64(len(inner)) || got > (8<<20)+int64(len(entries)) {
+			t.Fatalf("NestedBytesExpanded = %d, want the first archive's %d decompressed bytes charged within the 8 MiB budget", got, len(inner))
+		}
+		if len(result.NestedSkips) != 19 {
+			t.Fatalf("skips = %v, want a layer_budget skip for each later archive", skipReasons(result.NestedSkips))
+		}
+		for index, skip := range result.NestedSkips {
+			if want := fmt.Sprintf("a%02d.tgz", index+1); skip.Path != want || skip.Reason != NestedSkipLayerBudget {
+				t.Fatalf("skip %d = %+v, want %s:%s", index, skip, want, NestedSkipLayerBudget)
+			}
+		}
+	})
 }
 
 func TestReplayNestedEntriesFollowTheOuterArtifact(t *testing.T) {

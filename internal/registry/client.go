@@ -57,6 +57,8 @@ type Client struct {
 	allowedPrivateAuthHosts     map[string]struct{}
 	allowPrivateHosts           bool
 	lookupIP                    func(context.Context, string) ([]net.IPAddr, error)
+	now                         func() time.Time
+	sleep                       func(context.Context, time.Duration) error
 	configErr                   error
 	tokenCache                  map[string]string
 	tokenCacheBytes             int
@@ -134,6 +136,8 @@ func NewClient(options Options) *Client {
 		allowedPrivateAuthHosts:     authAllowlist,
 		allowPrivateHosts:           options.AllowPrivateHosts,
 		lookupIP:                    lookupIP,
+		now:                         time.Now,
+		sleep:                       sleepContext,
 		configErr:                   errors.Join(baseErr, authErr, registryAllowlistErr, authAllowlistErr),
 		tokenCache:                  make(map[string]string),
 	}
@@ -171,9 +175,7 @@ func (c *Client) TagsURL(repository string) string {
 }
 
 func (c *Client) FetchManifest(ctx context.Context, repository, identifier string) (ManifestResponse, error) {
-	requestCtx, cancel := c.withRequestTimeout(ctx)
-	defer cancel()
-	response, err := c.doRequest(requestCtx, http.MethodGet, c.ManifestURL(repository, identifier), strings.Join([]string{
+	response, err := c.doRequest(ctx, http.MethodGet, c.ManifestURL(repository, identifier), strings.Join([]string{
 		manifest.MediaTypeOCIImageIndex,
 		manifest.MediaTypeOCIImageManifest,
 		manifest.MediaTypeDockerSchema2ManifestList,
@@ -198,8 +200,7 @@ func (c *Client) FetchManifest(ctx context.Context, repository, identifier strin
 }
 
 func (c *Client) ResolveManifest(ctx context.Context, repository, identifier string) (ManifestMetadata, error) {
-	headCtx, cancel := c.withRequestTimeout(ctx)
-	response, err := c.doRequest(headCtx, http.MethodHead, c.ManifestURL(repository, identifier), strings.Join([]string{
+	response, err := c.doRequest(ctx, http.MethodHead, c.ManifestURL(repository, identifier), strings.Join([]string{
 		manifest.MediaTypeOCIImageIndex,
 		manifest.MediaTypeOCIImageManifest,
 		manifest.MediaTypeDockerSchema2ManifestList,
@@ -207,7 +208,6 @@ func (c *Client) ResolveManifest(ctx context.Context, repository, identifier str
 	}, ", "), repository)
 	if err == nil {
 		_ = response.Body.Close()
-		cancel()
 		resolved := ManifestMetadata{
 			Digest:    strings.TrimSpace(response.Header.Get("Docker-Content-Digest")),
 			MediaType: strings.TrimSpace(response.Header.Get("Content-Type")),
@@ -218,8 +218,6 @@ func (c *Client) ResolveManifest(ctx context.Context, repository, identifier str
 			}
 			return resolved, nil
 		}
-	} else {
-		cancel()
 	}
 
 	manifestResponse, err := c.FetchManifest(ctx, repository, identifier)
@@ -247,7 +245,10 @@ func (c *Client) OpenBlob(ctx context.Context, repository, digest string) (BlobR
 	if err := manifest.ValidateDigest(digest); err != nil {
 		return BlobResponse{}, fmt.Errorf("validate blob digest: %w", err)
 	}
-	response, err := c.doRequest(ctx, http.MethodGet, c.BlobURL(repository, digest), "", repository) //nolint:bodyclose // the caller owns BlobResponse.Body and closes it
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	response, err := c.doRequest(withStreamingBody(ctx), http.MethodGet, c.BlobURL(repository, digest), "", repository) //nolint:bodyclose // the caller owns BlobResponse.Body and closes it
 	if err != nil {
 		return BlobResponse{}, err
 	}
@@ -281,11 +282,10 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 			return tags, fmt.Errorf("registry tag pagination cycle detected")
 		}
 		seenPages[targetURL] = struct{}{}
-		pageCtx, cancel := c.withRequestTimeout(ctx)
-		response, err := c.doRequest(pageCtx, http.MethodGet, targetURL, "application/json", repository)
+		response, err := c.doRequest(ctx, http.MethodGet, targetURL, "application/json", repository)
 		if err != nil {
-			cancel()
-			return nil, err
+			sort.Strings(tags)
+			return tags, err
 		}
 
 		var payload struct {
@@ -295,7 +295,6 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 		linkHeaders := response.Header.Values("Link")
 		body, readErr := readTagResponseBody(response.Body, c.maxTagResponseBytes, repository)
 		_ = response.Body.Close()
-		cancel()
 		if readErr != nil {
 			sort.Strings(tags)
 			return tags, readErr
@@ -413,11 +412,32 @@ func checkResponse(response *http.Response, method, targetURL string) (*http.Res
 	return nil, &StatusError{StatusCode: response.StatusCode, Method: method, URL: redactURL(targetURL)}
 }
 
+// executeRequest performs one logical request with up to requestAttempts
+// attempts. Every attempt gets its own request-timeout deadline (the caller's
+// context remains the overall cap), so a stalled dial or response still leaves
+// room for a retry. Only idempotent requests are retried, on transient
+// transport failures and retryable statuses, after a bounded backoff that
+// honours Retry-After. The returned response body carries the attempt deadline
+// until it is closed, except for streaming (blob) bodies, which detach from it
+// once headers have arrived.
 func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, token string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	streaming := streamingBodyFromContext(ctx)
+	retryable := isIdempotentMethod(method)
 	var lastErr error
+	var delay time.Duration
 	for attempt := 0; attempt < c.requestAttempts; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+		if attempt > 0 {
+			if err := c.sleep(ctx, delay); err != nil {
+				return nil, fmt.Errorf("retry aborted: %w", errors.Join(err, lastErr))
+			}
+		}
+		attemptCtx := newAttemptContext(ctx, c.requestTimeout)
+		request, err := http.NewRequestWithContext(attemptCtx, method, targetURL, nil)
 		if err != nil {
+			attemptCtx.cancel()
 			return nil, fmt.Errorf("create registry request: %w", err)
 		}
 		if accept != "" {
@@ -429,17 +449,25 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 
 		response, err := c.doHTTP(request)
 		if err != nil {
+			attemptCtx.cancel()
 			lastErr = err
-			if attempt+1 < c.requestAttempts && isRetryableRequestError(ctx, err) {
+			if retryable && attempt+1 < c.requestAttempts && isRetryableRequestError(ctx, err) {
+				delay = c.retryDelay(attempt, nil)
 				continue
 			}
 			return nil, err
 		}
-		if attempt+1 < c.requestAttempts && isRetryableStatus(response.StatusCode) {
+		if retryable && attempt+1 < c.requestAttempts && isRetryableStatus(response.StatusCode) {
+			delay = c.retryDelay(attempt, response)
+			lastErr = &StatusError{StatusCode: response.StatusCode, Method: method, URL: redactURL(targetURL)}
 			_ = response.Body.Close()
-			lastErr = fmt.Errorf("transient registry status %d", response.StatusCode)
+			attemptCtx.cancel()
 			continue
 		}
+		if streaming {
+			attemptCtx.detach()
+		}
+		response.Body = &attemptBody{ReadCloser: response.Body, cancel: attemptCtx.cancel}
 		return response, nil
 	}
 
@@ -464,8 +492,9 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 	if realmURL == "" {
 		return "", fmt.Errorf("bearer auth challenge is missing realm")
 	}
-	requestCtx, cancel := c.withRequestTimeout(ctx)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	parsedRealm, err := url.Parse(realmURL)
 	if err != nil {
@@ -482,7 +511,7 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 	if err := c.validateAuthRealm(parsedRealm.String()); err != nil {
 		return "", fmt.Errorf("reject auth realm: %w", err)
 	}
-	requestCtx = context.WithValue(requestCtx, requestKindContextKey{}, requestKindAuth)
+	requestCtx := context.WithValue(ctx, requestKindContextKey{}, requestKindAuth)
 
 	response, err := c.executeRequest(requestCtx, http.MethodGet, parsedRealm.String(), "", "")
 	if err != nil {
@@ -523,16 +552,6 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 	}
 
 	return token, nil
-}
-
-func (c *Client) withRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if c.requestTimeout <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, c.requestTimeout)
 }
 
 func (c *Client) invalidateToken(challenge bearerChallenge) {
@@ -666,34 +685,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func isRetryableRequestError(ctx context.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	if ctx != nil && ctx.Err() != nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-
-	var netError net.Error
-	if errors.As(err, &netError) && netError.Timeout() {
-		return true
-	}
-
-	return false
-}
-
-func isRetryableStatus(statusCode int) bool {
-	switch statusCode {
-	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return statusCode >= 500 && statusCode <= 599
-	}
 }
 
 func appendURLQuery(targetURL string, values map[string]string) (string, error) {

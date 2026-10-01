@@ -74,10 +74,18 @@ func countBlockingFindings(items []findings.Finding, threshold failOnLevel) int 
 	return count
 }
 
+// innerDeadlineHint follows a scan error whose deadline was a per-request or
+// per-blob one, so the operator is pointed at the setting that actually fired.
+const innerDeadlineHint = " (a per-blob or per-request deadline expired; see LAYERLEAK_BLOB_TIMEOUT and LAYERLEAK_HTTP_TIMEOUT)"
+
 // cancellationExit builds the single, descriptive error for a run that ended
-// because its context ended: the scan deadline names LAYERLEAK_SCAN_TIMEOUT,
-// a signal names itself, and any other cancellation is reported once. cause
-// stays wrapped so errors.Is(err, context.Canceled) and similar keep working.
+// because a context ended. A signal names itself; the scan deadline names
+// LAYERLEAK_SCAN_TIMEOUT only when ctx (the scan-timeout context derived from
+// parent) itself expired; a deadline that expired deeper in the scan (the
+// per-blob LAYERLEAK_BLOB_TIMEOUT or per-request LAYERLEAK_HTTP_TIMEOUT
+// contexts) keeps the scan error text and hints at those settings; any other
+// cancellation is reported once. cause stays wrapped so
+// errors.Is(err, context.Canceled) and similar keep working.
 func cancellationExit(parent, ctx context.Context, timeout time.Duration, cause error) exitError {
 	message := "scan canceled"
 	switch {
@@ -88,8 +96,10 @@ func cancellationExit(parent, ctx context.Context, timeout time.Duration, cause 
 		} else {
 			message = "scan canceled by the caller"
 		}
-	case (ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)) || errors.Is(cause, context.DeadlineExceeded):
+	case ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		message = fmt.Sprintf("scan exceeded LAYERLEAK_SCAN_TIMEOUT (%s)", timeout)
+	case cause != nil && errors.Is(cause, context.DeadlineExceeded):
+		message = cause.Error() + innerDeadlineHint
 	}
 	return exitError{code: exitCodeFailure, message: message, cause: cause}
 }

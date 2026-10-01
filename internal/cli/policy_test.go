@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -289,5 +290,88 @@ func TestDebugLoggingUsesTheCommandStderr(t *testing.T) {
 	var result jobs.Result
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("stdout polluted by logging: %v", err)
+	}
+}
+
+// installHangingLayerFixture serves an image whose single layer blob never
+// arrives: the registry holds the response open until the client gives up.
+func installHangingLayerFixture(t *testing.T) {
+	t.Helper()
+	configBody := []byte(`{"architecture":"amd64","os":"linux","config":{}}`)
+	configDescriptor := commandDescriptor(t, manifest.MediaTypeOCIImageConfig, configBody)
+	layerDescriptor := commandDescriptor(t, manifest.MediaTypeOCIImageLayerGzip, []byte("layer bytes that never arrive"))
+	manifestBody, err := json.Marshal(manifest.ImageManifest{
+		SchemaVersion: 2,
+		MediaType:     manifest.MediaTypeOCIImageManifest,
+		Config:        configDescriptor,
+		Layers:        []manifest.Descriptor{layerDescriptor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := commandDescriptor(t, manifest.MediaTypeOCIImageManifest, manifestBody).Digest
+	installCommandRegistry(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/v2/library/app/manifests/latest":
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageManifest, manifestBody, map[string]string{"Docker-Content-Digest": digest}), nil
+		case "/v2/library/app/blobs/" + configDescriptor.Digest:
+			return commandResponse(http.StatusOK, manifest.MediaTypeOCIImageConfig, configBody, nil), nil
+		case "/v2/library/app/blobs/" + layerDescriptor.Digest:
+			<-request.Context().Done()
+			return nil, request.Context().Err()
+		default:
+			return commandResponse(http.StatusNotFound, "text/plain", nil, nil), nil
+		}
+	}))
+}
+
+func TestScanCommandDoesNotBlameScanTimeoutForBlobTimeout(t *testing.T) {
+	installHangingLayerFixture(t)
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+	t.Setenv("LAYERLEAK_BLOB_TIMEOUT", "200ms")
+	command := newScanCmd()
+	command.SilenceUsage = true
+	command.SilenceErrors = true
+	var stdout, stderr bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&stderr)
+	command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "plain"})
+	err := command.Execute()
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) || coded.ExitCode() != 1 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blob timeout exit = %v", err)
+	}
+	message := err.Error()
+	if strings.Contains(message, "LAYERLEAK_SCAN_TIMEOUT") {
+		t.Fatalf("blob timeout blamed the scan timeout: %q", message)
+	}
+	if !strings.Contains(message, "LAYERLEAK_BLOB_TIMEOUT") || !strings.Contains(message, "deadline exceeded") {
+		t.Fatalf("blob timeout message = %q", message)
+	}
+}
+
+func TestCancellationExitNamesTheDeadlineThatExpired(t *testing.T) {
+	parent := context.Background()
+	expired, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second))
+	defer cancel()
+	cause := fmt.Errorf("open blob: %w", context.DeadlineExceeded)
+
+	scanTimeout := cancellationExit(parent, expired, 30*time.Minute, cause)
+	if !strings.Contains(scanTimeout.Error(), "LAYERLEAK_SCAN_TIMEOUT (30m0s)") || !errors.Is(scanTimeout, context.DeadlineExceeded) {
+		t.Fatalf("scan timeout exit = %v", scanTimeout)
+	}
+
+	innerDeadline := cancellationExit(parent, parent, 30*time.Minute, cause)
+	message := innerDeadline.Error()
+	if strings.Contains(message, "LAYERLEAK_SCAN_TIMEOUT") || !strings.HasPrefix(message, "open blob: context deadline exceeded") || !strings.Contains(message, "LAYERLEAK_BLOB_TIMEOUT") || !strings.Contains(message, "LAYERLEAK_HTTP_TIMEOUT") {
+		t.Fatalf("inner deadline exit = %q", message)
+	}
+	if !errors.Is(innerDeadline, context.DeadlineExceeded) {
+		t.Fatalf("inner deadline exit lost its cause: %v", innerDeadline)
+	}
+
+	plain := cancellationExit(parent, parent, 30*time.Minute, context.Canceled)
+	if plain.Error() != "scan canceled" {
+		t.Fatalf("plain cancellation exit = %q", plain.Error())
 	}
 }

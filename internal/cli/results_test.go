@@ -297,8 +297,10 @@ func assertArtifactRecord(t *testing.T, path string, status jobs.ResultStatus) {
 	if record.Persistence.Status != "failed" || record.Persistence.ScanRunID != 0 || record.Persistence.ErrorCode != "storage_unavailable" {
 		t.Fatalf("persistence = %s", body)
 	}
-	if strings.Contains(string(body), "synthetic-private-error") || strings.Contains(string(body), "synthetic-database-detail") {
-		t.Fatalf("unsafe record: %s", body)
+	// The record keeps the real diagnostic text for the operator (PRD-05) but
+	// never the storage failure detail, which stays a neutral code.
+	if !strings.Contains(string(body), "synthetic-private-error") || strings.Contains(string(body), "synthetic-database-detail") {
+		t.Fatalf("unexpected record messages: %s", body)
 	}
 }
 

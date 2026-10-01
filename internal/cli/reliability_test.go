@@ -118,6 +118,42 @@ func TestScanCommandPreservesOutputAfterSaveFailure(t *testing.T) {
 	}
 }
 
+func TestScanCommandFailedScanEmitsPublicResultJSON(t *testing.T) {
+	installReliableCommandFixture(t, jobs.ResultStatusFailed)
+	dir := t.TempDir()
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
+	command := newScanCmd()
+	command.SilenceUsage = true
+	var stdout, stderr bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&stderr)
+	command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off"})
+	err := command.Execute()
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) || coded.ExitCode() != 1 {
+		t.Fatalf("failed scan exit = %v", err)
+	}
+	var result jobs.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("failed scan produced no JSON result: %v; stdout=%q", decodeErr, stdout.String())
+	}
+	if result.Status != jobs.ResultStatusFailed || result.ResultSchemaVersion != jobs.ResultSchemaVersion {
+		t.Fatalf("result = %+v", result)
+	}
+	// The real registry error reaches the operator instead of "scan step failed".
+	if len(result.Targets) != 1 || !strings.Contains(result.Targets[0].Error, "404") || result.Targets[0].Error == "scan step failed" {
+		t.Fatalf("target error = %#v", result.Targets)
+	}
+	records, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
+	if len(records) != 1 {
+		t.Fatalf("failed scan record = %v", records)
+	}
+	record := readLocalScanRecord(t, records[0])
+	if record.Result.Status != jobs.ResultStatusFailed || !strings.Contains(record.Result.Targets[0].Error, "404") {
+		t.Fatalf("record = %+v", record.Result)
+	}
+}
+
 type commandFailingStore struct{}
 
 func (*commandFailingStore) Name() string { return "failing" }
@@ -183,8 +219,8 @@ func TestScanCommandCoverageAndSaveFailureExitCodes(t *testing.T) {
 		{jobs.ResultStatusCompleted, true, 1, "failed", 0},
 		{jobs.ResultStatusPartial, false, 0, "saved", 17},
 		{jobs.ResultStatusPartial, true, 1, "failed", 0},
-		{jobs.ResultStatusFailed, false, 1, "", 0},
-		{jobs.ResultStatusFailed, true, 1, "", 0},
+		{jobs.ResultStatusFailed, false, 1, "saved", 17},
+		{jobs.ResultStatusFailed, true, 1, "failed", 0},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/save_fails=%v", tt.status, tt.saveFails), func(t *testing.T) {
@@ -223,12 +259,7 @@ func assertCommandExitAndSave(t *testing.T, err error, wantCode, saves int) {
 func assertCommandCoveragePublication(t *testing.T, dir string, stdout []byte, status jobs.ResultStatus, persistence string, scanRunID int64) {
 	t.Helper()
 	paths, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-	if status == jobs.ResultStatusFailed {
-		if len(paths) != 0 || len(stdout) != 0 {
-			t.Fatalf("failed scan publication behavior changed: files=%v stdout=%s", paths, stdout)
-		}
-		return
-	}
+	// A failed scan publishes its result like any other outcome (CLI-06).
 	if len(paths) != 1 {
 		t.Fatalf("record lost: %v", paths)
 	}

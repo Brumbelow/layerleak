@@ -296,7 +296,7 @@ func writeResultArtifacts(configuredDir string, persistRawSecrets bool, outcome 
 	} else if storeName != "noop" {
 		persistence = persistenceOutcome{Status: "saved", ScanRunID: outcome.ScanRunID}
 	}
-	record := localScanRecord{RecordSchemaVersion: 1, CreatedAt: time.Now().UTC(), Result: scanservice.RedactedResult(outcome.Result), Persistence: persistence}
+	record := localScanRecord{RecordSchemaVersion: 1, CreatedAt: time.Now().UTC(), Result: scanservice.PublicResult(outcome.Result), Persistence: persistence}
 	return publishResultArtifacts(dir, name, buildPersistedFindings(outcome.Result, persistRawSecrets), record)
 }
 

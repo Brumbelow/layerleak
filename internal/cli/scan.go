@@ -175,7 +175,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				operationErr = errors.Join(operationErr, ctx.Err())
 			}
 			acceptPartial := allowPartial && canAcceptPartial(ctx, result, scanErr)
-			if isCancellation(scanErr) || ctx.Err() != nil || (scanErr != nil && !hasUsablePartialResult(result)) {
+			// Cancellation and failures before a result existed are the only
+			// silent paths. A failed scan still publishes its result (status
+			// failed, diagnostics, per-target errors) on stdout and in the
+			// local record so automation can see why it failed.
+			if isCancellation(scanErr) || ctx.Err() != nil || !hasPublishableResult(result) {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
@@ -259,7 +263,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			case "json":
 				encoder := json.NewEncoder(cmd.OutOrStdout())
 				encoder.SetIndent("", "  ")
-				if err := encoder.Encode(scanservice.RedactedResult(result)); err != nil {
+				if err := encoder.Encode(scanservice.PublicResult(result)); err != nil {
 					return errors.Join(operationErr, publicationErr, err)
 				}
 			case "summary":
@@ -324,6 +328,13 @@ func validateRepositoryScopeFlags(cmd *cobra.Command, allTags bool) error {
 
 func hasUsablePartialResult(result jobs.Result) bool {
 	return result.ResultSchemaVersion > 0 && result.CompletedManifestCount > 0
+}
+
+// hasPublishableResult reports whether the scan produced a result at all. A
+// failure before the scan started (registry client configuration, invalid
+// request) leaves the zero Result, which is not worth printing or recording.
+func hasPublishableResult(result jobs.Result) bool {
+	return result.ResultSchemaVersion > 0
 }
 
 func canAcceptPartial(ctx context.Context, result jobs.Result, err error) bool {

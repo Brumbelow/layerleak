@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/brumbelow/layerleak/v3/internal/limits"
@@ -28,9 +29,10 @@ var ErrCacheUnusable = errors.New("layer cache cannot serve this manifest: conte
 // A cached layer holds metadata only: entry names, types, sizes, content
 // classes and the physical stream positions that make limit enforcement
 // reproducible. It never holds file content, so no secret bytes live in it;
-// a layer with any finding, with nested archives or with hardlinks into
-// other layers is never cached. Replaying from the cache is byte-identical
-// to replaying from the registry.
+// a layer with any finding, with nested archives or with a hardlink whose
+// target is not a file of the same layer (another layer's file, a directory
+// or nothing at all) is never cached. Replaying from the cache is
+// byte-identical to replaying from the registry.
 type LayerCache struct {
 	mu        sync.Mutex
 	maxBytes  int64
@@ -136,7 +138,12 @@ type LayerRecord struct {
 	entries     []cachedEntry
 	physicalEnd int64
 	size        int64
-	cacheable   bool
+	// maxBytes bounds size while the record is built (the cache's bound;
+	// 0 is unbounded): a record that would outgrow what the cache can hold
+	// stops recording and is dropped instead of pinning every entry name of
+	// the layer until the cache rejects it.
+	maxBytes  int64
+	cacheable bool
 }
 
 // cachedEntry mirrors one tar header plus, for regular files, the artifact
@@ -164,18 +171,54 @@ const (
 	cachedEntryStringCost = 1
 )
 
-func newLayerRecord(descriptor manifest.Descriptor) *LayerRecord {
-	return &LayerRecord{
+func newLayerRecord(descriptor manifest.Descriptor, maxBytes int64) *LayerRecord {
+	record := &LayerRecord{
 		Digest:    descriptor.Digest,
 		key:       cacheKey(descriptor),
 		cacheable: true,
+		maxBytes:  maxBytes,
 		size:      cachedLayerBaseBytes + int64(len(descriptor.Digest)),
 	}
+	if maxBytes > 0 && record.size > maxBytes {
+		record.drop()
+	}
+	return record
 }
 
-func (r *LayerRecord) addEntry(entry cachedEntry) {
+// addEntry appends entry and reports whether the record kept it. Over-long
+// names and link targets are stored truncated just past the path bound:
+// normalizePath and validateLinkname reject on length before anything else,
+// so the truncated value replays as the same unsafe skip. Once the record
+// would exceed maxBytes it is dropped and records nothing more.
+func (r *LayerRecord) addEntry(entry cachedEntry) bool {
+	if !r.cacheable {
+		return false
+	}
+	entry.name = boundedRecordString(entry.name)
+	entry.linkname = boundedRecordString(entry.linkname)
+	size := r.size + cachedEntryBaseBytes + cachedEntryStringCost*int64(len(entry.name)+len(entry.linkname))
+	if r.maxBytes > 0 && size > r.maxBytes {
+		r.drop()
+		return false
+	}
 	r.entries = append(r.entries, entry)
-	r.size += cachedEntryBaseBytes + cachedEntryStringCost*int64(len(entry.name)+len(entry.linkname))
+	r.size = size
+	return true
+}
+
+// drop marks the record uncacheable and releases what it holds.
+func (r *LayerRecord) drop() {
+	r.cacheable = false
+	r.entries = nil
+}
+
+// boundedRecordString keeps at most maxArchivePathBytes+1 bytes of a tar
+// name, copied so the record does not pin the header's full string.
+func boundedRecordString(value string) string {
+	if len(value) <= maxArchivePathBytes+1 {
+		return value
+	}
+	return strings.Clone(value[:maxArchivePathBytes+1])
 }
 
 // markUncacheable excludes the layer from the cache: its replay depends on
@@ -183,7 +226,7 @@ func (r *LayerRecord) addEntry(entry cachedEntry) {
 // layer stack (nested archive expansion).
 func (r *LayerRecord) markUncacheable() {
 	if r != nil {
-		r.cacheable = false
+		r.drop()
 	}
 }
 
@@ -307,8 +350,7 @@ func (t *tarEntrySource) next() (layerEntry, error) {
 		reader: newContextReader(t.ctx, t.tarReader),
 	}
 	t.current = nil
-	if t.layer != nil {
-		t.layer.addEntry(cachedEntry{name: header.Name, linkname: header.Linkname, typeflag: header.Typeflag, size: header.Size, physicalHeader: t.limited.readBytes})
+	if t.layer != nil && t.layer.addEntry(cachedEntry{name: header.Name, linkname: header.Linkname, typeflag: header.Typeflag, size: header.Size, physicalHeader: t.limited.readBytes}) {
 		t.current = &t.layer.entries[len(t.layer.entries)-1]
 	}
 	return entry, nil

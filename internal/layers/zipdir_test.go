@@ -1,7 +1,10 @@
 package layers
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -27,8 +30,42 @@ func TestZipDirectoryEntriesShortZip64Locator(t *testing.T) {
 	}
 }
 
+// TestZipDirectoryEntriesSearchesLikeArchiveZip pads a zip with trailing
+// bytes around the edge of archive/zip's end-record search window (the last
+// 65*1024 bytes): the pre-check locates the directory exactly when the reader
+// does, so ok is false only for content the reader rejects.
+func TestZipDirectoryEntriesSearchesLikeArchiveZip(t *testing.T) {
+	archive := storedZipArchive(t, 3)
+	for _, padding := range []int{0, 1000, 65535, 65536, 66000, 66538, 66539, 70000} {
+		t.Run(fmt.Sprint(padding), func(t *testing.T) {
+			content := append(bytes.Clone(archive), make([]byte, padding)...)
+			_, readerErr := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+			entries, ok := zipDirectoryEntries(content)
+			if ok != (readerErr == nil) {
+				t.Fatalf("zipDirectoryEntries ok = %t, archive/zip error = %v", ok, readerErr)
+			}
+			if ok && entries != 3 {
+				t.Fatalf("entries = %d, want 3", entries)
+			}
+		})
+	}
+
+	// A comment running past the end of the content is not skipped in favour
+	// of an earlier end record: archive/zip rejects the archive.
+	truncated := bytes.Clone(archive)
+	binary.LittleEndian.PutUint16(truncated[len(truncated)-2:], 10)
+	content := append(bytes.Clone(archive), truncated...)
+	if _, err := zip.NewReader(bytes.NewReader(content), int64(len(content))); err == nil {
+		t.Fatal("archive/zip accepted a truncated comment; fixture needs adjusting")
+	}
+	if _, ok := zipDirectoryEntries(content); ok {
+		t.Fatal("zipDirectoryEntries located an end record archive/zip does not use")
+	}
+}
+
 // FuzzZipDirectoryEntries checks that the pre-parse directory count never
-// panics and never reports a negative count, whatever the bytes are.
+// panics, never reports a negative count, reports ok whenever archive/zip
+// opens the content, and then bounds the number of headers it parsed.
 func FuzzZipDirectoryEntries(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte(zipDirectoryEndSig + "\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00"))
@@ -36,9 +73,24 @@ func FuzzZipDirectoryEntries(f *testing.F) {
 	copy(short[26:], zipDirectoryEndSig)
 	copy(short[6:], zipDirectory64LocSig)
 	f.Add(short)
+	valid := storedZipArchive(f, 3)
+	f.Add(valid)
+	f.Add(append(bytes.Clone(valid), make([]byte, 65600)...))
+	f.Add(zip64Archive(f, valid, 3))
 	f.Fuzz(func(t *testing.T, content []byte) {
-		if entries, _ := zipDirectoryEntries(content); entries < 0 {
+		entries, ok := zipDirectoryEntries(content)
+		if entries < 0 {
 			t.Fatalf("entries = %d", entries)
+		}
+		reader, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+		if err != nil {
+			return
+		}
+		if !ok {
+			t.Fatalf("archive/zip opened %d entries the pre-check could not locate", len(reader.File))
+		}
+		if int64(len(reader.File)) > entries {
+			t.Fatalf("archive/zip parsed %d headers, the pre-check counted %d", len(reader.File), entries)
 		}
 	})
 }

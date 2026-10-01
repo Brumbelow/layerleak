@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -112,12 +113,20 @@ func newSharedLayerRepository(tb testing.TB, tags, sharedLayers int) *sharedLaye
 		manifests[digest] = body
 		tagDigests[tag] = digest
 	}
+	repo.serve(tb, blobs, blobTypes, tagNames, manifests, tagDigests)
+	return repo
+}
+
+// serve installs the registry transport for library/app over the given
+// blobs, manifests and tag list.
+func (r *sharedLayerRepository) serve(tb testing.TB, blobs map[string][]byte, blobTypes map[string]string, tagNames []string, manifests map[string][]byte, tagDigests map[string]string) {
+	tb.Helper()
 	tagList, err := json.Marshal(map[string]any{"name": "library/app", "tags": tagNames})
 	if err != nil {
 		tb.Fatalf("Marshal() error = %v", err)
 	}
 
-	repo.transport = repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	r.transport = repoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Host == "auth.test" {
 			body, _ := json.Marshal(map[string]string{"token": "test-token"})
 			return repoResponse(http.StatusOK, "application/json", body, nil), nil
@@ -151,15 +160,14 @@ func newSharedLayerRepository(tb testing.TB, tags, sharedLayers int) *sharedLaye
 			if !ok {
 				return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 			}
-			repo.mu.Lock()
-			repo.blobOpens[digest]++
-			repo.mu.Unlock()
+			r.mu.Lock()
+			r.blobOpens[digest]++
+			r.mu.Unlock()
 			return repoResponse(http.StatusOK, blobTypes[digest], body, nil), nil
 		default:
 			return repoResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 		}
 	})
-	return repo
 }
 
 func (r *sharedLayerRepository) request(tb testing.TB, cacheBytes int64) Request {
@@ -214,6 +222,109 @@ func sweepJSON(tb testing.TB, repo *sharedLayerRepository, cacheBytes int64) ([]
 		tb.Fatalf("Marshal() error = %v", err)
 	}
 	return encoded, result
+}
+
+// newLayerStackRepository serves library/app with one tag per stack; a stack
+// names its layers, bottom first, as comma-separated roles.
+func newLayerStackRepository(tb testing.TB, layerEntries map[string][]tarEntry, stacks [][2]string) *sharedLayerRepository {
+	tb.Helper()
+	repo := &sharedLayerRepository{blobOpens: make(map[string]int), layers: make(map[string]string)}
+	blobs := make(map[string][]byte)
+	blobTypes := make(map[string]string)
+	byRole := make(map[string]manifest.Descriptor)
+	roles := make([]string, 0, len(layerEntries))
+	for role := range layerEntries {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		body := gzipLayer(tb, layerEntries[role])
+		descriptor := testDescriptor(tb, manifest.MediaTypeDockerSchema2LayerGzip, body)
+		blobs[descriptor.Digest] = body
+		blobTypes[descriptor.Digest] = manifest.MediaTypeDockerSchema2LayerGzip
+		repo.layers[descriptor.Digest] = role
+		byRole[role] = descriptor
+	}
+	tagNames := make([]string, 0, len(stacks))
+	manifests := make(map[string][]byte)
+	tagDigests := make(map[string]string)
+	for _, stack := range stacks {
+		tag := stack[0]
+		tagNames = append(tagNames, tag)
+		descriptors := make([]manifest.Descriptor, 0)
+		for _, role := range strings.Split(stack[1], ",") {
+			descriptors = append(descriptors, byRole[role])
+		}
+		configBody := []byte(fmt.Sprintf(`{"architecture":"amd64","os":"linux","config":{"Env":["TAG=%s"]}}`, tag))
+		config := testDescriptor(tb, manifest.MediaTypeOCIImageConfig, configBody)
+		blobs[config.Digest] = configBody
+		blobTypes[config.Digest] = manifest.MediaTypeOCIImageConfig
+		body := testManifestBody(tb, config, descriptors)
+		digest := testDescriptor(tb, manifest.MediaTypeOCIImageManifest, body).Digest
+		manifests[digest] = body
+		tagDigests[tag] = digest
+	}
+	repo.serve(tb, blobs, blobTypes, tagNames, manifests, tagDigests)
+	return repo
+}
+
+// TestScanRepositoryLayerCacheScansHardlinksRecordedWithoutTarget is the
+// regression for a cached layer whose hardlink had no regular-file target in
+// the stack it was recorded in (a missing target, or a directory). Replayed
+// onto a stack where the target is a clean cached file, the hardlink's own
+// path was never scanned, so the path-sensitive .netrc credential was lost
+// while coverage reported complete. The cached sweep must report exactly
+// what the uncached sweep reports.
+func TestScanRepositoryLayerCacheScansHardlinksRecordedWithoutTarget(t *testing.T) {
+	// Synthetic credential, assembled at run time.
+	netrc := "machine example.com login deploy " + "pass" + "word " + "Sup3r" + "S3cret" + "Passw0rd\n"
+	for _, tc := range []struct {
+		name  string
+		lower []tarEntry
+	}{
+		{name: "missing target", lower: []tarEntry{{name: "other.txt", body: "plain text\n"}}},
+		{name: "directory target", lower: []tarEntry{{name: "app/", typeflag: tar.TypeDir}, {name: "app/notes.txt/", typeflag: tar.TypeDir}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newLayerStackRepository(t, map[string][]tarEntry{
+				"X": tc.lower,
+				"L": {{name: ".netrc", typeflag: tar.TypeLink, linkname: "app/notes.txt"}},
+				"B": {{name: "app/", typeflag: tar.TypeDir}, {name: "app/notes.txt", body: netrc}},
+			}, [][2]string{{"a", "X,L"}, {"b", "B"}, {"c", "B,L"}})
+
+			sweep := func(cacheBytes int64) ([]byte, Result) {
+				result, err := Scan(context.Background(), repo.request(t, cacheBytes))
+				if err != nil && !IsIncomplete(err) {
+					t.Fatalf("Scan(cache=%d) error = %v", cacheBytes, err)
+				}
+				encoded, err := json.Marshal(result)
+				if err != nil {
+					t.Fatalf("Marshal() error = %v", err)
+				}
+				return encoded, result
+			}
+			findingsFor := func(result Result, tag string) int {
+				for _, target := range result.Targets {
+					if slices.Contains(target.Tags, tag) {
+						return target.FindingsCount
+					}
+				}
+				t.Fatalf("no target for tag %s", tag)
+				return 0
+			}
+			withoutCache, cold := sweep(0)
+			withCache, warm := sweep(64 << 20)
+			if got := findingsFor(cold, "c"); got != 1 {
+				t.Fatalf("uncached sweep: tag c findings = %d, want 1", got)
+			}
+			if got := findingsFor(warm, "c"); got != 1 {
+				t.Fatalf("cached sweep: tag c findings = %d, want 1 (the .netrc hardlink was not scanned)", got)
+			}
+			if !bytes.Equal(withoutCache, withCache) {
+				t.Fatalf("results differ with the layer cache:\n without: %s\n with:    %s", withoutCache, withCache)
+			}
+		})
+	}
 }
 
 // TestScanRepositoryLayerCacheIsByteIdentical is the mandatory property of

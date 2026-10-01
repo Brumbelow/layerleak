@@ -317,7 +317,15 @@ func (w *archiveWalk) readZip(content []byte) {
 	// first entry can be examined, so the entry bound is applied to the
 	// directory's own account of itself first: an archive with more entries
 	// than the allowance is refused whole rather than parsed and then cut.
-	if entries, ok := zipDirectoryEntries(content); ok && entries > w.entryAllowance {
+	// Content whose directory the pre-check cannot locate is refused as
+	// malformed rather than handed to the reader, so no difference between
+	// the two parsers can let an unbounded directory through.
+	entries, ok := zipDirectoryEntries(content)
+	if !ok {
+		w.malformed++
+		return
+	}
+	if entries > w.entryAllowance {
 		w.refuseEntries(entries)
 		return
 	}
@@ -388,6 +396,19 @@ func (w *archiveWalk) readGzip(outerPath string, content []byte) {
 		w.stopBytes()
 		return
 	}
+	// Every decompressed byte counts against the nested, layer and image
+	// byte budgets on every path out of here, not only regular-entry
+	// content: a stream that ends in a bad checksum, a truncated member or
+	// trailing bytes, a member refused for want of an entry, and a tar's
+	// headers, other entries, padding and data after the end-of-archive
+	// marker were all inflated too. Entry content is a subset of
+	// decompressed, which is within the allowance, so nothing is charged
+	// twice.
+	defer func() {
+		if inflated := int64(len(decompressed)); inflated > w.bytesRead {
+			w.bytesRead = inflated
+		}
+	}()
 	if err != nil {
 		w.malformed++
 		return

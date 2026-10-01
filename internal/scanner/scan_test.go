@@ -874,8 +874,8 @@ func TestDetectionBudgetBoundsRawFindingRetention(t *testing.T) {
 		if strings.Contains(items[0].ContextSnippet, token) || strings.Contains(items[0].RedactedValue, token) {
 			t.Fatalf("public finding contains token: %#v", items[0].Finding)
 		}
-		if budget.rawBytes != 0 || budget.rawExceeded {
-			t.Fatalf("raw budget = %d, exceeded = %t", budget.rawBytes, budget.rawExceeded)
+		if budget.rawBytes != 0 || budget.rawTruncated {
+			t.Fatalf("raw budget = %d, truncated = %t", budget.rawBytes, budget.rawTruncated)
 		}
 	})
 
@@ -892,8 +892,8 @@ func TestDetectionBudgetBoundsRawFindingRetention(t *testing.T) {
 			t.Fatalf("raw finding = %#v", items[0])
 		}
 		wantBytes := int64(len(items[0].Value) + len(items[0].RawSnippet))
-		if budget.rawBytes != wantBytes || budget.rawExceeded {
-			t.Fatalf("raw budget = %d, want %d, exceeded = %t", budget.rawBytes, wantBytes, budget.rawExceeded)
+		if budget.rawBytes != wantBytes || budget.rawTruncated {
+			t.Fatalf("raw budget = %d, want %d, truncated = %t", budget.rawBytes, wantBytes, budget.rawTruncated)
 		}
 	})
 
@@ -909,15 +909,20 @@ func TestDetectionBudgetBoundsRawFindingRetention(t *testing.T) {
 		if items[0].Value != "" || items[0].RawSnippet != "" {
 			t.Fatalf("over-limit raw finding retained: %#v", items[0])
 		}
-		if !budget.stopped() || !budget.rawExceeded || budget.rawBytes != 0 {
-			t.Fatalf("raw budget = %d, stopped = %t, exceeded = %t", budget.rawBytes, budget.stopped(), budget.rawExceeded)
+		// Raw truncation never stops detection; it only disables retention.
+		if budget.stopped() || !budget.rawTruncated || budget.rawBytes != 0 || budget.rawTruncatedFindings != 1 {
+			t.Fatalf("raw budget = %d, stopped = %t, truncated = %t, truncated findings = %d", budget.rawBytes, budget.stopped(), budget.rawTruncated, budget.rawTruncatedFindings)
 		}
-		diagnostic := budget.diagnostic()
-		if diagnostic.Code != "max_raw_finding_bytes_exceeded" || diagnostic.Limit != 1 || diagnostic.Observed <= diagnostic.Limit {
+		diagnostic := budget.rawDiagnostic()
+		if diagnostic.Code != "raw_retention_truncated" || diagnostic.Limit != 1 || diagnostic.Observed <= diagnostic.Limit || diagnostic.Subject != manifestDigest {
 			t.Fatalf("diagnostic = %#v", diagnostic)
 		}
-		if later := budget.scan(detectors.Default(), input, scanInput); len(later) != 0 {
-			t.Fatalf("len(later) = %d", len(later))
+		later := budget.scan(detectors.Default(), input, scanInput)
+		if len(later) != 1 || later[0].Value != "" || later[0].RawSnippet != "" {
+			t.Fatalf("later = %#v", later)
+		}
+		if budget.rawTruncatedFindings != 2 || budget.retained != 2 {
+			t.Fatalf("budget = %#v", budget)
 		}
 	})
 }
@@ -1351,6 +1356,116 @@ func TestScanAcceptsOSOnlyAndVariantNormalisedSelectors(t *testing.T) {
 				t.Fatalf("explicit selector produced platform_skipped: %#v", result.Diagnostics)
 			}
 		})
+	}
+}
+
+func TestScanFindingsBudgetExhaustedOnEntryYieldsPartialResult(t *testing.T) {
+	f := newRegistryFixture()
+	layer := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{{name: "app/.env", body: "GH=" + syntheticGitHubToken}}))
+	config := configBlob(t, f, "linux", "amd64")
+	f.setRootManifest(t, config, []manifest.Descriptor{layer})
+
+	request := f.request(t, "")
+	request.MaxFindings = 5
+	request.ExistingFindings = 5
+	result, err := Scan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusPartial || result.Coverage.Complete {
+		t.Fatalf("result status = %q, coverage = %#v", result.Status, result.Coverage)
+	}
+	if result.ManifestCount != 1 || result.CompletedManifestCount != 0 || result.FailedManifestCount != 0 || len(result.PlatformResults) != 0 {
+		t.Fatalf("result counts = %d/%d/%d, platforms %d", result.ManifestCount, result.CompletedManifestCount, result.FailedManifestCount, len(result.PlatformResults))
+	}
+	if codes := diagnosticCodes(result.Diagnostics); len(codes) != 1 || codes[0] != "max_findings_exceeded" {
+		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)
+	}
+	if f.requests["/v2/library/app/blobs/"+config.Digest] != 0 || f.requests["/v2/library/app/blobs/"+layer.Digest] != 0 {
+		t.Fatalf("blobs were fetched for an exhausted budget: %#v", f.requests)
+	}
+}
+
+func TestScanReportsBudgetDiagnosticsOnce(t *testing.T) {
+	f := newRegistryFixture()
+	layer := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{{name: "app/.env", body: strings.Join([]string{
+		"A=ghp_123456789012345678901234567890123456",
+		"B=ghp_223456789012345678901234567890123456",
+		"C=ghp_323456789012345678901234567890123456",
+	}, "\n")}}))
+	amd64 := f.imageManifest(t, configBlob(t, f, "linux", "amd64"), []manifest.Descriptor{layer}, manifest.Platform{OS: "linux", Architecture: "amd64"})
+	arm64 := f.imageManifest(t, configBlob(t, f, "linux", "arm64"), []manifest.Descriptor{layer}, manifest.Platform{OS: "linux", Architecture: "arm64"})
+	f.setIndex(t, amd64, arm64)
+
+	request := f.request(t, "")
+	request.MaxFindings = 2
+	result, err := Scan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusPartial || result.TotalFindings != 2 || result.CompletedManifestCount != 1 {
+		t.Fatalf("result = status %q, findings %d, completed %d", result.Status, result.TotalFindings, result.CompletedManifestCount)
+	}
+	count := 0
+	for _, code := range diagnosticCodes(result.Diagnostics) {
+		if code == "max_findings_exceeded" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("max_findings_exceeded reported %d times: %#v", count, result.Diagnostics)
+	}
+}
+
+func TestScanContinuesDetectionWhenRawRetentionBudgetIsExhausted(t *testing.T) {
+	f := newRegistryFixture()
+	layer := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{
+		{name: "app/first.env", body: "A=ghp_123456789012345678901234567890123456"},
+		{name: "app/second.env", body: "B=ghp_223456789012345678901234567890123456"},
+	}))
+	amd64 := f.imageManifest(t, configBlob(t, f, "linux", "amd64"), []manifest.Descriptor{layer}, manifest.Platform{OS: "linux", Architecture: "amd64"})
+	arm64 := f.imageManifest(t, configBlob(t, f, "linux", "arm64"), []manifest.Descriptor{layer}, manifest.Platform{OS: "linux", Architecture: "arm64"})
+	f.setIndex(t, amd64, arm64)
+
+	request := f.request(t, "")
+	request.RetainRawSecrets = true
+	request.MaxRawFindingBytes = 1
+	result, err := Scan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusCompleted || !result.Coverage.Complete {
+		t.Fatalf("result status = %q, coverage = %#v", result.Status, result.Coverage)
+	}
+	if result.CompletedManifestCount != 2 || result.TotalFindings != 4 {
+		t.Fatalf("result = completed %d, findings %d", result.CompletedManifestCount, result.TotalFindings)
+	}
+	for _, item := range result.DetailedFindings {
+		if item.Value != "" || item.RawSnippet != "" {
+			t.Fatalf("raw value retained beyond the budget: %#v", item)
+		}
+	}
+	codes := diagnosticCodes(result.Diagnostics)
+	if slices.Contains(codes, "max_raw_finding_bytes_exceeded") {
+		t.Fatalf("raw budget still reported as a coverage failure: %#v", result.Diagnostics)
+	}
+	truncated := 0
+	for _, code := range codes {
+		if code == "raw_retention_truncated" {
+			truncated++
+		}
+	}
+	if truncated != 1 {
+		t.Fatalf("raw_retention_truncated reported %d times: %#v", truncated, result.Diagnostics)
+	}
+	diagnostic, _ := findDiagnostic(result.Diagnostics, "raw_retention_truncated", "")
+	if diagnostic.Limit != 1 || diagnostic.Observed <= diagnostic.Limit || diagnostic.Scope != "scan" {
+		t.Fatalf("raw_retention_truncated diagnostic = %#v", diagnostic)
+	}
+	for _, platform := range result.PlatformResults {
+		if platform.Status != ResultStatusCompleted || platform.FindingsCount != 2 {
+			t.Fatalf("platform result = %#v", platform)
+		}
 	}
 }
 

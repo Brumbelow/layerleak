@@ -957,6 +957,8 @@ func safeDiagnosticMessage(code string) string {
 		return "the scan exceeded the configured findings limit"
 	case "max_raw_finding_bytes_exceeded":
 		return "the scan exceeded the configured raw finding byte limit"
+	case "raw_retention_truncated":
+		return "raw secret retention stopped at the configured byte limit; detection continued without raw values"
 	case "platform_skipped":
 		return "a platform manifest was skipped by the default linux-only platform policy"
 	case "manifest_skipped":

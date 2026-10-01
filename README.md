@@ -243,7 +243,7 @@ control.
 | `LAYERLEAK_MAX_CONFIG_BYTES` | `8388608` | Maximum image config response size. |
 | `LAYERLEAK_MAX_TAG_RESPONSE_BYTES` | `8388608` | Maximum tag-list response page size. |
 | `LAYERLEAK_MAX_FINDINGS_PER_SCAN` | `10000` | Maximum findings retained for one scan. |
-| `LAYERLEAK_MAX_RAW_FINDING_BYTES` | `67108864` | Maximum raw value and context bytes retained when raw-secret persistence is enabled; exceeding it makes coverage partial. |
+| `LAYERLEAK_MAX_RAW_FINDING_BYTES` | `67108864` | Maximum raw value and context bytes retained when raw-secret persistence is enabled. Once reached, detection continues with raw retention disabled, coverage stays complete, and a `raw_retention_truncated` diagnostic reports how many findings were recorded without raw values. |
 | `LAYERLEAK_TAG_PAGE_SIZE` | `100` | Registry tag-list page size. |
 | `LAYERLEAK_MAX_REPOSITORY_TAGS` | `1000` | Maximum tags enumerated by `--all-tags`. |
 | `LAYERLEAK_MAX_REPOSITORY_TARGETS` | `250` | Maximum distinct targets scanned by `--all-tags`. |

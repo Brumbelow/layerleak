@@ -227,11 +227,13 @@ func TestScanAndSaveAppliesRawFindingPolicy(t *testing.T) {
 		persistRawSecrets  bool
 		maxRawFindingBytes int64
 		wantRaw            bool
-		wantIncomplete     bool
+		wantTruncated      bool
 	}{
 		{name: "default off"},
 		{name: "opt in", persistRawSecrets: true, maxRawFindingBytes: 1 << 20, wantRaw: true},
-		{name: "byte limit", persistRawSecrets: true, maxRawFindingBytes: 1, wantIncomplete: true},
+		// Exhausting the raw budget disables retention but keeps detection and
+		// coverage complete; the truncation is reported as a diagnostic.
+		{name: "byte limit", persistRawSecrets: true, maxRawFindingBytes: 1, wantTruncated: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -251,18 +253,14 @@ func TestScanAndSaveAppliesRawFindingPolicy(t *testing.T) {
 			}
 
 			outcome, err := service.ScanAndSave(context.Background(), Request{Reference: reference})
-			if test.wantIncomplete {
-				if err == nil || !jobs.IsIncomplete(err) {
-					t.Fatalf("ScanAndSave() error = %v", err)
-				}
-				if outcome.Result.Status != jobs.ResultStatusPartial {
-					t.Fatalf("outcome.Result.Status = %q", outcome.Result.Status)
-				}
-				if !scanResultHasDiagnostic(outcome.Result, "max_raw_finding_bytes_exceeded") {
-					t.Fatalf("outcome.Result.Diagnostics = %#v", outcome.Result.Diagnostics)
-				}
-			} else if err != nil {
+			if err != nil {
 				t.Fatalf("ScanAndSave() error = %v", err)
+			}
+			if outcome.Result.Status != jobs.ResultStatusCompleted {
+				t.Fatalf("outcome.Result.Status = %q", outcome.Result.Status)
+			}
+			if test.wantTruncated != scanResultHasDiagnostic(outcome.Result, "raw_retention_truncated") {
+				t.Fatalf("outcome.Result.Diagnostics = %#v", outcome.Result.Diagnostics)
 			}
 			if outcome.ScanRunID != 1 || len(store.records) != 1 {
 				t.Fatalf("outcome/store = %#v/%d", outcome, len(store.records))

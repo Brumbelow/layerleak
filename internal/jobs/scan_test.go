@@ -691,13 +691,15 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 		MaxRawFindingBytes: maxRawFindingBytes,
 		TagPageSize:        100,
 	})
-	if err == nil || !IsIncomplete(err) {
+	// Spending the raw budget disables retention for the rest of the sweep but
+	// never costs detection coverage, so both targets complete.
+	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
-	if result.Status != ResultStatusPartial {
+	if result.Status != ResultStatusCompleted {
 		t.Fatalf("result.Status = %q", result.Status)
 	}
-	if result.CompletedTargetCount != 1 || result.PartialTargetCount != 1 {
+	if result.CompletedTargetCount != 2 || result.PartialTargetCount != 0 {
 		t.Fatalf("target counts = completed %d, partial %d", result.CompletedTargetCount, result.PartialTargetCount)
 	}
 	if len(result.DetailedFindings) != 2 {
@@ -730,7 +732,7 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 
 	foundDiagnostic := false
 	for _, diagnostic := range result.Diagnostics {
-		if diagnostic.Code != "max_raw_finding_bytes_exceeded" {
+		if diagnostic.Code != "raw_retention_truncated" {
 			continue
 		}
 		foundDiagnostic = true

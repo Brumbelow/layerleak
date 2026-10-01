@@ -438,7 +438,7 @@ jobs:
           api_check POST /api/v1/scans 400 '.error.code == "invalid_request"' \
             -H 'Content-Type: application/json' --data '{"reference":"https://not-a-reference"}'
           api_check GET /api/v1/repositories 200 '(.repositories | type) == "array" and (.repositories | length) == 0'
-          api_check GET /api/v1/scans/00000000-0000-0000-0000-000000000000 404 '.error.code == "not_found"'
+          api_check GET /api/v1/scans/999999999 404 '.error.code == "not_found"'
           api_check GET /definitely-not-a-route 404 '.error.code == "not_found"'
           api_check PUT /api/v1/scans 405 '.error.code == "method_not_allowed"'
           curl --silent --output /dev/null --dump-header - -X PUT http://127.0.0.1:18080/api/v1/scans \

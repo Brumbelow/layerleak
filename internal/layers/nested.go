@@ -396,20 +396,25 @@ func (w *archiveWalk) readGzip(outerPath string, content []byte) {
 		w.stopBytes()
 		return
 	}
+	// Every decompressed byte counts against the nested, layer and image
+	// byte budgets on every path out of here, not only regular-entry
+	// content: a stream that ends in a bad checksum, a truncated member or
+	// trailing bytes, a member refused for want of an entry, and a tar's
+	// headers, other entries, padding and data after the end-of-archive
+	// marker were all inflated too. Entry content is a subset of
+	// decompressed, which is within the allowance, so nothing is charged
+	// twice.
+	defer func() {
+		if inflated := int64(len(decompressed)); inflated > w.bytesRead {
+			w.bytesRead = inflated
+		}
+	}()
 	if err != nil {
 		w.malformed++
 		return
 	}
 	if nestedArchiveKind(decompressed) == "tar" {
 		w.readTar(bytes.NewReader(decompressed))
-		// Every decompressed byte counts against the nested, layer and image
-		// byte budgets, not only regular-entry content: headers, other
-		// entries, padding and data after the end-of-archive marker were
-		// inflated too. Entry content is a subset of decompressed, which is
-		// within the allowance, so nothing is charged twice.
-		if inflated := int64(len(decompressed)); inflated > w.bytesRead {
-			w.bytesRead = inflated
-		}
 		return
 	}
 	if !w.admitEntry() {

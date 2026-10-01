@@ -3,8 +3,13 @@
 How to run `layerleak-api` in production and what to expect from it. The
 contract itself is `web/docs/openapi.yaml`; the README "HTTP API" section has
 the full status-code table. This note covers the operational behaviour around
-it. Every variable below is read by `internal/config` at startup and rejected
-with an error naming the variable (never its value) when malformed.
+it. The `LAYERLEAK_API_*`, database, registry and scan-limit variables below
+are read by `internal/config` when the API starts and rejected with an error
+naming the variable (never its value) when malformed. The remaining five are
+read elsewhere: `layerleak-migrate-up` reads `LAYERLEAK_MIGRATION_TIMEOUT`,
+`LAYERLEAK_MIGRATION_LOCK_TIMEOUT` and `LAYERLEAK_MIGRATIONS_DIR`,
+`layerleak-purge-raw-secrets` reads `LAYERLEAK_PURGE_TIMEOUT`, and
+`LAYERLEAK_API_STOP_GRACE_PERIOD` is read by Compose alone.
 
 ## Process model
 

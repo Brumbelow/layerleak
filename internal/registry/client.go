@@ -18,6 +18,7 @@ import (
 
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/version"
 	distributionreference "github.com/distribution/reference"
 )
 
@@ -41,6 +42,8 @@ type Options struct {
 	AllowedPrivateAuthHosts     []string
 	AllowPrivateHosts           bool
 	LookupIP                    func(context.Context, string) ([]net.IPAddr, error)
+	// UserAgent overrides the default `layerleak/<version>` User-Agent header.
+	UserAgent string
 }
 
 type Client struct {
@@ -57,6 +60,7 @@ type Client struct {
 	allowedPrivateAuthHosts     map[string]struct{}
 	allowPrivateHosts           bool
 	lookupIP                    func(context.Context, string) ([]net.IPAddr, error)
+	userAgent                   string
 	now                         func() time.Time
 	sleep                       func(context.Context, time.Duration) error
 	configErr                   error
@@ -100,6 +104,13 @@ func BaseURLForRegistry(registry string) string {
 	return "https://" + value
 }
 
+// DefaultUserAgent is the User-Agent sent with every registry and token request
+// unless Options.UserAgent overrides it: `layerleak/<version>`, so registry
+// operators can attribute and allowlist scanner traffic.
+func DefaultUserAgent() string {
+	return "layerleak/" + version.Effective()
+}
+
 func NewClient(options Options) *Client {
 	registryAllowlist, registryAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateRegistryHosts)
 	authAllowlist, authAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateAuthHosts)
@@ -136,6 +147,7 @@ func NewClient(options Options) *Client {
 		allowedPrivateAuthHosts:     authAllowlist,
 		allowPrivateHosts:           options.AllowPrivateHosts,
 		lookupIP:                    lookupIP,
+		userAgent:                   defaultString(strings.TrimSpace(options.UserAgent), DefaultUserAgent()),
 		now:                         time.Now,
 		sleep:                       sleepContext,
 		configErr:                   errors.Join(baseErr, authErr, registryAllowlistErr, authAllowlistErr),
@@ -440,6 +452,7 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 			attemptCtx.cancel()
 			return nil, fmt.Errorf("create registry request: %w", err)
 		}
+		request.Header.Set("User-Agent", c.userAgent)
 		if accept != "" {
 			request.Header.Set("Accept", accept)
 		}

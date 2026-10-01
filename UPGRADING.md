@@ -263,8 +263,10 @@ Additions you may start reading:
 
 - `result_schema_version: 2` results. Results stored by a v2.x API carry no
   `result_schema_version` field at all (`1` was written only by unreleased
-  builds) and are returned unchanged by `GET /api/v1/scans/{id}`, so branch
-  on the field being `2`:
+  builds), and `GET /api/v1/scans/{id}` never upgrades a stored result: it
+  keeps its original shape and version, and only its `error`,
+  `error_message` and diagnostic `message` strings are replaced by fixed
+  neutral text on read. Branch on the field being `2`:
 
   | Field | v2.x (no version field) | v2 |
   | --- | --- | --- |

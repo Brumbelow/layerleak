@@ -221,8 +221,15 @@ fail the scan instead of silently truncating it. A value of `0` disables a
 Private destination allowlists are an explicit trust decision. Entries accept
 an exact DNS hostname or IPv4 address, optionally with a port, or bracketed
 IPv6 with a port. Schemes, paths, credentials, wildcards, malformed hostnames,
-invalid ports, and unbracketed IPv6 are rejected. Allow only infrastructure you
-control.
+invalid ports, and unbracketed IPv6 are rejected. Matching is literal on
+`host[:port]`: an entry without a port matches only URLs without an explicit
+port, so `localhost` does not cover `localhost:5000` and `registry.internal:443`
+does not cover `https://registry.internal/`; list the exact `host:port` the
+scanner connects to. Allowlisting a host is also what permits plain `http://`
+to it (for example `LAYERLEAK_REGISTRY_BASE_URL=http://registry.internal:5000`
+together with `LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS=registry.internal:5000`);
+every other destination requires TLS 1.2+ with a verifiable certificate. Allow
+only infrastructure you control.
 
 ### Resource bounds
 

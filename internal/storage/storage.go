@@ -197,12 +197,22 @@ type PostgresConfig struct {
 	RequireSchema     bool
 }
 
+// DefaultWriteTimeout bounds one SaveScan transaction when PostgresConfig
+// leaves WriteTimeout unset. Callers that persist a finished scan under a
+// context detached from the request (scanservice) use it as their fallback so
+// the write phase is never unbounded.
+const DefaultWriteTimeout = 2 * time.Minute
+
 const (
-	defaultMaxOpenConns    = 10
+	defaultMaxOpenConns = 10
+	// defaultMaxIdleConns mirrors LAYERLEAK_DATABASE_MAX_IDLE_CONNS in
+	// internal/config; database/sql treats 0 as "retain no idle connections",
+	// which made every statement outside a transaction dial and authenticate
+	// anew for callers that left the field unset.
+	defaultMaxIdleConns    = 5
 	defaultConnMaxLifetime = 30 * time.Minute
 	defaultConnMaxIdleTime = 5 * time.Minute
 	defaultQueryTimeout    = 10 * time.Second
-	defaultWriteTimeout    = 2 * time.Minute
 )
 
 func NewNoopStore() NoopStore {
@@ -219,28 +229,18 @@ func (NoopStore) Name() string {
 
 func (c PostgresConfig) Validate() error {
 	c = c.withDefaults()
-	if strings.TrimSpace(c.DatabaseURL) == "" {
+	dsn := strings.TrimSpace(c.DatabaseURL)
+	if dsn == "" {
 		return fmt.Errorf("database url is required")
 	}
-	parsed, err := url.Parse(strings.TrimSpace(c.DatabaseURL))
-	if err != nil {
-		return fmt.Errorf("database url is invalid")
-	}
-	if parsed.RawQuery != "" {
-		if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
-			return fmt.Errorf("database url is invalid")
+	// lib/pq accepts two grammars: a postgres:// URL and libpq keyword/value
+	// pairs. Neither error path echoes the value, which may carry a password.
+	if strings.Contains(dsn, "://") {
+		if err := validateDatabaseURL(dsn); err != nil {
+			return err
 		}
-	}
-	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
-	case "postgres", "postgresql":
-	default:
-		return fmt.Errorf("database url must use postgres scheme")
-	}
-	if strings.TrimSpace(parsed.Hostname()) == "" {
-		return fmt.Errorf("database url host is required")
-	}
-	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
-		return fmt.Errorf("database url name is required")
+	} else if err := validateKeywordDSN(dsn); err != nil {
+		return err
 	}
 	if c.MaxOpenConns < 0 {
 		return fmt.Errorf("max open connections must be greater than zero")
@@ -267,9 +267,134 @@ func (c PostgresConfig) Validate() error {
 	return nil
 }
 
+func validateDatabaseURL(dsn string) error {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return fmt.Errorf("database url is invalid")
+	}
+	query := url.Values{}
+	if parsed.RawQuery != "" {
+		query, err = url.ParseQuery(parsed.RawQuery)
+		if err != nil {
+			return fmt.Errorf("database url is invalid")
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+	case "postgres", "postgresql":
+	default:
+		return fmt.Errorf("database url must use postgres scheme")
+	}
+	// The host may live in the query string instead of the authority, which
+	// is how libpq addresses unix sockets (host=/var/run/postgresql) and how
+	// Cloud SQL Auth Proxy style deployments are configured.
+	if strings.TrimSpace(parsed.Hostname()) == "" && strings.TrimSpace(query.Get("host")) == "" && strings.TrimSpace(query.Get("hostaddr")) == "" {
+		return fmt.Errorf("database url host is required")
+	}
+	if (strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/") && strings.TrimSpace(query.Get("dbname")) == "" {
+		return fmt.Errorf("database url name is required")
+	}
+	return nil
+}
+
+func validateKeywordDSN(dsn string) error {
+	pairs, err := parseKeywordDSN(dsn)
+	if err != nil {
+		return fmt.Errorf("database connection string is invalid")
+	}
+	if strings.TrimSpace(pairs["dbname"]) == "" {
+		return fmt.Errorf("database connection string dbname is required")
+	}
+	return nil
+}
+
+// parseKeywordDSN parses a libpq keyword/value connection string such as
+// "host=/var/run/postgresql dbname=layerleak password='p w'" into its pairs.
+// It mirrors libpq's grammar: whitespace-separated key=value pairs, optional
+// whitespace around '=', values either single-quoted (with \' and \\ escapes)
+// or an unquoted run up to the next whitespace, and an empty value allowed.
+func parseKeywordDSN(value string) (map[string]string, error) {
+	pairs := make(map[string]string)
+	index := 0
+	skipSpaces := func() {
+		for index < len(value) && isDSNSpace(value[index]) {
+			index++
+		}
+	}
+	for {
+		skipSpaces()
+		if index >= len(value) {
+			return pairs, nil
+		}
+		start := index
+		for index < len(value) && isDSNKeyByte(value[index]) {
+			index++
+		}
+		if index == start {
+			return nil, fmt.Errorf("connection string key is missing")
+		}
+		key := value[start:index]
+		skipSpaces()
+		if index >= len(value) || value[index] != '=' {
+			return nil, fmt.Errorf("connection string key %q is not followed by '='", key)
+		}
+		index++
+		skipSpaces()
+		var builder strings.Builder
+		if index < len(value) && value[index] == '\'' {
+			index++
+			terminated := false
+			for index < len(value) {
+				character := value[index]
+				index++
+				if character == '\\' && index < len(value) {
+					builder.WriteByte(value[index])
+					index++
+					continue
+				}
+				if character == '\'' {
+					terminated = true
+					break
+				}
+				builder.WriteByte(character)
+			}
+			if !terminated {
+				return nil, fmt.Errorf("connection string value for %q has an unterminated quote", key)
+			}
+		} else {
+			for index < len(value) && !isDSNSpace(value[index]) {
+				character := value[index]
+				index++
+				if character == '\\' && index < len(value) {
+					builder.WriteByte(value[index])
+					index++
+					continue
+				}
+				builder.WriteByte(character)
+			}
+		}
+		pairs[key] = builder.String()
+	}
+}
+
+func isDSNSpace(character byte) bool {
+	switch character {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
+}
+
+func isDSNKeyByte(character byte) bool {
+	return character == '_' || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')
+}
+
 func (c PostgresConfig) withDefaults() PostgresConfig {
 	if c.MaxOpenConns == 0 {
 		c.MaxOpenConns = defaultMaxOpenConns
+	}
+	if c.MaxIdleConns == 0 {
+		c.MaxIdleConns = min(defaultMaxIdleConns, c.MaxOpenConns)
 	}
 	if c.ConnMaxLifetime == 0 {
 		c.ConnMaxLifetime = defaultConnMaxLifetime
@@ -281,7 +406,7 @@ func (c PostgresConfig) withDefaults() PostgresConfig {
 		c.QueryTimeout = defaultQueryTimeout
 	}
 	if c.WriteTimeout == 0 {
-		c.WriteTimeout = defaultWriteTimeout
+		c.WriteTimeout = DefaultWriteTimeout
 	}
 	return c
 }

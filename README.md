@@ -427,11 +427,21 @@ two-second deadline.
 docker pull ghcr.io/brumbelow/layerleak:latest
 docker run --rm \
   -p 8080:8080 \
-  -e LAYERLEAK_DATABASE_URL='postgres://<user>:<password>@<host>:5432/layerleak?sslmode=disable' \
+  -v /path/to/postgres-ca.pem:/etc/layerleak/postgres-ca.pem:ro \
+  -e LAYERLEAK_DATABASE_URL='postgres://<user>:<password>@<host>:5432/layerleak?sslmode=verify-full&sslrootcert=/etc/layerleak/postgres-ca.pem' \
   --read-only --tmpfs /tmp:mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges \
   ghcr.io/brumbelow/layerleak:latest
 ```
+
+Mount the CA certificate that signed the PostgreSQL server certificate and keep
+`sslmode=verify-full` for any database that is not on the same host: it is the
+only mode that both encrypts the connection and verifies the server's identity,
+which matters for a database that may hold raw secret material. Omitting
+`sslmode` is not a safe shortcut, because lib/pq's implicit default `require`
+encrypts the connection without verifying the server certificate. Use
+`sslmode=disable` only for a database reachable solely over a private network,
+as the Compose file does for its `db` service.
 
 For Compose, copy the example and set the required password. The example
 ships it empty, and `docker compose` refuses to start until it has a value:
@@ -450,8 +460,11 @@ PostgreSQL health, run the idempotent migration command to completion before
 the API starts (a fresh volume becomes ready without a manual step), run the
 API read-only with all capabilities dropped, and use the native readiness
 probe. The host port binds to `127.0.0.1` by default; set `LAYERLEAK_API_HOST`
-only when an authenticated network edge is ready. The `api` service has a
-35 second `stop_grace_period`: whatever runs the container must allow more than
+only when an authenticated network edge is ready. The Compose connection string
+uses `sslmode=disable` only because the `db` container is reachable solely on
+the private Compose network; point the API at any other database with
+`sslmode=verify-full` as shown above. The `api` service has a 35 second
+`stop_grace_period`: whatever runs the container must allow more than
 `LAYERLEAK_API_SHUTDOWN_TIMEOUT` (for example `docker stop -t 35` or a
 Kubernetes `terminationGracePeriodSeconds` above 30), otherwise an in-flight
 scan is killed before it is persisted. Purge raw material only after reviewing

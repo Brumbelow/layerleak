@@ -87,6 +87,9 @@ func New(cfg config.Config, store storage.Store) *Service {
 }
 
 func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	registryClient, err := s.registryClient(request.Reference)
 	if err != nil {
 		configErr := fmt.Errorf("configure registry client: %w", err)
@@ -127,12 +130,13 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	if s.store == nil || s.store.Name() == "noop" {
 		return outcome, wrapScanError(scanErr)
 	}
-	if ctx != nil && ctx.Err() != nil {
-		if scanErr != nil {
-			return outcome, wrapScanError(scanErr)
-		}
-		outcome.ScanError = ctx.Err()
-		return outcome, wrapScanError(ctx.Err())
+	// A scan that did not finish while its context ended was interrupted by
+	// that cancellation and is not persisted. A scan that completed is
+	// persisted even when the caller has since gone away (client disconnect or
+	// scan deadline between completion and the write), so the work is not
+	// silently discarded.
+	if scanErr != nil && ctx.Err() != nil {
+		return outcome, wrapScanError(scanErr)
 	}
 
 	if request.BeforeSave != nil {
@@ -141,18 +145,15 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		}
 	}
 
-	if ctx != nil && ctx.Err() != nil {
-		outcome.ScanError = errors.Join(scanErr, ctx.Err())
-		return outcome, wrapScanError(outcome.ScanError)
-	}
-
 	scannedAt := s.now().UTC()
 	record, recordErr := BuildScanRecord(request.Reference, result, scannedAt, scanErr)
 	if recordErr != nil {
 		outcome.SaveError = recordErr
 		return outcome, errors.Join(&Error{Phase: ErrorPhaseSave, Err: recordErr}, wrapScanError(scanErr))
 	}
-	scanRunID, storeErr := s.store.SaveScan(ctx, record)
+	saveCtx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), s.saveTimeout())
+	defer cancelSave()
+	scanRunID, storeErr := s.store.SaveScan(saveCtx, record)
 	if storeErr != nil {
 		outcome.SaveError = storeErr
 		return outcome, errors.Join(&Error{Phase: ErrorPhaseSave, Err: storeErr}, wrapScanError(scanErr))
@@ -160,6 +161,15 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	outcome.ScanRunID = scanRunID
 
 	return outcome, wrapScanError(scanErr)
+}
+
+// saveTimeout bounds the persistence phase, which runs detached from the
+// caller's context so a disconnect after the scan finished cannot discard it.
+func (s *Service) saveTimeout() time.Duration {
+	if s.config.DatabaseWriteTimeout > 0 {
+		return s.config.DatabaseWriteTimeout
+	}
+	return storage.DefaultWriteTimeout
 }
 
 func (s *Service) registryClient(ref manifest.Reference) (*registry.Client, error) {

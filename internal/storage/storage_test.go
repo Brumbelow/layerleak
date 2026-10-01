@@ -41,6 +41,56 @@ func TestPostgresConfigValidate(t *testing.T) {
 			databaseURL: "postgres://localhost",
 			wantErr:     true,
 		},
+		{
+			name:        "unix socket host in query string",
+			databaseURL: "postgres:///layerleak?host=/var/run/postgresql",
+		},
+		{
+			name:        "hostname in query string with verify-full",
+			databaseURL: "postgresql:///layerleak?host=db.internal&port=5432&sslmode=verify-full&sslrootcert=/etc/layerleak/ca.pem",
+		},
+		{
+			name:        "blank query string host",
+			databaseURL: "postgres:///layerleak?host=%20",
+			wantErr:     true,
+		},
+		{
+			name:        "libpq keywords with socket directory",
+			databaseURL: "host=/var/run/postgresql dbname=layerleak",
+		},
+		{
+			name:        "libpq keywords with quoted password and spaces around equals",
+			databaseURL: "host=localhost port = 5432 dbname=layerleak user=layerleak password='p w\\'d\\\\' sslmode=disable",
+		},
+		{
+			name:        "libpq keywords default host",
+			databaseURL: "dbname=layerleak",
+		},
+		{
+			name:        "libpq keywords without dbname",
+			databaseURL: "host=localhost user=layerleak",
+			wantErr:     true,
+		},
+		{
+			name:        "libpq keywords with empty dbname",
+			databaseURL: "host=localhost dbname=",
+			wantErr:     true,
+		},
+		{
+			name:        "libpq keywords with unterminated quote",
+			databaseURL: "host=localhost dbname='layerleak",
+			wantErr:     true,
+		},
+		{
+			name:        "libpq keywords missing equals",
+			databaseURL: "host localhost dbname=layerleak",
+			wantErr:     true,
+		},
+		{
+			name:        "plain word",
+			databaseURL: "layerleak",
+			wantErr:     true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -69,6 +119,44 @@ func TestPostgresConfigValidateDoesNotEchoMalformedDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestPostgresConfigValidateDoesNotEchoMalformedKeywordDSN(t *testing.T) {
+	dsn := "host=localhost password='super-secret-value dbname=layerleak"
+	err := (PostgresConfig{DatabaseURL: dsn}).Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil")
+	}
+	if strings.Contains(err.Error(), "super-secret-value") || strings.Contains(err.Error(), dsn) {
+		t.Fatalf("Validate() leaked connection string: %v", err)
+	}
+}
+
+func TestParseKeywordDSN(t *testing.T) {
+	pairs, err := parseKeywordDSN("host=/var/run/postgresql port = 5433 dbname=layerleak password='it\\'s \\\\ spaced' sslmode=disable")
+	if err != nil {
+		t.Fatalf("parseKeywordDSN() error = %v", err)
+	}
+	want := map[string]string{
+		"host":     "/var/run/postgresql",
+		"port":     "5433",
+		"dbname":   "layerleak",
+		"password": `it's \ spaced`,
+		"sslmode":  "disable",
+	}
+	if len(pairs) != len(want) {
+		t.Fatalf("pairs = %v", pairs)
+	}
+	for key, value := range want {
+		if pairs[key] != value {
+			t.Fatalf("pairs[%q] = %q, want %q", key, pairs[key], value)
+		}
+	}
+	for _, invalid := range []string{"host", "=x", "host='x", "ho st=x", "host=x =y"} {
+		if _, err := parseKeywordDSN(invalid); err == nil {
+			t.Fatalf("parseKeywordDSN(%q) error = nil", invalid)
+		}
+	}
+}
+
 func TestIsValidScanStatusAcceptsPartial(t *testing.T) {
 	if !isValidScanStatus("partial") {
 		t.Fatal("isValidScanStatus(partial) = false")
@@ -94,8 +182,14 @@ func TestPostgresConfigValidateRejectsInvalidPoolAndTimeoutSettings(t *testing.T
 
 func TestPostgresConfigDefaults(t *testing.T) {
 	config := (PostgresConfig{}).withDefaults()
-	if config.MaxOpenConns != 10 || config.MaxIdleConns != 0 {
-		t.Fatalf("pool defaults = (%d,%d)", config.MaxOpenConns, config.MaxIdleConns)
+	if config.MaxOpenConns != 10 || config.MaxIdleConns != 5 {
+		t.Fatalf("pool defaults = (%d,%d), want idle connections retained by default", config.MaxOpenConns, config.MaxIdleConns)
+	}
+	if small := (PostgresConfig{MaxOpenConns: 2}).withDefaults(); small.MaxIdleConns != 2 {
+		t.Fatalf("idle default with 2 open connections = %d, want capped at 2", small.MaxIdleConns)
+	}
+	if explicit := (PostgresConfig{MaxIdleConns: 1}).withDefaults(); explicit.MaxIdleConns != 1 {
+		t.Fatalf("explicit idle setting = %d, want preserved", explicit.MaxIdleConns)
 	}
 	if config.ConnMaxLifetime != 30*time.Minute || config.ConnMaxIdleTime != 5*time.Minute || config.QueryTimeout != 10*time.Second || config.WriteTimeout != 2*time.Minute {
 		t.Fatalf("duration defaults = %#v", config)

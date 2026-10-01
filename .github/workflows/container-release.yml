@@ -40,9 +40,9 @@ env:
   # The Go module path and its major version. Every version gate below derives from these.
   MODULE_PATH: github.com/brumbelow/layerleak/v3
   RELEASE_MAJOR: "3"
-  GRYPE_VERSION: v0.99.1
-  BUILDX_VERSION: v0.37.0
-  BUILDKIT_IMAGE: moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+  GRYPE_VERSION: v0.119.0
+  BUILDX_VERSION: v0.37.2
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
 jobs:
   validate:
@@ -484,6 +484,21 @@ jobs:
           - platform: linux/arm64
             suffix: arm64
     steps:
+      - name: Checkout release control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Provision reviewed release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_bin="$(scripts/release-tools.sh "${RUNNER_TEMP}/release-tools" all)"
+          echo "${tool_bin}" >> "${GITHUB_PATH}"
+          PATH="${tool_bin}:${PATH}" python3 scripts/release-preflight.py tools
+          PATH="${tool_bin}:${PATH}" grype version \
+            | grep -Eq "^Version:[[:space:]]+${GRYPE_VERSION#v}([[:space:]]|$)"
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -494,34 +509,34 @@ jobs:
       - name: Scan all critical vulnerabilities
         id: critical
         continue-on-error: true
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        shell: bash
         env:
+          GRYPE_CHECK_FOR_APP_UPDATE: "false"
           GRYPE_PLATFORM: ${{ matrix.platform }}
-        with:
-          image: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
-          grype-version: ${{ env.GRYPE_VERSION }}
-          severity-cutoff: critical
-          only-fixed: false
-          fail-build: true
-          output-format: sarif
-          output-file: grype-critical-${{ matrix.suffix }}.sarif
-          cache-db: false
+          IMAGE_REFERENCE: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
+          REPORT: grype-critical-${{ matrix.suffix }}.sarif
+        run: |
+          set -euo pipefail
+          status=0
+          grype "registry:${IMAGE_REFERENCE}" --fail-on critical --output sarif --file "${REPORT}" || status=$?
+          test -s "${REPORT}"
+          exit "${status}"
 
       - name: Scan fixable high vulnerabilities
         id: fixable_high
         continue-on-error: true
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        shell: bash
         env:
+          GRYPE_CHECK_FOR_APP_UPDATE: "false"
           GRYPE_PLATFORM: ${{ matrix.platform }}
-        with:
-          image: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
-          grype-version: ${{ env.GRYPE_VERSION }}
-          severity-cutoff: high
-          only-fixed: true
-          fail-build: true
-          output-format: json
-          output-file: grype-fixable-high-${{ matrix.suffix }}.json
-          cache-db: false
+          IMAGE_REFERENCE: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
+          REPORT: grype-fixable-high-${{ matrix.suffix }}.json
+        run: |
+          set -euo pipefail
+          status=0
+          grype "registry:${IMAGE_REFERENCE}" --only-fixed --fail-on high --output json --file "${REPORT}" || status=$?
+          test -s "${REPORT}"
+          exit "${status}"
 
       - name: Upload vulnerability reports
         if: always()

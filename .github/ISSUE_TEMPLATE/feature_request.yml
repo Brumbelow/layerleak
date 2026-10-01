@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a focused scanner, CLI, API, or operational improvement
+title: "proposal: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should Layerleak solve? Include the current safe workaround, if one exists.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe inputs, outputs, failure behavior, and a concrete example.
+    validations:
+      required: true
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibility
+      description: Which contracts would this change? Check every one that applies.
+      options:
+        - label: CLI flags or exit codes
+        - label: JSON result or scan-record schema
+        - label: HTTP API paths or responses
+        - label: Configuration variables or defaults
+        - label: Database schema or migrations
+        - label: Container image or Compose deployment
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and resource impact
+      description: Consider secret exposure, private-network egress, registry trust, untrusted OCI input, decompression, memory and disk use, scan completeness, and API abuse.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What smaller or existing approaches did you consider?
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      options:
+        - label: Behavior and failure semantics are specified.
+        - label: Compatibility impact is understood.
+        - label: Security and resource bounds are defined.
+        - label: Tests and documentation can verify the result.

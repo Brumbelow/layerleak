@@ -66,17 +66,17 @@ def check_tools(full):
             raise ValueError(f'gh release view lacks required JSON field {field}')
     if full:
         cosign = require_command(['cosign', 'version'], [])
-        if not re.search(r'^GitVersion:\s+v3\.0\.2(?:\s|$)', cosign, re.MULTILINE):
-            raise ValueError('release tooling requires reviewed Cosign v3.0.2')
+        if not re.search(r'^GitVersion:\s+v3\.1\.3(?:\s|$)', cosign, re.MULTILINE):
+            raise ValueError('release tooling requires reviewed Cosign v3.1.3')
         require_command(['cosign', 'verify', '--help'], ['--certificate-identity', '--certificate-oidc-issuer'])
         require_command(['cosign', 'sign', '--help'], ['--yes'])
         grype = require_command(['grype', 'version'], [])
-        if not re.search(r'^Version:\s+0\.99\.1(?:\s|$)', grype, re.MULTILINE):
-            raise ValueError('release tooling requires reviewed Grype v0.99.1')
+        if not re.search(r'^Version:\s+0\.119\.0(?:\s|$)', grype, re.MULTILINE):
+            raise ValueError('release tooling requires reviewed Grype v0.119.0')
         require_command(['grype', '--help'], ['--fail-on', '--only-fixed', '--platform'])
         buildx = require_command(['docker', 'buildx', 'version'], [])
-        if not re.search(r'^github\.com/docker/buildx v0\.37\.0(?:\s|$)', buildx):
-            raise ValueError('release tooling requires reviewed Buildx v0.37.0')
+        if not re.search(r'^github\.com/docker/buildx v0\.37\.2(?:\s|$)', buildx):
+            raise ValueError('release tooling requires reviewed Buildx v0.37.2')
         require_command(['docker', 'buildx', 'imagetools', 'inspect', '--help'], ['--raw'])
         require_command(['docker', 'buildx', 'imagetools', 'create', '--help'], ['--tag'])
         require_command(['docker', 'info', '--format', '{{.ServerVersion}}'], [])

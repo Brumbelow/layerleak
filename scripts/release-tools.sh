@@ -40,12 +40,12 @@ tar -xzf "${release_tools_dir}/downloads/gh.tar.gz" -C "${release_unpack_dir}" g
 install -m 0755 "${release_unpack_dir}/gh_2.102.0_linux_amd64/bin/gh" "${release_tools_dir}/bin/gh"
 
 if [[ "${mode}" == all ]]; then
-  download https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64 \
-    46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd \
+  download https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64 \
+    4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71 \
     "${release_tools_dir}/downloads/cosign"
   install -m 0755 "${release_tools_dir}/downloads/cosign" "${release_tools_dir}/bin/cosign"
-  download https://github.com/anchore/grype/releases/download/v0.99.1/grype_0.99.1_linux_amd64.tar.gz \
-    7fde4d45fe097daa2554078cd9e81faa43e51266a888337f5446c1ffc42d451f \
+  download https://github.com/anchore/grype/releases/download/v0.119.0/grype_0.119.0_linux_amd64.tar.gz \
+    3fa2dc4b924621ab65404cf08d0b8438d896d80ab949c9d5a4ca283c36004c9b \
     "${release_tools_dir}/downloads/grype.tar.gz"
   tar -xzf "${release_tools_dir}/downloads/grype.tar.gz" -C "${release_unpack_dir}" grype
   install -m 0755 "${release_unpack_dir}/grype" "${release_tools_dir}/bin/grype"

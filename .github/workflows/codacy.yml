@@ -131,8 +131,23 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: layerleak_test
+          POSTGRES_USER: layerleak
+          POSTGRES_PASSWORD: layerleak-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U layerleak -d layerleak_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOFLAGS: -mod=readonly
+      LAYERLEAK_TEST_DATABASE_URL: postgres://layerleak:layerleak-test-only@127.0.0.1:5432/layerleak_test?sslmode=disable
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -150,8 +165,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -short ./... -count=1 -covermode=atomic -coverprofile=unit.coverage.out
-          test -s unit.coverage.out
+          # The full suite, including the PostgreSQL integration tests, so the
+          # published coverage reflects the storage layer as well.
+          go test ./... -count=1 -covermode=atomic -coverprofile=coverage.out
+          test -s coverage.out
 
       - name: Upload coverage to Codacy
         shell: bash
@@ -176,4 +193,4 @@ jobs:
           "${reporter}" report \
             --commit-uuid "${COVERAGE_COMMIT}" \
             --force-coverage-parser go \
-            -r unit.coverage.out
+            -r coverage.out

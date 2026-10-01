@@ -104,12 +104,12 @@ class ReleasePreflightTests(unittest.TestCase):
 
     def test_full_check_requires_exact_cosign_grype_and_buildx_versions(self):
         full = {
-            ('cosign', 'version'): 'GitVersion: v3.0.2',
+            ('cosign', 'version'): 'GitVersion: v3.1.3',
             ('cosign', 'verify', '--help'): '--certificate-identity --certificate-oidc-issuer',
             ('cosign', 'sign', '--help'): '--yes',
-            ('grype', 'version'): 'Version: 0.99.1',
+            ('grype', 'version'): 'Version: 0.119.0',
             ('grype', '--help'): '--fail-on --only-fixed --platform',
-            ('docker', 'buildx', 'version'): 'github.com/docker/buildx v0.37.0 hash',
+            ('docker', 'buildx', 'version'): 'github.com/docker/buildx v0.37.2 hash',
             ('docker', 'buildx', 'imagetools', 'inspect', '--help'): '--raw',
             ('docker', 'buildx', 'imagetools', 'create', '--help'): '--tag',
             ('docker', 'info', '--format', '{{.ServerVersion}}'): '29.6.1',
@@ -125,7 +125,7 @@ class ReleasePreflightTests(unittest.TestCase):
             return self.command(args, **kwargs)
         with patch.object(self.module, 'run', side_effect=command):
             self.module.check_tools(True)
-            for key, version in ((('cosign', 'version'), 'v3.0.2'), (('grype', 'version'), '0.99.1'), (('docker', 'buildx', 'version'), 'v0.37.0')):
+            for key, version in ((('cosign', 'version'), 'v3.1.3'), (('grype', 'version'), '0.119.0'), (('docker', 'buildx', 'version'), 'v0.37.2')):
                 original = full[key]
                 full[key] = original.replace(version, version + '0')
                 with self.subTest(key=key), self.assertRaises(ValueError):

@@ -43,10 +43,10 @@ The release workflow provisions the following exact versions on Linux x86_64:
 | Tool | Version | Provisioning |
 | --- | --- | --- |
 | GitHub CLI | [2.102.0](https://github.com/cli/cli/releases/tag/v2.102.0) | Official archive and repository-pinned SHA-256 |
-| Cosign | [3.0.2](https://github.com/sigstore/cosign/releases/tag/v3.0.2) | Official binary and repository-pinned SHA-256 |
-| Grype | [0.99.1](https://github.com/anchore/grype/releases/tag/v0.99.1) | Official archive and repository-pinned SHA-256; scan action selects the same version |
-| Docker Buildx | [0.37.0](https://github.com/docker/buildx/releases/tag/v0.37.0) | Explicit version on every pinned setup action |
-| BuildKit | [0.33.0](https://github.com/moby/buildkit/releases/tag/v0.33.0) | Official multi-platform image pinned by digest in `BUILDKIT_IMAGE` |
+| Cosign | [3.1.3](https://github.com/sigstore/cosign/releases/tag/v3.1.3) | Official binary and repository-pinned SHA-256 |
+| Grype | [0.119.0](https://github.com/anchore/grype/releases/tag/v0.119.0) | Official archive and repository-pinned SHA-256; the scan job runs this binary directly |
+| Docker Buildx | [0.37.2](https://github.com/docker/buildx/releases/tag/v0.37.2) | Explicit version on every pinned setup action |
+| BuildKit | [0.33.1](https://github.com/moby/buildkit/releases/tag/v0.33.1) | Official multi-platform image pinned by digest in `BUILDKIT_IMAGE` |
 
 These pins define the reviewed capability set, not an automatic claim that a
 future release is safe. Updates require a reviewed change to the installer,
@@ -135,8 +135,15 @@ Complete these settings before the first RC:
 3. Keep the default `GITHUB_TOKEN` permissions read-only. The release workflow
    grants required write scopes only to the jobs that publish evidence or the
    release.
-4. Protect `main` with pull requests, no force pushes or deletion, and all CI,
-   CodeQL, and Codacy checks required.
+4. Protect `main` with pull requests, no force pushes or deletion, and these
+   status checks required: every `Full verification / ...` job from `CI`
+   (`Go quality and CLI smoke`, `Lint`, `OpenAPI and static documentation`,
+   `Linked dependency licenses`, `PostgreSQL integration and migrations`,
+   `Compose configuration`, `Container smoke (linux/amd64)`,
+   `Container smoke (linux/arm64)`, `Reachable Go vulnerabilities`),
+   `Dependency review`, the four `CodeQL / Analyze (...)` jobs, and
+   `Codacy Security Scan` and `Codacy Coverage`. Re-check this list whenever a
+   job is added or renamed in `.github/workflows/`.
 5. Add a tag ruleset covering `v1.*`, `v2.*` and `v3.*` that blocks updates,
    deletion, and non-fast-forward changes with no bypass. Personal repositories cannot select the
    GitHub Actions integration as a ruleset bypass actor, so leave initial tag

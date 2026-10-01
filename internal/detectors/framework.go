@@ -56,8 +56,11 @@ func frameworkSecretDetectors() []Detector {
 		// and Maven descriptors) and password="..." attributes (tomcat-users.xml
 		// users, server.xml JNDI resources). Matches inside <!-- --> comments,
 		// where Tomcat ships its sample users, are skipped.
-		newPathRegexDetector("xml_password_element", xmlPathExpression, regexp.MustCompile(`(?is)<(?:password|passphrase)>\s*([^<\s]{6,})\s*</(?:password|passphrase)>`), 1, ConfidenceHigh, looksLikeLiteralPassword).skipping(insideXMLComment),
-		newPathRegexDetector("xml_password_attribute", xmlPathExpression, regexp.MustCompile(`(?i)\b(?:password|passwd)\s*=\s*"([^"\s]{4,})"`), 1, ConfidenceHigh, looksLikeLiteralPassword).skipping(insideXMLComment),
+		// Both need six characters and reject the boolean and keyword values
+		// that password="..." carries in Android layouts (android:password=
+		// "true"), JavaFX and other UI descriptors.
+		newPathRegexDetector("xml_password_element", xmlPathExpression, regexp.MustCompile(`(?is)<(?:password|passphrase)>\s*([^<\s]{6,})\s*</(?:password|passphrase)>`), 1, ConfidenceHigh, looksLikeXMLPassword).skipping(insideXMLComment),
+		newPathRegexDetector("xml_password_attribute", xmlPathExpression, regexp.MustCompile(`(?i)\b(?:password|passwd)\s*=\s*"([^"\s]{6,})"`), 1, ConfidenceHigh, looksLikeXMLPassword).skipping(insideXMLComment),
 	}
 }
 
@@ -111,6 +114,25 @@ func looksLikeFrameworkSecretKey(value string) bool {
 		}
 	}
 	return passesEntropy(trimmed)
+}
+
+// xmlPasswordKeywords are the values a password attribute or element carries
+// when it configures a password field rather than holding one.
+var xmlPasswordKeywords = map[string]bool{
+	"true": true, "false": true, "yes": true, "no": true, "none": true,
+	"null": true, "required": true, "optional": true, "default": true,
+	"changeme": true, "password": true,
+}
+
+// looksLikeXMLPassword accepts a literal password of at least six characters
+// that is not one of the boolean or keyword values a password attribute can
+// take (android:password="true", password="required").
+func looksLikeXMLPassword(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) < 6 || !looksLikeLiteralPassword(trimmed) {
+		return false
+	}
+	return !xmlPasswordKeywords[strings.ToLower(trimmed)]
 }
 
 // looksLikePHPDefinedPassword accepts literal passwords in define() calls

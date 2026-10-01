@@ -264,3 +264,103 @@ func TestScanCommandReportsMissingLocalSources(t *testing.T) {
 		t.Fatalf("empty path error = %v", err)
 	}
 }
+
+// localTarDirectory packs a layout directory into a tar archive at path, as
+// `buildx -o type=oci,dest=path` would.
+func localTarDirectory(t *testing.T, dir, path string) {
+	t.Helper()
+	var files []localTarFile
+	err := filepath.WalkDir(dir, func(name string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		body, err := os.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(dir, name)
+		if err != nil {
+			return err
+		}
+		files = append(files, localTarFile{name: filepath.ToSlash(relative), body: body})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localWrite(t, path, localTar(t, files))
+}
+
+// TestScanCommandSelectsAndSweepsBuildxStyleRefNames covers the README flow
+// `docker buildx build -o type=oci,dest=app.tar -t app:1.2` followed by
+// `layerleak scan oci-archive:app.tar:app:1.2`: BuildKit records the ref.name
+// docker.io/library/app:1.2, which carries colons and slashes.
+func TestScanCommandSelectsAndSweepsBuildxStyleRefNames(t *testing.T) {
+	const refName = "docker.io/library/app:1.2"
+	dir := t.TempDir()
+	digest := writeLocalLayout(t, dir, refName)
+	archive := filepath.Join(t.TempDir(), "app.tar")
+	localTarDirectory(t, dir, archive)
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+
+	for _, raw := range []string{"oci-archive:" + archive + ":app:1.2", "oci-archive:" + archive + ":" + refName, "oci:" + dir + ":app:1.2"} {
+		stdout, stderr, err := runScan(t, "", raw, "--format", "json", "--no-db", "--no-artifacts")
+		if code := exitCodeOf(t, err); code != exitCodeFindings {
+			t.Fatalf("%s exit = %d (%v) stderr=%s", raw, code, err, stderr)
+		}
+		var result map[string]any
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("stdout is not JSON: %v: %s", err, stdout)
+		}
+		wantRepository := strings.TrimSuffix(strings.TrimSuffix(raw, ":app:1.2"), ":"+refName)
+		if result["requested_reference"] != raw || result["repository"] != wantRepository || result["resolved_reference"] != wantRepository+"@"+digest || result["total_findings"] != float64(1) {
+			t.Fatalf("%s result identity = %v %v %v findings=%v", raw, result["requested_reference"], result["repository"], result["resolved_reference"], result["total_findings"])
+		}
+	}
+
+	// A tag the layout does not hold is a plain exit-1 error naming what it does hold.
+	_, _, err := runScan(t, "", "oci:"+dir+":1.2", "--format", "json", "--no-db", "--no-artifacts")
+	if exitCodeOf(t, err) != exitCodeFailure || !strings.Contains(err.Error(), `no image tagged "1.2"`) || !strings.Contains(err.Error(), refName) {
+		t.Fatalf("missing tag error = %v", err)
+	}
+
+	for _, raw := range []string{"oci:" + dir, "oci-archive:" + archive} {
+		stdout, stderr, err := runScan(t, "", raw, "--all-tags", "--format", "json", "--no-db", "--no-artifacts")
+		if code := exitCodeOf(t, err); code != exitCodeFindings {
+			t.Fatalf("%s sweep exit = %d (%v) stderr=%s stdout=%s", raw, code, err, stderr, stdout)
+		}
+		if strings.Contains(stderr, "every public tag") {
+			t.Fatalf("local sweep printed the registry warning: %s", stderr)
+		}
+		var result struct {
+			Mode           string `json:"mode"`
+			Status         string `json:"status"`
+			Repository     string `json:"repository"`
+			TagsEnumerated int    `json:"tags_enumerated"`
+			TagsResolved   int    `json:"tags_resolved"`
+			TargetCount    int    `json:"target_count"`
+			TotalFindings  int    `json:"total_findings"`
+			TagResults     []struct {
+				Tag             string `json:"tag"`
+				RootDigest      string `json:"root_digest"`
+				TargetReference string `json:"target_reference"`
+				Status          string `json:"status"`
+			} `json:"tag_results"`
+			Targets []struct {
+				Reference string `json:"reference"`
+			} `json:"targets"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("stdout is not JSON: %v: %s", err, stdout)
+		}
+		if result.Mode != "repository" || result.Status != "completed" || result.Repository != raw || result.TagsEnumerated != 1 || result.TagsResolved != 1 || result.TargetCount != 1 || result.TotalFindings != 1 {
+			t.Fatalf("%s sweep result = %+v", raw, result)
+		}
+		if len(result.TagResults) != 1 || result.TagResults[0].Tag != refName || result.TagResults[0].Status != "scanned" || result.TagResults[0].RootDigest != digest || result.TagResults[0].TargetReference != raw+"@"+digest {
+			t.Fatalf("%s tag results = %+v", raw, result.TagResults)
+		}
+		if len(result.Targets) != 1 || result.Targets[0].Reference != raw+"@"+digest {
+			t.Fatalf("%s targets = %+v", raw, result.Targets)
+		}
+	}
+}

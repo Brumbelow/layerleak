@@ -58,11 +58,13 @@ or a local image source:
   oci-archive:<file.tar>[:<tag>][@<digest>]    tar archive of an OCI image layout
   docker-archive:<file.tar>[:<repo>[:<tag>]][@<digest>]   docker save archive
 
+The path ends at the first colon (a Windows drive letter stays in the path).
 A local source that holds one image needs no tag; one that holds several
-needs a tag (an index.json ref.name or a docker save RepoTags name) or a
-digest. --all-tags enumerates the tags a local source holds. Registry
-credentials (--username/--password-stdin, LAYERLEAK_REGISTRY_USERNAME) are
-refused for local sources.`,
+needs a tag (an index.json ref.name such as 1.2 or docker.io/library/app:1.2,
+or a docker save RepoTags name such as app:1.2) or a digest. --all-tags
+enumerates the tags a local source holds. Registry credentials
+(--username/--password-stdin, LAYERLEAK_REGISTRY_USERNAME) are refused for
+local sources.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			outputFormat, err := parseOutputFormat(format)

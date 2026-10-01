@@ -243,16 +243,21 @@ layerleak scan docker-archive:app-save.tar:ghcr.io/org/app:1.2 --format sarif
 layerleak scan oci:./build/image --all-tags
 ```
 
-The path is absolute or relative to the working directory. For `oci:` and
-`oci-archive:` the tag is the `org.opencontainers.image.ref.name` annotation
-of the `index.json` entry and is the text after the last colon (a colon inside
-a path component such as `oci:/srv/a:b/c` is part of the path). For
-`docker-archive:` the path ends at the first colon and the rest is the image
-name `docker save` recorded in `RepoTags`, in any spelling that normalises to
-it (`app:1.2`, `library/app:1.2`, `docker.io/library/app:1.2`). A source that
-holds one image needs no tag; one that holds several needs a tag or
-`@<digest>`, and a missing or ambiguous tag is an exit-`1` error that lists the
-available tags. `--all-tags` enumerates the tags the source holds.
+The path is absolute or relative to the working directory and ends at the
+first colon (a Windows drive letter such as `C:\images\app` stays in the path),
+as for skopeo and podman, so a path cannot otherwise contain a colon. For
+`oci:` and `oci-archive:` the tag is the `org.opencontainers.image.ref.name`
+annotation of the `index.json` entry, which may be a plain tag (`1.2`) or the
+full image name BuildKit and `docker save` record (`docker.io/library/app:1.2`
+for `-t app:1.2`); an image name matches in any spelling that normalises to it
+(`app:1.2`, `library/app:1.2`), so the `buildx` example above selects the
+image by the name it was built with. For `docker-archive:` the rest is the
+image name `docker save` recorded in `RepoTags`, matched the same way. A
+source that holds one image needs no tag; one that holds several needs a tag
+or `@<digest>`, and a missing or ambiguous tag is an exit-`1` error that lists
+the available tags. `--all-tags` enumerates the tags the source holds (the
+`ref.name` annotations or `RepoTags`) and reports each under `tag_results`
+exactly as the source spells it.
 
 Results, scan records and the database treat the local source as the
 repository: `repository` is `oci:/srv/images/app`, `requested_reference` is

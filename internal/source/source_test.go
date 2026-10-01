@@ -639,3 +639,59 @@ func TestSourcesHonourContextCancellation(t *testing.T) {
 		t.Fatalf("ListTags() error = %v", err)
 	}
 }
+
+// buildxRefName is the ref.name BuildKit writes for `-t app:1.2`.
+const buildxRefName = "docker.io/library/app:1.2"
+
+func TestLayoutSelectsBuildxStyleRefNames(t *testing.T) {
+	dir := t.TempDir()
+	builder := newLayoutBuilder()
+	app := builder.addImage(t, buildxRefName, linuxAMD64, configJSON(t, linuxAMD64, "ONE=1"))
+	stable := builder.addImage(t, "stable", linuxAMD64, configJSON(t, linuxAMD64, "TWO=2"))
+	builder.writeDir(t, dir)
+	source := openSource(t, "oci:"+dir, Options{})
+	ctx := context.Background()
+
+	for _, identifier := range []string{buildxRefName, "app:1.2", "library/app:1.2", "index.docker.io/library/app:1.2"} {
+		resolved, err := source.ResolveManifest(ctx, "", identifier)
+		if err != nil || resolved.Digest != app.Digest {
+			t.Fatalf("ResolveManifest(%q) = %+v, %v", identifier, resolved, err)
+		}
+		response, err := source.FetchManifest(ctx, "", identifier)
+		if err != nil || response.Digest != app.Digest {
+			t.Fatalf("FetchManifest(%q) = %+v, %v", identifier, response, err)
+		}
+	}
+	resolved, err := source.ResolveManifest(ctx, "", "stable")
+	if err != nil || resolved.Digest != stable.Digest {
+		t.Fatalf("ResolveManifest(stable) = %+v, %v", resolved, err)
+	}
+
+	// Identifiers with a colon that are not digests are tag lookups, never
+	// digest validation failures: a sweep must not abort on them.
+	for _, identifier := range []string{"1.2", "app:latest", "other:1.2", "sha256:zz", "md5:" + strings.Repeat("a", 32)} {
+		_, err := source.ResolveManifest(ctx, "", identifier)
+		if err == nil || !strings.Contains(err.Error(), "no image tagged") || !strings.Contains(err.Error(), buildxRefName) {
+			t.Fatalf("ResolveManifest(%q) error = %v", identifier, err)
+		}
+		if manifest.IsIntegrityError(err) {
+			t.Fatalf("ResolveManifest(%q) returned an integrity error: %v", identifier, err)
+		}
+	}
+
+	tags, err := source.ListTags(ctx, "", 0, 0)
+	if err != nil || strings.Join(tags, ",") != buildxRefName+",stable" {
+		t.Fatalf("ListTags() = %v, %v", tags, err)
+	}
+
+	result, err := scanLocal(t, "oci:"+dir+":app:1.2", false)
+	if err != nil || result.Status != jobs.ResultStatusCompleted {
+		t.Fatalf("Scan(:app:1.2) = %s, %v", result.Status, err)
+	}
+	if result.RequestedReference != "oci:"+dir+":app:1.2" || result.Repository != "oci:"+dir || result.ResolvedReference != "oci:"+dir+"@"+app.Digest {
+		t.Fatalf("requested=%q repository=%q resolved=%q", result.RequestedReference, result.Repository, result.ResolvedReference)
+	}
+	if len(result.TagResults) != 1 || result.TagResults[0].Tag != "app:1.2" || result.TagResults[0].Status != jobs.TagStatusScanned {
+		t.Fatalf("tag results = %+v", result.TagResults)
+	}
+}

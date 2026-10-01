@@ -118,43 +118,58 @@ func (l *layout) tags() []string {
 	return tags
 }
 
-// select resolves an identifier to an index descriptor. A digest may name a
-// manifest the index does not list (a platform manifest under a nested
-// index); the descriptor then carries only the digest.
+// selectDescriptor resolves an identifier to an index descriptor: the only
+// entry for "", the entry whose ref.name annotation is the identifier, or the
+// entry with that digest. A ref.name is matched exactly first; when nothing
+// matches, ref.names that are image names (`docker.io/library/app:1.2`, as
+// BuildKit writes for `-t app:1.2`) are matched by normalised image name so
+// `app:1.2` selects that entry. Only an identifier that validates as a digest
+// is a digest lookup, so a ref.name with a colon is never mistaken for one. A
+// digest may name a manifest the index does not list (a platform manifest
+// under a nested index); the descriptor then carries only the digest.
 func (l *layout) selectDescriptor(identifier string) (manifest.Descriptor, error) {
 	identifier = strings.TrimSpace(identifier)
-	switch {
-	case identifier == "":
+	if identifier == "" {
 		if len(l.index.Manifests) != 1 {
 			return manifest.Descriptor{}, fmt.Errorf("OCI layout %s holds %d images; select one with :<tag> (available: %s) or @<digest>", l.location, len(l.index.Manifests), describeTags(l.tags()))
 		}
 		return l.index.Manifests[0], nil
-	case strings.Contains(identifier, ":"):
-		if err := manifest.ValidateDigest(identifier); err != nil {
-			return manifest.Descriptor{}, err
-		}
-		for _, descriptor := range l.index.Manifests {
-			if descriptor.Digest == identifier {
-				return descriptor, nil
+	}
+	isDigest := manifest.ValidateDigest(identifier) == nil
+	matches := l.descriptorsTagged(func(tag string) bool { return tag == identifier })
+	if len(matches) == 0 && !isDigest {
+		wanted := normalizeImageName(identifier)
+		matches = l.descriptorsTagged(func(tag string) bool { return normalizeImageName(tag) == wanted })
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		if isDigest {
+			for _, descriptor := range l.index.Manifests {
+				if descriptor.Digest == identifier {
+					return descriptor, nil
+				}
 			}
+			return manifest.Descriptor{Digest: identifier}, nil
 		}
-		return manifest.Descriptor{Digest: identifier}, nil
+		return manifest.Descriptor{}, fmt.Errorf("OCI layout %s has no image tagged %q (available: %s)", l.location, identifier, describeTags(l.tags()))
 	default:
-		var matches []manifest.Descriptor
-		for _, descriptor := range l.index.Manifests {
-			if strings.TrimSpace(descriptor.Annotations[refNameAnnotation]) == identifier {
-				matches = append(matches, descriptor)
-			}
-		}
-		switch len(matches) {
-		case 1:
-			return matches[0], nil
-		case 0:
-			return manifest.Descriptor{}, fmt.Errorf("OCI layout %s has no image tagged %q (available: %s)", l.location, identifier, describeTags(l.tags()))
-		default:
-			return manifest.Descriptor{}, fmt.Errorf("OCI layout %s tags %d images %q; select one with @<digest>", l.location, len(matches), identifier)
+		return manifest.Descriptor{}, fmt.Errorf("OCI layout %s tags %d images %q; select one with @<digest>", l.location, len(matches), identifier)
+	}
+}
+
+// descriptorsTagged returns the index entries whose ref.name annotation
+// satisfies match.
+func (l *layout) descriptorsTagged(match func(tag string) bool) []manifest.Descriptor {
+	var matches []manifest.Descriptor
+	for _, descriptor := range l.index.Manifests {
+		tag := strings.TrimSpace(descriptor.Annotations[refNameAnnotation])
+		if tag != "" && match(tag) {
+			matches = append(matches, descriptor)
 		}
 	}
+	return matches
 }
 
 func blobPath(digest string) (string, error) {

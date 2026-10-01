@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -83,14 +84,18 @@ func ParseImageReference(raw string) (Reference, error) {
 //	docker-archive:<path>[:<repo>[:<tag>]][@<digest>]
 //
 // <path> is the layout directory or archive file, absolute or relative to
-// the working directory, kept exactly as written. For oci: and oci-archive:
-// the tag is the text after the last colon when that text contains no path
-// separator (so `oci:./images/app:1.2` selects the ref.name `1.2` and
-// `oci:/srv/a:b/c` is a path); it must be a valid OCI tag. For
-// docker-archive: the path ends at the first colon and the rest is the
-// `repo[:tag]` image name recorded by `docker save` (`alpine:3.20`,
-// `ghcr.io/org/app`), so a docker-archive path cannot contain a colon. A
-// digest after `@` selects the manifest with that digest in any scheme.
+// the working directory, kept exactly as written. In every scheme the path
+// ends at the first colon (a Windows drive letter such as `C:\images` is part
+// of the path), as it does for skopeo and podman, so a local path cannot
+// otherwise contain a colon. For oci: and oci-archive: the rest is the
+// `org.opencontainers.image.ref.name` annotation of the index entry, which may
+// be a plain tag (`1.2`) or a full image name as BuildKit and `docker save`
+// write it (`docker.io/library/app:1.2`, `app:1.2`); it must match the OCI
+// annotation grammar `[A-Za-z0-9]+([-._:/+][A-Za-z0-9]+)*` or the registry
+// tag grammar. For docker-archive: the rest is the `repo[:tag]` image name
+// recorded by `docker save` (`alpine:3.20`, `ghcr.io/org/app`). A digest
+// after `@` selects the manifest with that digest in any scheme; a ref.name
+// that itself contains `@` can only be selected by digest.
 //
 // Repository is the scheme and path (`oci:/srv/images/app`), Registry is
 // LocalRegistry, and Tag or Digest carry the selection. Surrounding
@@ -146,33 +151,55 @@ func ParseLocalReference(raw string) (Reference, error) {
 	}, nil
 }
 
-// splitLayoutReference splits path[:tag] for the oci: and oci-archive:
-// schemes: the text after the last colon is the tag unless it contains a
-// path separator, in which case the whole value is the path.
-func splitLayoutReference(value string) (string, string, error) {
-	colon := strings.LastIndexByte(value, ':')
+// splitLocalPath splits value at the first colon that ends the path: a
+// Windows drive letter (`C:\` or `C:/`) belongs to the path. The second value
+// is the text after the colon and ok reports whether there was one.
+func splitLocalPath(value string) (path, rest string, ok bool) {
+	start := 0
+	if hasDriveLetter(value) {
+		start = 2
+	}
+	colon := strings.IndexByte(value[start:], ':')
 	if colon < 0 {
+		return value, "", false
+	}
+	colon += start
+	return value[:colon], value[colon+1:], true
+}
+
+// hasDriveLetter reports whether value starts with a Windows drive
+// specification: a letter, a colon and a path separator.
+func hasDriveLetter(value string) bool {
+	if len(value) < 3 || value[1] != ':' || (value[2] != '\\' && value[2] != '/') {
+		return false
+	}
+	letter := value[0]
+	return (letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')
+}
+
+// splitLayoutReference splits path[:ref.name] for the oci: and oci-archive:
+// schemes: the path ends at the first colon and the remainder must be a valid
+// index ref.name, which may itself contain colons and slashes
+// (`docker.io/library/app:1.2`).
+func splitLayoutReference(value string) (string, string, error) {
+	path, tag, ok := splitLocalPath(value)
+	if !ok {
 		return value, "", nil
 	}
-	candidate := value[colon+1:]
-	if strings.ContainsAny(candidate, `/\`) {
-		return value, "", nil
+	if !isValidLocalTag(tag) {
+		return "", "", fmt.Errorf("local image reference has an invalid tag after the path: a tag is a registry tag such as 1.2 or an index ref.name such as docker.io/library/app:1.2")
 	}
-	if !isValidLocalTag(candidate) {
-		return "", "", fmt.Errorf("local image reference has an invalid tag after the last colon")
-	}
-	return value[:colon], candidate, nil
+	return path, tag, nil
 }
 
 // splitDockerArchiveReference splits path[:repo[:tag]] for docker-archive:
 // the path ends at the first colon and the remainder must be a registry-style
 // image name without a digest, as `docker save` records it in RepoTags.
 func splitDockerArchiveReference(value string) (string, string, error) {
-	colon := strings.IndexByte(value, ':')
-	if colon < 0 {
+	path, name, ok := splitLocalPath(value)
+	if !ok {
 		return value, "", nil
 	}
-	name := value[colon+1:]
 	if name == "" {
 		return "", "", fmt.Errorf("docker-archive reference has an empty image name after the path")
 	}
@@ -183,9 +210,23 @@ func splitDockerArchiveReference(value string) (string, string, error) {
 	if parsed.Digest != "" {
 		return "", "", fmt.Errorf("docker-archive image name must not carry a digest; use @digest after the path")
 	}
-	return value[:colon], name, nil
+	return path, name, nil
 }
 
+// maxLocalTagBytes bounds a ref.name on the command line; the OCI annotation
+// grammar itself has no length bound.
+const maxLocalTagBytes = 256
+
+// refNameRegexp is the org.opencontainers.image.ref.name grammar from the
+// OCI image-spec annotations document, without `@`, which the local reference
+// grammar reserves for the digest separator.
+var refNameRegexp = regexp.MustCompile(`^[A-Za-z0-9]+([-._:/+][A-Za-z0-9]+)*$`)
+
+// isValidLocalTag accepts a registry tag (`[\w][\w.-]{0,127}`) or an OCI
+// index ref.name (`docker.io/library/app:1.2`).
 func isValidLocalTag(tag string) bool {
-	return tag != "" && distributionreference.TagRegexp.FindString(tag) == tag
+	if tag == "" || len(tag) > maxLocalTagBytes {
+		return false
+	}
+	return distributionreference.TagRegexp.FindString(tag) == tag || refNameRegexp.MatchString(tag)
 }

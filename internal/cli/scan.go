@@ -15,6 +15,7 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/findings"
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/logging"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/sarif"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
@@ -45,6 +46,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var failOn string
 	var username string
 	var passwordStdin bool
+	var logFormat string
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
@@ -62,6 +64,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			failThreshold, err := parseFailOn(failOn)
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("log-format") {
+				if _, err := logging.ParseFormat(logFormat); err != nil {
+					return fmt.Errorf("invalid --log-format: %w", err)
+				}
 			}
 			ref, err := manifest.ParseReference(args[0])
 			if err != nil {
@@ -97,7 +104,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err := applyScanScopeFlags(cmd, &cfg, tagPageSize, maxRepositoryTags, maxRepositoryTargets); err != nil {
 				return err
 			}
-			logger, err := newLogger(cfg.LogLevel, cmd.ErrOrStderr())
+			// The flag wins over LAYERLEAK_LOG_FORMAT; both were validated above.
+			if cmd.Flags().Changed("log-format") {
+				cfg.LogFormat = strings.ToLower(strings.TrimSpace(logFormat))
+			}
+			logger, err := newLogger(cfg.LogLevel, cfg.LogFormat, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -342,6 +353,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed (otherwise exit code 3)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "low", "Lowest confidence of an actionable finding that produces exit code 2: low, medium, high, or none to report only")
 	cmd.Flags().StringVar(&progressSetting, "progress", string(progressModeAuto), "Progress mode: auto, tty, plain, or off")
+	cmd.Flags().StringVar(&logFormat, "log-format", "", "Log record format on stderr: json or text. Overrides LAYERLEAK_LOG_FORMAT (default json).")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory for the scan record. Overrides LAYERLEAK_FINDINGS_DIR; the default is ./findings under the working directory.")
 	cmd.Flags().StringVar(&outputPath, "output", "-", "Write the formatted result to this file instead of stdout; - means stdout.")
 	cmd.Flags().BoolVar(&noArtifacts, "no-artifacts", false, "Do not write a scan record file.")

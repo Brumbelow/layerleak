@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/logging"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
@@ -233,7 +234,7 @@ func Run() error {
 	if err != nil {
 		return err
 	}
-	logger, err := newDefaultLogger(cfg.LogLevel)
+	logger, err := newDefaultLogger(cfg.LogLevel, cfg.LogFormat)
 	if err != nil {
 		return err
 	}
@@ -332,10 +333,9 @@ func warnAboutOpenListener(addr string, authenticated bool, logger *slog.Logger)
 	logger.Warn("api authentication is disabled on a non-loopback address; set LAYERLEAK_API_BEARER_TOKENS or place the API behind an authenticated gateway", "api_addr", addr)
 }
 
-func newDefaultLogger(levelName string) (*slog.Logger, error) {
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(strings.TrimSpace(levelName))); err != nil {
-		return nil, fmt.Errorf("parse log level: %w", err)
-	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})), nil
+// newDefaultLogger builds the process logger on stderr from
+// LAYERLEAK_LOG_LEVEL and LAYERLEAK_LOG_FORMAT through the handler
+// constructor the CLI shares (internal/logging).
+func newDefaultLogger(levelName, formatName string) (*slog.Logger, error) {
+	return logging.NewLogger(os.Stderr, levelName, formatName)
 }

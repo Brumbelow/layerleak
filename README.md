@@ -248,6 +248,7 @@ Useful scan flags:
 | `--username <name>` / `--password-stdin` | Authenticate to a private registry for this scan; see "Private registries" below. |
 | `--all-tags` | Enumerate every public tag for a bare repository. |
 | `--progress auto|tty|plain|off` | Select interactive, log-safe, or disabled progress output. `auto` uses plain lines when `LAYERLEAK_LOG_LEVEL=debug`, `TERM=dumb` or `CI=true`. |
+| `--log-format json|text` | Encoding of the log records on stderr. `json` (default) is one object per line for log shippers; `text` is `key=value` for reading a `debug` run on a terminal. Overrides `LAYERLEAK_LOG_FORMAT`. |
 | `--tag-page-size` | Override the tag-list page size for `--all-tags`. |
 | `--max-repository-tags` | Override the tag enumeration bound for `--all-tags`; `0` disables it. |
 | `--max-repository-targets` | Override the distinct target bound for `--all-tags`; `0` disables it. |
@@ -380,6 +381,7 @@ variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LAYERLEAK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` (case-insensitive); any other spelling is rejected. |
+| `LAYERLEAK_LOG_FORMAT` | `json` | Log record encoding on stderr for the CLI and the API: `json` (one object per line, safe for log shippers) or `text` (`key=value` records for a terminal); case-insensitive, anything else is rejected. The CLI flag `--log-format` overrides it for one scan. |
 | `LAYERLEAK_FINDINGS_DIR` | `./findings` | CLI only. Directory for scan records (one JSON file per scan); relative values resolve against the working directory. `--output-dir` overrides it, `--no-artifacts` skips it. |
 | `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Boolean. Unsafe opt-in for raw values and snippets. |
 | `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Per-attempt deadline for manifest, config, tag, and auth requests and for the response headers of blob requests; also bounds dial and TLS handshake. |

@@ -1,29 +1,21 @@
 package cli
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
+
+	"github.com/brumbelow/layerleak/v3/internal/logging"
 )
 
-// newLogger writes JSON log lines to output, the command's stderr, so debug
+// newLogger writes log records to output, the command's stderr, so debug
 // logging shares the stream (and the plain-progress fallback) with progress
-// output instead of interleaving with a redrawn terminal block.
-func newLogger(level string, output io.Writer) (*slog.Logger, error) {
-	parsed, err := parseLogLevel(level)
-	if err != nil {
-		return nil, err
-	}
-
-	return slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{
-		Level: parsed,
-	})), nil
+// output instead of interleaving with a redrawn terminal block. format is
+// json (the default, safe for log shippers) or text (for a terminal); the
+// handler comes from internal/logging, which layerleak-api uses too.
+func newLogger(level, format string, output io.Writer) (*slog.Logger, error) {
+	return logging.NewLogger(output, level, format)
 }
 
 func parseLogLevel(level string) (slog.Level, error) {
-	var parsed slog.Level
-	if err := parsed.UnmarshalText([]byte(level)); err != nil {
-		return 0, fmt.Errorf("parse log level: %w", err)
-	}
-	return parsed, nil
+	return logging.ParseLevel(level)
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestNewDefaultLoggerHonorsConfiguredLevel(t *testing.T) {
-	logger, err := newDefaultLogger("warn")
+	logger, err := newDefaultLogger("warn", "json")
 	if err != nil {
 		t.Fatalf("newDefaultLogger() error = %v", err)
 	}
@@ -23,8 +23,31 @@ func TestNewDefaultLoggerHonorsConfiguredLevel(t *testing.T) {
 	if !logger.Enabled(context.Background(), slog.LevelWarn) {
 		t.Fatal("warn logging is disabled at warn level")
 	}
-	if _, err := newDefaultLogger("verbose"); err == nil {
+	if _, err := newDefaultLogger("verbose", "json"); err == nil {
 		t.Fatal("newDefaultLogger(verbose) error = nil")
+	}
+}
+
+// TestNewDefaultLoggerSelectsHandlerByFormat pins the API to the shared
+// internal/logging constructor: LAYERLEAK_LOG_FORMAT=text yields a text
+// handler, json a JSON handler, and anything else is rejected.
+func TestNewDefaultLoggerSelectsHandlerByFormat(t *testing.T) {
+	jsonLogger, err := newDefaultLogger("info", "json")
+	if err != nil {
+		t.Fatalf("newDefaultLogger(json) error = %v", err)
+	}
+	if _, ok := jsonLogger.Handler().(*slog.JSONHandler); !ok {
+		t.Fatalf("json handler = %T", jsonLogger.Handler())
+	}
+	textLogger, err := newDefaultLogger("info", "text")
+	if err != nil {
+		t.Fatalf("newDefaultLogger(text) error = %v", err)
+	}
+	if _, ok := textLogger.Handler().(*slog.TextHandler); !ok {
+		t.Fatalf("text handler = %T", textLogger.Handler())
+	}
+	if _, err := newDefaultLogger("info", "yaml"); err == nil || !strings.Contains(err.Error(), "unsupported log format") {
+		t.Fatalf("newDefaultLogger(yaml) error = %v", err)
 	}
 }
 

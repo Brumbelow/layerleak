@@ -153,7 +153,9 @@ func Default() Set {
 		newRegexDetector("mapbox_secret_token", regexp.MustCompile(`\bsk\.eyJ[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("airtable_personal_access_token", regexp.MustCompile(`\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("planetscale_service_token", regexp.MustCompile(`\bpscale_tkn_[A-Za-z0-9_]{43,}\b`), 0, ConfidenceHigh, nil),
-		newRegexDetector("fly_api_token", regexp.MustCompile(`\bfo1_[A-Za-z0-9._-]{43,}\b`), 0, ConfidenceHigh, nil),
+		// Fly.io API tokens: the fo1_ shape and the fm1a_/fm1r_/fm2_ macaroons
+		// (the "FlyV1 " prefix flyctl prints is not part of the value).
+		newRegexDetector("fly_api_token", regexp.MustCompile(`\b(?:fo1_[A-Za-z0-9._-]{43,}|fm1[ar]_[A-Za-z0-9+/]{100,}={0,3}|fm2_[A-Za-z0-9+/]{100,}={0,3})`), 0, ConfidenceHigh, nil).requiring("fo1_", "fm1a_", "fm1r_", "fm2_"),
 		newRegexDetector("circleci_personal_api_token", regexp.MustCompile(`\bCCIPAT_[A-Za-z0-9]{22}_[A-Fa-f0-9]{40}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("openrouter_api_key", regexp.MustCompile(`\bsk-or-v1-[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("sentry_user_token", regexp.MustCompile(`\bsntryu_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
@@ -177,6 +179,7 @@ func Default() Set {
 	rules = append(rules, registryCredentialDetectors()...)
 	rules = append(rules, httpHeaderCredentialDetectors()...)
 	rules = append(rules, cloudStateDetectors()...)
+	rules = append(rules, cloudFormatDetectors()...)
 	rules = append(rules, contextEntropyDetector{})
 	return Set{detectors: rules}
 }
@@ -894,7 +897,7 @@ func looksLikeWordCompound(value string) bool {
 		}
 	})
 	if len(segments) < 2 {
-		return false
+		return isCamelCaseCompound(value)
 	}
 	for _, segment := range segments {
 		if segment == "" || !wordyCandidateExpression.MatchString(segment) {
@@ -902,6 +905,29 @@ func looksLikeWordCompound(value string) bool {
 		}
 	}
 	return true
+}
+
+// isCamelCaseCompound reports a letters-only value made of two or more
+// capitalised words of at least three letters (RootManageSharedAccessKey,
+// defaultServiceAccount): a name, not key material. Random mixed-case
+// strings break into one- and two-letter runs and are kept.
+func isCamelCaseCompound(value string) bool {
+	segments := 0
+	run := 0
+	for index, r := range value {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+		if unicode.IsUpper(r) && index > 0 {
+			if run < 3 {
+				return false
+			}
+			segments++
+			run = 0
+		}
+		run++
+	}
+	return segments >= 1 && run >= 3
 }
 
 func hasStrongEntropyShape(value string) bool {

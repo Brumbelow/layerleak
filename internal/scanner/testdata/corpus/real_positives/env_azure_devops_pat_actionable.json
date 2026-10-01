@@ -1,0 +1,13 @@
+{
+  "name": "env_azure_devops_pat_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "AZURE_DEVOPS_EXT_PAT",
+  "content_base64": "QVpVUkVfREVWT1BTX0VYVF9QQVQ9QWIxY0QyZUYzZ0FiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ0FiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ2hJamtsQVpET21OOHBR",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "azure_devops_personal_access_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

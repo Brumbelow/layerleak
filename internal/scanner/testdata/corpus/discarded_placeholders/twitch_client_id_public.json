@@ -1,0 +1,11 @@
+{
+  "name": "twitch_client_id_public",
+  "source_type": "env",
+  "path": "",
+  "key": "TWITCH_CLIENT_ID",
+  "content": "TWITCH_CLIENT_ID=x7k2m9q4w1e8r5t3y6u0i2o5p7a3s9",
+  "expected_outcome": "discarded",
+  "expected_detectors": [],
+  "expected_confidence_floor": "",
+  "expected_reason": ""
+}

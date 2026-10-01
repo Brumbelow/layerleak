@@ -44,9 +44,13 @@ func saasTokenDetectors() []Detector {
 		newRegexDetector("duffel_api_token", regexp.MustCompile(`\bduffel_(?:test|live)_[A-Za-z0-9_=-]{43}\b`), 0, ConfidenceHigh, nil).requiring("duffel_test_", "duffel_live_"),
 		newRegexDetector("flutterwave_secret_key", regexp.MustCompile(`\bFLWSECK(?:_TEST)?-[0-9a-fA-F]{32}-X\b`), 0, ConfidenceHigh, nil),
 		// Twitch client secrets and OAuth tokens are 30 lowercase alphanumerics
-		// with no prefix, so the twitch key context is required: high.
-		newKeyValueDetector("twitch_api_token", regexp.MustCompile(`(?i)twitch`), regexp.MustCompile(`\b[a-z0-9]{30}\b`), ConfidenceHigh, looksLikeTwitchToken),
-		newRegexDetector("twitch_api_token", regexp.MustCompile(assignedValuePattern(`twitch[a-z_-]{0,30}`, `[a-z0-9]{30}`, `\b`)), 1, ConfidenceHigh, looksLikeTwitchToken).onLoweredContent(),
+		// with no prefix, so a twitch key naming a secret, token, oauth value
+		// or password is required: high. The public client id has the same
+		// shape and sits next to the secret in every Twitch app's
+		// configuration (TWITCH_CLIENT_ID), so the key must carry a credential
+		// word after "twitch".
+		newKeyValueDetector("twitch_api_token", regexp.MustCompile(`(?i)twitch[a-z0-9_-]*(?:secret|token|oauth|password)`), regexp.MustCompile(`\b[a-z0-9]{30}\b`), ConfidenceHigh, looksLikeTwitchToken),
+		newRegexDetector("twitch_api_token", regexp.MustCompile(assignedValuePattern(`twitch[a-z0-9_-]{0,30}(?:secret|token|oauth|password)[a-z0-9_-]{0,10}`, `[a-z0-9]{30}`, `\b`)), 1, ConfidenceHigh, looksLikeTwitchToken).onLoweredContent(),
 		// Dropbox short-lived tokens: "sl." plus 130+ base64url characters.
 		newRegexDetector("dropbox_access_token", regexp.MustCompile(`\bsl\.[A-Za-z0-9_=-]{130,}\b`), 0, ConfidenceHigh, nil),
 		// Asana PATs are "<version>/<16+ digit user id>:<32+ alphanumerics>"

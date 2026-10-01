@@ -115,9 +115,13 @@ Changed:
    every writer.
 
 5. Operational changes to expect: a scan that completes after its client
-   disconnected is now persisted; the API returns `503` from `/readyz` while
-   draining; access logs are structured; `GET /health` includes `version`;
-   registry `404`s map to `404 image_not_found` instead of `502`.
+   disconnected is now persisted; on SIGTERM the API answers `503 not_ready`
+   from `/readyz` and refuses new scans with `503 server_shutting_down` for
+   `LAYERLEAK_API_PRESTOP_DELAY` (default `0s`), then cancels in-flight scans
+   and exits 0 within `LAYERLEAK_API_SHUTDOWN_TIMEOUT`; one structured access
+   record is logged per request; `GET /health` includes `version`; registry
+   `404`s map to `404 image_not_found` instead of `502`; `/readyz` caches its
+   result for `LAYERLEAK_API_READINESS_CACHE_TTL` (default `5s`).
 
 ## Track 3: API consumers
 
@@ -131,6 +135,13 @@ Additions you may start reading:
 - New error codes: `image_not_found` (404), `registry_rate_limited` (503 with
   `Retry-After`), `registry_unauthorized` (502), `server_shutting_down` (503),
   `not_ready` (503). See the README status table and `web/docs/openapi.yaml`.
+- Two tightenings affect only malformed clients: the `{repository}` path
+  segment is percent-decoded once (`library%252Fapp` is no longer read as
+  `library/app`) and must match the OCI repository-name grammar (400
+  otherwise); `/api/v1/repositories/scans` and `/api/v1/repositories/findings`
+  are 404. `408 scan_canceled` now means only that the client went away;
+  registry timeouts are `502 scan_failed`. `504 scan_timeout` is returned only
+  when the API's own scan deadline expired.
 - List responses echo the normalised `registry` filter.
 - Redacted values and context snippets are shorter and never reveal a secret
   that appears twice in a window.

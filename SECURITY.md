@@ -82,6 +82,9 @@ Expected protections include:
   readiness;
 - the API image runs without a shell, as a numeric non-root user, and supports a
   read-only filesystem;
+- the API access log records the method, route pattern, status, size,
+  duration, request id and remote address, never the path, query or body;
+  panic logs carry the goroutine stack and panic type, never the panic value;
 - release images are scanned on both platforms, carry SBOM/provenance
   attestations, and are keyless-signed after full verification.
 

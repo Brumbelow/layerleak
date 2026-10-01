@@ -25,9 +25,12 @@
         "files_scanned": 2,
         "files_seen": 2,
         "files_skipped_oversize": 0,
+        "files_transcoded_utf16": 0,
         "layers_completed": 1,
         "layers_seen": 1,
         "metadata_values_scanned": 1,
+        "nested_archives_expanded": 0,
+        "nested_entries_scanned": 0,
         "retained_bytes": 64
       },
       "failed_manifest_count": 0,

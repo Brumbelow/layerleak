@@ -75,7 +75,10 @@
               "metadata_values_scanned": 3,
               "expanded_layer_bytes": 4096,
               "retained_bytes": 128,
-              "detector_input_bytes_scanned": 2048
+              "detector_input_bytes_scanned": 2048,
+              "files_transcoded_utf16": 0,
+              "nested_archives_expanded": 0,
+              "nested_entries_scanned": 0
             },
             "diagnostics": [
               {
@@ -123,7 +126,10 @@
               "metadata_values_scanned": 3,
               "expanded_layer_bytes": 4096,
               "retained_bytes": 128,
-              "detector_input_bytes_scanned": 2048
+              "detector_input_bytes_scanned": 2048,
+              "files_transcoded_utf16": 0,
+              "nested_archives_expanded": 0,
+              "nested_entries_scanned": 0
             }
           },
           {
@@ -148,7 +154,10 @@
               "metadata_values_scanned": 0,
               "expanded_layer_bytes": 0,
               "retained_bytes": 0,
-              "detector_input_bytes_scanned": 0
+              "detector_input_bytes_scanned": 0,
+              "files_transcoded_utf16": 0,
+              "nested_archives_expanded": 0,
+              "nested_entries_scanned": 0
             },
             "diagnostics": [
               {
@@ -263,7 +272,10 @@
       "metadata_values_scanned": 3,
       "expanded_layer_bytes": 4096,
       "retained_bytes": 128,
-      "detector_input_bytes_scanned": 2048
+      "detector_input_bytes_scanned": 2048,
+      "files_transcoded_utf16": 0,
+      "nested_archives_expanded": 0,
+      "nested_entries_scanned": 0
     },
     "diagnostics": [
       {

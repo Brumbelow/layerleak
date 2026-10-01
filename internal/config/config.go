@@ -73,22 +73,32 @@ type Config struct {
 	MaxImageLayerBytes          int64
 	MaxImageArtifacts           int
 	MaxRetainedBytes            int64
-	MaxManifestBytes            int64
-	MaxConfigBytes              int64
-	MaxTagResponseBytes         int64
-	TagPageSize                 int
-	MaxRepositoryTags           int
-	MaxRepositoryTargets        int
-	RegistryRequestAttempts     int
-	MaxFindingsPerScan          int
-	FindingsDir                 string
-	DatabaseURL                 string
-	DatabaseMaxOpenConns        int
-	DatabaseMaxIdleConns        int
-	DatabaseConnMaxLifetime     time.Duration
-	DatabaseConnMaxIdleTime     time.Duration
-	DatabaseQueryTimeout        time.Duration
-	DatabaseWriteTimeout        time.Duration
+	// MaxNestedArchiveBytes bounds an archive stored in a layer (zip family,
+	// gzip, tar) that is expanded one level deep: both its stored size and the
+	// decompressed bytes read out of it. 0 disables nested expansion.
+	MaxNestedArchiveBytes int64
+	// MaxNestedArchiveEntries bounds the entries examined per nested archive;
+	// 0 disables this bound (the layer and image entry budgets still apply).
+	MaxNestedArchiveEntries int
+	// MaxLayerCacheBytes bounds the per-sweep layer cache that lets --all-tags
+	// skip re-fetching layers shared between tags. 0 (the default) disables it.
+	MaxLayerCacheBytes      int64
+	MaxManifestBytes        int64
+	MaxConfigBytes          int64
+	MaxTagResponseBytes     int64
+	TagPageSize             int
+	MaxRepositoryTags       int
+	MaxRepositoryTargets    int
+	RegistryRequestAttempts int
+	MaxFindingsPerScan      int
+	FindingsDir             string
+	DatabaseURL             string
+	DatabaseMaxOpenConns    int
+	DatabaseMaxIdleConns    int
+	DatabaseConnMaxLifetime time.Duration
+	DatabaseConnMaxIdleTime time.Duration
+	DatabaseQueryTimeout    time.Duration
+	DatabaseWriteTimeout    time.Duration
 }
 
 func Load() (Config, error) {
@@ -235,6 +245,18 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxNestedArchiveBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES", 64*(1<<20))
+	if err != nil {
+		return Config{}, err
+	}
+	maxNestedArchiveEntries, err := nonNegativeIntFromEnv("LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES", 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxLayerCacheBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", 0)
+	if err != nil {
+		return Config{}, err
+	}
 	maxManifestBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_MANIFEST_BYTES", 8*(1<<20))
 	if err != nil {
 		return Config{}, err
@@ -342,6 +364,9 @@ func Load() (Config, error) {
 		MaxImageLayerBytes:          maxImageLayerBytes,
 		MaxImageArtifacts:           maxImageArtifacts,
 		MaxRetainedBytes:            maxRetainedBytes,
+		MaxNestedArchiveBytes:       maxNestedArchiveBytes,
+		MaxNestedArchiveEntries:     maxNestedArchiveEntries,
+		MaxLayerCacheBytes:          maxLayerCacheBytes,
 		MaxManifestBytes:            maxManifestBytes,
 		MaxConfigBytes:              maxConfigBytes,
 		MaxTagResponseBytes:         maxTagResponseBytes,

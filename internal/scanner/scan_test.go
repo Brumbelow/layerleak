@@ -1677,6 +1677,10 @@ func TestScanVerifiesRootDigestBeforeParsing(t *testing.T) {
 type tarEntry struct {
 	name string
 	body string
+	// typeflag and linkname are zero for a regular file; a symlink or hardlink
+	// sets them and carries no body.
+	typeflag byte
+	linkname string
 }
 
 func gzipLayer(t *testing.T, entries []tarEntry) []byte {
@@ -1687,9 +1691,11 @@ func gzipLayer(t *testing.T, entries []tarEntry) []byte {
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, entry := range entries {
 		header := &tar.Header{
-			Name: entry.name,
-			Mode: 0600,
-			Size: int64(len(entry.body)),
+			Name:     entry.name,
+			Mode:     0600,
+			Size:     int64(len(entry.body)),
+			Typeflag: entry.typeflag,
+			Linkname: entry.linkname,
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader() error = %v", err)

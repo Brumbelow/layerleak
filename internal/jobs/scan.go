@@ -11,6 +11,7 @@ import (
 
 	"github.com/brumbelow/layerleak/v3/internal/detectors"
 	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
@@ -38,16 +39,23 @@ type Request struct {
 	// version of this binary.
 	ScannerVersion string
 	// Now supplies scanned_at; nil means time.Now.
-	Now                  func() time.Time
-	MaxFileBytes         int64
-	MaxLayerBytes        int64
-	MaxLayerEntries      int
-	MaxConfigBytes       int64
-	MaxImageLayers       int
-	MaxImageManifests    int
-	MaxImageLayerBytes   int64
-	MaxImageArtifacts    int
-	MaxRetainedBytes     int64
+	Now                func() time.Time
+	MaxFileBytes       int64
+	MaxLayerBytes      int64
+	MaxLayerEntries    int
+	MaxConfigBytes     int64
+	MaxImageLayers     int
+	MaxImageManifests  int
+	MaxImageLayerBytes int64
+	MaxImageArtifacts  int
+	MaxRetainedBytes   int64
+	// MaxNestedArchiveBytes and MaxNestedArchiveEntries bound the one-level
+	// expansion of archives stored in layers.
+	MaxNestedArchiveBytes   int64
+	MaxNestedArchiveEntries int
+	// MaxLayerCacheBytes bounds the per-sweep layer cache of --all-tags; 0
+	// disables it. Single-reference scans never use it.
+	MaxLayerCacheBytes   int64
 	MaxFindings          int
 	RetainRawSecrets     bool
 	MaxRawFindingBytes   int64
@@ -436,6 +444,11 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
+	// The layer cache lives exactly as long as this sweep: adjacent tags of a
+	// repository share most layers, and a layer whose files held no findings
+	// is replayed from its metadata instead of being fetched again. It is nil
+	// (off) unless LAYERLEAK_MAX_LAYER_CACHE_BYTES is set.
+	layerCache := layers.NewLayerCache(request.MaxLayerCacheBytes)
 	// stopEarly records every target the sweep did not reach so the per-target
 	// accounting and tag_results describe the whole repository, then finalizes.
 	stopEarly := func(from int, cause error) {
@@ -466,6 +479,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			findingsBefore:   len(allDetailedFindings),
 			findingsRetained: findingsRetained,
 			rawBytesRetained: rawBytesRetained,
+			layerCache:       layerCache,
 		})
 		targetResult := targetResultFromScanResult(scanReference, scanResult, group.tags)
 		result.ManifestCount += scanResult.ManifestCount
@@ -603,6 +617,7 @@ type progressState struct {
 	findingsBefore   int
 	findingsRetained int
 	rawBytesRetained int64
+	layerCache       *layers.LayerCache
 }
 
 func scanTarget(ctx context.Context, request Request, reference manifest.Reference, tags []string, state progressState) (scanner.Result, error) {
@@ -621,6 +636,11 @@ func scanTarget(ctx context.Context, request Request, reference manifest.Referen
 		MaxImageLayerBytes: request.MaxImageLayerBytes,
 		MaxImageArtifacts:  request.MaxImageArtifacts,
 		MaxRetainedBytes:   request.MaxRetainedBytes,
+
+		MaxNestedArchiveBytes:   request.MaxNestedArchiveBytes,
+		MaxNestedArchiveEntries: request.MaxNestedArchiveEntries,
+		LayerCache:              state.layerCache,
+
 		MaxFindings:        request.MaxFindings,
 		ExistingFindings:   state.findingsRetained,
 		RetainRawSecrets:   request.RetainRawSecrets,
@@ -779,6 +799,9 @@ func mergeCoverage(left, right scanner.Coverage) scanner.Coverage {
 		ExpandedLayerBytes:        left.ExpandedLayerBytes + right.ExpandedLayerBytes,
 		RetainedBytes:             left.RetainedBytes + right.RetainedBytes,
 		DetectorInputBytesScanned: left.DetectorInputBytesScanned + right.DetectorInputBytesScanned,
+		FilesTranscodedUTF16:      left.FilesTranscodedUTF16 + right.FilesTranscodedUTF16,
+		NestedArchivesExpanded:    left.NestedArchivesExpanded + right.NestedArchivesExpanded,
+		NestedEntriesScanned:      left.NestedEntriesScanned + right.NestedEntriesScanned,
 	}
 }
 

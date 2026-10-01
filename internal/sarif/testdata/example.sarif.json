@@ -232,7 +232,10 @@
           "metadata_values_scanned": 9,
           "expanded_layer_bytes": 4096,
           "retained_bytes": 2048,
-          "detector_input_bytes_scanned": 1024
+          "detector_input_bytes_scanned": 1024,
+          "files_transcoded_utf16": 0,
+          "nested_archives_expanded": 0,
+          "nested_entries_scanned": 0
         },
         "diagnostics": [
           {

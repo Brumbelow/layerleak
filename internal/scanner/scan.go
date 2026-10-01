@@ -36,6 +36,15 @@ type Request struct {
 	MaxImageLayerBytes int64
 	MaxImageArtifacts  int
 	MaxRetainedBytes   int64
+	// MaxNestedArchiveBytes and MaxNestedArchiveEntries bound the one-level
+	// expansion of archives stored in layers (layers.ReplayOptions).
+	MaxNestedArchiveBytes   int64
+	MaxNestedArchiveEntries int
+	// LayerCache, when set, is the sweep-scoped cache of layers whose files
+	// held no findings: such layers are replayed from it without a blob fetch
+	// and newly scanned clean layers are stored into it. Results are identical
+	// with and without it.
+	LayerCache         *layers.LayerCache
 	MaxFindings        int
 	ExistingFindings   int
 	RetainRawSecrets   bool
@@ -46,7 +55,17 @@ type Request struct {
 	Progress           ProgressFunc
 }
 
-const maxArchivePathBytes = 4096
+const (
+	maxArchivePathBytes = 4096
+	// maxProvenancePathBytes is the longest file path whose own detector
+	// matches are redacted: an archive path plus a nested entry path.
+	maxProvenancePathBytes = 2*maxArchivePathBytes + len(layers.NestedPathSeparator)
+	// maxNestedSkipDiagnostics bounds the per-platform nested_archive_skipped
+	// diagnostics; further skips are summed into one closing diagnostic.
+	maxNestedSkipDiagnostics = 32
+	// maxDiagnosticPathRunes bounds a file path quoted in a diagnostic message.
+	maxDiagnosticPathRunes = 256
+)
 
 type ResultStatus string
 
@@ -69,6 +88,15 @@ type Coverage struct {
 	ExpandedLayerBytes        int64 `json:"expanded_layer_bytes"`
 	RetainedBytes             int64 `json:"retained_bytes"`
 	DetectorInputBytesScanned int64 `json:"detector_input_bytes_scanned"`
+	// FilesTranscodedUTF16 counts scanned files whose UTF-16 content was
+	// transcoded to UTF-8 before detection (3.0.0; previously such files were
+	// excluded as binary).
+	FilesTranscodedUTF16 int `json:"files_transcoded_utf16"`
+	// NestedArchivesExpanded counts archives stored in layers that were opened
+	// one level deep; NestedEntriesScanned counts the regular files inside them
+	// that were classified and scanned by content or checked by path (3.0.0).
+	NestedArchivesExpanded int `json:"nested_archives_expanded"`
+	NestedEntriesScanned   int `json:"nested_entries_scanned"`
 }
 
 type Diagnostic struct {
@@ -476,14 +504,25 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 		budget.markExceeded(descriptor.Digest)
 	}
 	if !budget.stopped() && err == nil {
-		layerResult, err = layers.Replay(ctx, imageManifest.Layers, layers.ReplayOptions{
+		replayOptions := layers.ReplayOptions{
 			MaxFileBytes:     request.MaxFileBytes,
 			MaxLayerBytes:    request.MaxLayerBytes,
 			MaxLayerEntries:  request.MaxLayerEntries,
 			MaxTotalBytes:    request.MaxImageLayerBytes,
 			MaxTotalEntries:  request.MaxImageArtifacts,
 			MaxRetainedBytes: request.MaxRetainedBytes,
-		}, layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
+
+			MaxNestedArchiveBytes:   request.MaxNestedArchiveBytes,
+			MaxNestedArchiveEntries: request.MaxNestedArchiveEntries,
+			// A nested entry that cannot be scanned by content is kept only when
+			// its path alone would be reported (LAY-12), so a jar full of class
+			// files costs no retained metadata.
+			NestedKeepPath: func(path string) bool {
+				return len(request.Detectors.ScanPath(path)) > 0
+			},
+			Cache: request.LayerCache,
+		}
+		opener := layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
 			blobCtx := ctx
 			cancel := func() {}
 			if request.BlobTimeout > 0 {
@@ -506,7 +545,15 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 				return nil, err
 			}
 			return &verifiedReadCloser{VerifyingReader: verifier, closer: response.Body, cancel: cancel}, nil
-		}))
+		})
+		layerResult, err = layers.Replay(ctx, imageManifest.Layers, replayOptions, opener)
+		if errors.Is(err, layers.ErrCacheUnusable) {
+			// A later layer hardlinks into a cached layer's text, which the
+			// cache does not hold: replay this manifest from the registry.
+			// Layers scanned on the way are still recorded for the cache.
+			replayOptions.SkipCacheLookup = true
+			layerResult, err = layers.Replay(ctx, imageManifest.Layers, replayOptions, opener)
+		}
 		if layers.IsUnsupportedLayer(err) {
 			err = &UnsupportedManifestError{Digest: descriptor.Digest, Platform: platform, Cause: err}
 		}
@@ -519,6 +566,12 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 	}
 
 	allFindings := append(metadataFindings, fileFindings...)
+	if request.LayerCache != nil && err == nil && !budget.stopped() && ctx.Err() == nil {
+		// Every regular file of a completed layer was scanned (as final or as
+		// deleted content); a layer none of whose files produced a finding is
+		// safe to replay from metadata for the rest of the sweep.
+		storeCleanLayers(request.LayerCache, layerResult.LayerRecords, allFindings)
+	}
 	actionableFindings, suppressedFindings := splitDetailedFindings(allFindings)
 	platformResult.FindingsCount = len(actionableFindings)
 	platformResult.Coverage = coverageFromLayerResult(layerResult.Coverage, budget.delta(budgetStart))
@@ -541,6 +594,7 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 			Observed: int64(layerResult.Coverage.EntriesSkippedUnsafe),
 		})
 	}
+	platformResult.Diagnostics = append(platformResult.Diagnostics, nestedSkipDiagnostics(request.Detectors, descriptor.Digest, layerResult)...)
 	if budget.stopped() && budget.diagnosticManifest == descriptor.Digest {
 		platformResult.Diagnostics = append(platformResult.Diagnostics, budget.diagnostic())
 	}
@@ -671,7 +725,7 @@ func (b *detectionBudget) scan(detectorSet detectors.Set, input findings.Input, 
 	normalizer, err := findings.NewDetailedNormalizerWithProvenance(
 		input,
 		matches,
-		scanProvenance(detectorSet, input.FilePath, maxArchivePathBytes),
+		scanProvenance(detectorSet, input.FilePath, maxProvenancePathBytes),
 		scanProvenance(detectorSet, input.Key, findings.MaxPublicProvenanceBytes),
 	)
 	if err != nil {
@@ -864,38 +918,213 @@ func scanMetadataWithBudget(budget *detectionBudget, detectorSet detectors.Set, 
 func scanArtifactsWithBudget(budget *detectionBudget, detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
 	result := make([]findings.DetailedFinding, 0)
 	for _, artifact := range artifacts {
-		if budget != nil && (budget.stopped() || budget.err != nil || (budget.ctx != nil && budget.ctx.Err() != nil)) {
+		if budget.halted() {
 			break
 		}
 		if artifact.Type != "" && artifact.Type != layers.ArtifactTypeRegularFile && artifact.Type != layers.ArtifactTypeHardlink {
 			continue
 		}
-		input := findings.Input{
-			ManifestDigest:      manifestDigest,
-			Platform:            platform,
-			SourceType:          sourceType,
-			FilePath:            artifact.Path,
-			LayerDigest:         artifact.LayerDigest,
-			PresentInFinalImage: presentInFinalImage,
-		}
-		if artifact.Scannable {
-			if len(artifact.Content) == 0 {
-				// An empty text file holds nothing, whatever its name.
-				continue
+		result = append(result, scanArtifactWithBudget(budget, detectorSet, manifestDigest, platform, sourceType, presentInFinalImage, artifact)...)
+		// Entries expanded out of an archive are scanned in archive order under
+		// their `outer!inner` provenance path. A hardlink to an archive carries
+		// its target's entries under the hardlink's own path.
+		for _, nested := range artifact.Nested {
+			if budget.halted() {
+				break
 			}
-			input.Content = string(artifact.Content)
-			result = append(result, budget.scan(detectorSet, input, detectors.ScanInput{
-				Content: input.Content,
-				Path:    artifact.Path,
-			})...)
-			continue
+			if artifact.Type == layers.ArtifactTypeHardlink {
+				prefix := artifact.Linkname + layers.NestedPathSeparator
+				if strings.HasPrefix(nested.Path, prefix) {
+					nested.Path = artifact.Path + layers.NestedPathSeparator + strings.TrimPrefix(nested.Path, prefix)
+					nested.LayerDigest = artifact.LayerDigest
+				}
+			}
+			result = append(result, scanArtifactWithBudget(budget, detectorSet, manifestDigest, platform, sourceType, presentInFinalImage, nested)...)
 		}
-		// Binary or oversize content the detectors never see: report the
-		// artifact by its path when the name alone says it is sensitive
-		// (LAY-12). A readable file is judged by its content only.
-		result = append(result, budget.scanPath(detectorSet, input)...)
 	}
 	return result
+}
+
+// halted reports whether detection must stop iterating artifacts: the findings
+// budget is spent, a detection error was recorded or the context ended.
+func (b *detectionBudget) halted() bool {
+	return b != nil && (b.stopped() || b.err != nil || (b.ctx != nil && b.ctx.Err() != nil))
+}
+
+func scanArtifactWithBudget(budget *detectionBudget, detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifact layers.Artifact) []findings.DetailedFinding {
+	input := findings.Input{
+		ManifestDigest:      manifestDigest,
+		Platform:            platform,
+		SourceType:          sourceType,
+		FilePath:            artifact.Path,
+		LayerDigest:         artifact.LayerDigest,
+		PresentInFinalImage: presentInFinalImage,
+	}
+	if artifact.Scannable {
+		if artifact.ContentLength == 0 && len(artifact.Content) == 0 {
+			// An empty text file holds nothing, whatever its name.
+			return nil
+		}
+		if artifact.KnownClean && artifact.Content == nil {
+			// Replayed from the sweep cache: an earlier scan of this layer
+			// found nothing in this file. Account for it exactly as a scan
+			// would, without the content.
+			budget.scanKnownClean(input, artifact.ContentLength)
+			return nil
+		}
+		input.Content = string(artifact.Content)
+		return budget.scan(detectorSet, input, detectors.ScanInput{
+			Content: input.Content,
+			Path:    artifact.Path,
+		})
+	}
+	// Binary or oversize content the detectors never see: report the
+	// artifact by its path when the name alone says it is sensitive
+	// (LAY-12). A readable file is judged by its content only.
+	return budget.scanPath(detectorSet, input)
+}
+
+// scanKnownClean applies the gates and accounting of scan for a file whose
+// detector result (no matches) is already known, so coverage counters are
+// identical to a scan that ran the detectors.
+func (b *detectionBudget) scanKnownClean(input findings.Input, contentLength int64) {
+	if b == nil || b.stopped() || b.err != nil {
+		return
+	}
+	if b.exhausted() {
+		b.markExceeded(input.ManifestDigest)
+		return
+	}
+	if b.ctx != nil {
+		if err := b.ctx.Err(); err != nil {
+			b.err = err
+			return
+		}
+	}
+	b.coverage.detectorInputBytesScanned += contentLength
+	b.coverage.filesScanned++
+}
+
+// storeCleanLayers caches the records of layers none of whose files (or
+// nested entries) produced a finding, actionable or suppressed. A finding on a
+// hardlink is attributed to the hardlink's layer, which is what keeps that
+// layer out of the cache.
+func storeCleanLayers(cache *layers.LayerCache, records []*layers.LayerRecord, allFindings []findings.DetailedFinding) {
+	if cache == nil || len(records) == 0 {
+		return
+	}
+	dirty := make(map[string]struct{})
+	for _, finding := range allFindings {
+		if finding.LayerDigest != "" {
+			dirty[finding.LayerDigest] = struct{}{}
+		}
+	}
+	for _, record := range records {
+		if _, ok := dirty[record.Digest]; ok {
+			continue
+		}
+		cache.Store(record)
+	}
+}
+
+// nestedSkipDiagnostics reports every bounded skip of a nested archive as a
+// nested_archive_skipped diagnostic. The skip is informational: nested content
+// is scanned best-effort within its bounds and never changes coverage.complete.
+// Paths quoted in messages are redacted and bounded like finding provenance.
+func nestedSkipDiagnostics(detectorSet detectors.Set, manifestDigest string, result layers.ReplayResult) []Diagnostic {
+	items := make([]Diagnostic, 0, len(result.NestedSkips))
+	dropped := result.Coverage.NestedSkipsDropped
+	for index, skip := range result.NestedSkips {
+		if index >= maxNestedSkipDiagnostics {
+			dropped += len(result.NestedSkips) - index
+			break
+		}
+		items = append(items, Diagnostic{
+			Code:     "nested_archive_skipped",
+			Scope:    "platform",
+			Subject:  manifestDigest,
+			Message:  nestedSkipMessage(detectorSet, skip),
+			Limit:    skip.Limit,
+			Observed: skip.Observed,
+		})
+	}
+	if dropped > 0 {
+		items = append(items, Diagnostic{
+			Code:     "nested_archive_skipped",
+			Scope:    "platform",
+			Subject:  manifestDigest,
+			Message:  fmt.Sprintf("%d further nested archive skip(s) were not listed", dropped),
+			Observed: int64(dropped),
+		})
+	}
+	return items
+}
+
+func nestedSkipMessage(detectorSet detectors.Set, skip layers.NestedSkip) string {
+	prefix := fmt.Sprintf("nested archive %s in layer %s: ", redactedDiagnosticPath(detectorSet, skip.Path), strings.TrimSpace(skip.LayerDigest))
+	switch skip.Reason {
+	case layers.NestedSkipOversize:
+		return prefix + fmt.Sprintf("not expanded, its %d bytes exceed the %d byte nested archive limit", skip.Observed, skip.Limit)
+	case layers.NestedSkipBytesLimit:
+		return prefix + fmt.Sprintf("expansion stopped at the %d byte nested archive limit after %d entries", skip.Limit, skip.Observed)
+	case layers.NestedSkipEntriesLimit:
+		return prefix + fmt.Sprintf("expansion stopped at the %d entry nested archive limit", skip.Limit)
+	case layers.NestedSkipLayerBudget:
+		return prefix + fmt.Sprintf("expansion stopped after %d entries when the remaining layer or image budget (%d) was spent", skip.Observed, skip.Limit)
+	case layers.NestedSkipRetainedBytes:
+		return prefix + fmt.Sprintf("%d expanded entries were dropped to stay within the %d retained bytes limit", skip.Observed, skip.Limit)
+	case layers.NestedSkipMalformed:
+		return prefix + fmt.Sprintf("%d entries (or the archive structure) could not be decoded", skip.Observed)
+	case layers.NestedSkipEncrypted:
+		return prefix + fmt.Sprintf("%d encrypted entries were skipped", skip.Observed)
+	case layers.NestedSkipUnsupportedMethod:
+		return prefix + fmt.Sprintf("%d entries use an unsupported compression method", skip.Observed)
+	case layers.NestedSkipUnsafeEntries:
+		return prefix + fmt.Sprintf("%d entries with unsafe paths were skipped", skip.Observed)
+	case layers.NestedSkipOversizeEntries:
+		return prefix + fmt.Sprintf("%d entries exceeded the %d byte per-file limit", skip.Observed, skip.Limit)
+	case layers.NestedSkipDepth:
+		return prefix + fmt.Sprintf("%d archives inside it were not opened (one nesting level)", skip.Observed)
+	default:
+		return prefix + string(skip.Reason)
+	}
+}
+
+// redactedDiagnosticPath quotes a file path in a diagnostic: detector matches
+// inside the path are replaced, control characters are sanitised and the
+// result is bounded, so a secret embedded in a file name never appears in the
+// diagnostics any more than in a finding's provenance.
+func redactedDiagnosticPath(detectorSet detectors.Set, value string) string {
+	matches := scanProvenance(detectorSet, value, maxProvenancePathBytes)
+	type span struct{ start, end int }
+	spans := make([]span, 0, len(matches))
+	for _, match := range matches {
+		if match.Start < 0 || match.End > len(value) || match.Start >= match.End {
+			continue
+		}
+		spans = append(spans, span{start: match.Start, end: match.End})
+	}
+	slices.SortFunc(spans, func(left, right span) int { return left.start - right.start })
+	var builder strings.Builder
+	cursor := 0
+	for _, item := range spans {
+		if item.start < cursor {
+			if item.end > cursor {
+				cursor = item.end
+			}
+			continue
+		}
+		builder.WriteString(value[cursor:item.start])
+		builder.WriteString("[REDACTED]")
+		cursor = item.end
+	}
+	builder.WriteString(value[cursor:])
+	redacted := findings.SanitizeControlCharacters(strings.ToValidUTF8(builder.String(), "�"))
+	runes := []rune(redacted)
+	if len(runes) > maxDiagnosticPathRunes {
+		redacted = string(runes[:maxDiagnosticPathRunes]) + "…"
+	}
+	return redacted
 }
 
 // scanPath reports a path-only finding for an artifact whose content could
@@ -926,7 +1155,7 @@ func (b *detectionBudget) scanPath(detectorSet detectors.Set, input findings.Inp
 		return nil
 	}
 	input.Content = input.FilePath
-	normalizer, err := findings.NewDetailedNormalizerWithProvenance(input, nil, scanProvenance(detectorSet, input.FilePath, maxArchivePathBytes), nil)
+	normalizer, err := findings.NewDetailedNormalizerWithProvenance(input, nil, scanProvenance(detectorSet, input.FilePath, maxProvenancePathBytes), nil)
 	if err != nil {
 		return nil
 	}
@@ -967,7 +1196,7 @@ func normalizeMatches(detectorSet detectors.Set, input findings.Input, matches [
 	normalizer, err := findings.NewDetailedNormalizerWithProvenance(
 		input,
 		matches,
-		scanProvenance(detectorSet, input.FilePath, maxArchivePathBytes),
+		scanProvenance(detectorSet, input.FilePath, maxProvenancePathBytes),
 		scanProvenance(detectorSet, input.Key, findings.MaxPublicProvenanceBytes),
 	)
 	if err != nil {
@@ -1391,6 +1620,9 @@ func coverageFromLayerResult(layerCoverage layers.Coverage, detection detectionC
 		ExpandedLayerBytes:        layerCoverage.ExpandedBytes,
 		RetainedBytes:             layerCoverage.RetainedBytes,
 		DetectorInputBytesScanned: detection.detectorInputBytesScanned,
+		FilesTranscodedUTF16:      layerCoverage.FilesTranscodedUTF16,
+		NestedArchivesExpanded:    layerCoverage.NestedArchivesExpanded,
+		NestedEntriesScanned:      layerCoverage.NestedEntriesScanned,
 	}
 }
 
@@ -1411,6 +1643,9 @@ func mergeCoverage(left, right Coverage, initialized bool) Coverage {
 		ExpandedLayerBytes:        left.ExpandedLayerBytes + right.ExpandedLayerBytes,
 		RetainedBytes:             left.RetainedBytes + right.RetainedBytes,
 		DetectorInputBytesScanned: left.DetectorInputBytesScanned + right.DetectorInputBytesScanned,
+		FilesTranscodedUTF16:      left.FilesTranscodedUTF16 + right.FilesTranscodedUTF16,
+		NestedArchivesExpanded:    left.NestedArchivesExpanded + right.NestedArchivesExpanded,
+		NestedEntriesScanned:      left.NestedEntriesScanned + right.NestedEntriesScanned,
 	}
 }
 

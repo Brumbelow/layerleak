@@ -318,6 +318,38 @@ func TestLoadAllowsZeroResourceLimits(t *testing.T) {
 	}
 }
 
+// TestLoadLayerCacheBytes pins the per-sweep layer cache to off by default and
+// to a non-negative byte budget when set.
+func TestLoadLayerCacheBytes(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MaxLayerCacheBytes != 0 {
+		t.Fatalf("cfg.MaxLayerCacheBytes = %d, want 0 (off)", cfg.MaxLayerCacheBytes)
+	}
+	if cfg.MaxNestedArchiveBytes != 64*(1<<20) || cfg.MaxNestedArchiveEntries != 10000 {
+		t.Fatalf("nested archive defaults = (%d, %d)", cfg.MaxNestedArchiveBytes, cfg.MaxNestedArchiveEntries)
+	}
+
+	t.Setenv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", "268435456")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MaxLayerCacheBytes != 256*(1<<20) {
+		t.Fatalf("cfg.MaxLayerCacheBytes = %d", cfg.MaxLayerCacheBytes)
+	}
+
+	for _, invalid := range []string{"-1", "abc", "1.5"} {
+		t.Setenv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", invalid)
+		if _, err := Load(); err == nil {
+			t.Fatalf("Load() with LAYERLEAK_MAX_LAYER_CACHE_BYTES=%q error = nil", invalid)
+		}
+	}
+}
+
 func TestLoadInvalidMaxRepositoryTags(t *testing.T) {
 	t.Setenv("LAYERLEAK_MAX_REPOSITORY_TAGS", "-1")
 

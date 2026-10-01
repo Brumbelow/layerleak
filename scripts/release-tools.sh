@@ -33,11 +33,11 @@ download() {
   fi
 }
 
-download https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_amd64.tar.gz \
-  e4d4bb4498e8d007abe545b6568926793ace1b6447da598294a610018cb164be \
+download https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.tar.gz \
+  bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386 \
   "${release_tools_dir}/downloads/gh.tar.gz"
-tar -xzf "${release_tools_dir}/downloads/gh.tar.gz" -C "${release_unpack_dir}" gh_2.100.0_linux_amd64/bin/gh
-install -m 0755 "${release_unpack_dir}/gh_2.100.0_linux_amd64/bin/gh" "${release_tools_dir}/bin/gh"
+tar -xzf "${release_tools_dir}/downloads/gh.tar.gz" -C "${release_unpack_dir}" gh_2.102.0_linux_amd64/bin/gh
+install -m 0755 "${release_unpack_dir}/gh_2.102.0_linux_amd64/bin/gh" "${release_tools_dir}/bin/gh"
 
 if [[ "${mode}" == all ]]; then
   download https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64 \

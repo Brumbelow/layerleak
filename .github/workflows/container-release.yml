@@ -288,7 +288,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      attestations: read
     outputs:
       digest: ${{ steps.finalize.outputs.digest }}
       reference: ${{ steps.reference.outputs.reference }}
@@ -789,7 +788,7 @@ jobs:
             --arg amd64_digest "${AMD64_DIGEST}" \
             --arg arm64_digest "${ARM64_DIGEST}" \
             --arg grype_version "${GRYPE_VERSION}" \
-            --arg cosign_version "v3.0.2" \
+            --arg cosign_version "$(cosign version 2>&1 | awk '/^GitVersion:/ { print $2 }')" \
             '{
               schema_version: 1,
               version: $version,

@@ -42,7 +42,7 @@ The release workflow provisions the following exact versions on Linux x86_64:
 
 | Tool | Version | Provisioning |
 | --- | --- | --- |
-| GitHub CLI | [2.100.0](https://github.com/cli/cli/releases/tag/v2.100.0) | Official archive and repository-pinned SHA-256 |
+| GitHub CLI | [2.102.0](https://github.com/cli/cli/releases/tag/v2.102.0) | Official archive and repository-pinned SHA-256 |
 | Cosign | [3.0.2](https://github.com/sigstore/cosign/releases/tag/v3.0.2) | Official binary and repository-pinned SHA-256 |
 | Grype | [0.99.1](https://github.com/anchore/grype/releases/tag/v0.99.1) | Official archive and repository-pinned SHA-256; scan action selects the same version |
 | Docker Buildx | [0.37.0](https://github.com/docker/buildx/releases/tag/v0.37.0) | Explicit version on every pinned setup action |
@@ -53,14 +53,19 @@ future release is safe. Updates require a reviewed change to the installer,
 workflow, preflight, and this table, followed by capability and regression tests.
 Do not accept arbitrary newer versions or downgrade around a failed check.
 GitHub CLI versions before 2.93.0 are unsuitable for this procedure because of
-the [verification-command credential fix](https://github.com/cli/cli/releases/tag/v2.93.0).
-The preflight accepts exactly 2.100.0, including its release-verification and
-attestation commands and the required `isImmutable` JSON field.
+the [verification-command credential fix](https://github.com/cli/cli/releases/tag/v2.93.0),
+and versions before 2.102.0 weaken the policy this workflow relies on:
+`gh attestation verify --signer-workflow` only prefix-matched the certificate
+identity (GHSA-wjmr-j3rp-mh2g), `--source-ref` compared case-insensitively
+(GHSA-4mq3-hpgx-9cx8), and `gh release download` followed symlinks
+(GHSA-39wj-f2f4-978v). The preflight accepts exactly 2.102.0, including its
+release-verification and attestation commands and the required `isImmutable`
+JSON field.
 
 Install the compatible GitHub CLI without changing the system installation:
 
 ```bash
-release_tools="${HOME}/.local/share/layerleak/release-tools/2026-09-09"
+release_tools="${HOME}/.local/share/layerleak/release-tools/2026-09-30"
 scripts/release-tools.sh "${release_tools}" gh
 export PATH="${release_tools}/bin:${PATH}"
 python3 scripts/release-preflight.py tools
@@ -364,6 +369,15 @@ sha256sum --check SHA256SUMS
   version and digest; any artifact change requires a new RC or patch version.
 - Never delete or move a version tag to hide a failed release. Go proxies and
   downstream caches may retain it indefinitely.
+- A draft release left behind by an interrupted `gh release create` blocks
+  every retry because validation requires a published immutable release or
+  none at all. Delete the draft (drafts carry no tag and no immutability) and
+  rerun the workflow.
+- If an RC image was pushed but its attestations were not, the recovery path
+  needs the source-bound attestations to exist. Rerun the same workflow run:
+  the recovery step verifies them from the registry and fails explicitly when
+  they are missing, in which case publish the next RC instead of patching the
+  existing image.
 - Run-scoped `candidate-*` image tags may be cleaned up later according to a
   documented package-retention policy, but digest-referenced release evidence
   and all version tags must remain.

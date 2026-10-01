@@ -14,7 +14,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-GH_VERSION = '2.100.0'
+GH_VERSION = '2.102.0'
 SOURCE_FINGERPRINT = '2B6DF408BD973740052925DC894C75E1B1D05EA2'
 # The released Go major. go.mod must declare the matching /vN module path.
 RELEASE_MAJOR = 3

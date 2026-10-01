@@ -22,7 +22,7 @@ class ReleasePreflightTests(unittest.TestCase):
 
     def command(self, args, **kwargs):
         output = {
-            ('gh', '--version'): 'gh version 2.100.0 (2026-09-03)\n',
+            ('gh', '--version'): 'gh version 2.102.0 (2026-09-30)\n',
             ('gh', 'release', 'verify', '--help'): '--repo\n',
             ('gh', 'release', 'verify-asset', '--help'): '--repo\n',
             ('gh', 'attestation', 'verify', '--help'): (
@@ -80,10 +80,10 @@ class ReleasePreflightTests(unittest.TestCase):
             self.module.check_tools(False)
 
     def test_old_or_unreviewed_gh_is_rejected(self):
-        for version in ('2.46.0', '2.93.0', '2.101.0'):
+        for version in ('2.46.0', '2.93.0', '2.100.0', '2.101.0'):
             result = subprocess.CompletedProcess([], 0, f'gh version {version}\n', '')
             with (self.subTest(version=version), patch.object(self.module, 'run', return_value=result),
-                  self.assertRaisesRegex(ValueError, '2.100.0')):
+                  self.assertRaisesRegex(ValueError, '2.102.0')):
                 self.module.check_tools(False)
 
     def test_missing_required_field_is_rejected(self):

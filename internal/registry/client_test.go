@@ -37,7 +37,7 @@ func TestURLValidationErrorsDoNotEchoUntrustedValues(t *testing.T) {
 	if _, err := parseEndpointURL(malformed, false); err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("parseEndpointURL() error = %v", err)
 	}
-	if _, _, err := nextLinkURL("https://registry.test/v2/tags/list", malformed); err == nil || strings.Contains(err.Error(), marker) {
+	if _, _, err := nextLinkURL("https://registry.test/v2/tags/list", []string{malformed}); err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("nextLinkURL() error = %v", err)
 	}
 	if _, err := appendURLQuery(malformed, map[string]string{"scope": "repository:app:pull"}); err == nil || strings.Contains(err.Error(), marker) {

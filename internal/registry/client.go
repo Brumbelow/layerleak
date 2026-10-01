@@ -294,7 +294,7 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 			Name string   `json:"name"`
 			Tags []string `json:"tags"`
 		}
-		linkHeader := response.Header.Get("Link")
+		linkHeaders := response.Header.Values("Link")
 		body, readErr := readTagResponseBody(response.Body, c.maxTagResponseBytes, repository)
 		_ = response.Body.Close()
 		cancel()
@@ -326,9 +326,10 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 			tags = append(tags, tag)
 		}
 
-		nextURL, ok, err := c.nextLinkURL(ctx, targetURL, linkHeader)
+		nextURL, ok, err := c.nextLinkURL(ctx, targetURL, linkHeaders)
 		if err != nil {
-			return nil, err
+			sort.Strings(tags)
+			return tags, fmt.Errorf("registry tag pagination cannot continue: %w", err)
 		}
 		if !ok {
 			break
@@ -756,40 +757,8 @@ func readTagResponseBody(reader io.Reader, maxBytes int64, repository string) ([
 	return body, nil
 }
 
-func nextLinkURL(currentURL, header string) (string, bool, error) {
-	value := strings.TrimSpace(header)
-	if value == "" {
-		return "", false, nil
-	}
-
-	parts := strings.Split(value, ";")
-	if len(parts) == 0 {
-		return "", false, fmt.Errorf("parse link header: missing link target")
-	}
-	if len(parts) > 1 && !strings.EqualFold(strings.TrimSpace(parts[1]), `rel="next"`) {
-		return "", false, nil
-	}
-
-	target := strings.TrimSpace(parts[0])
-	target = strings.TrimPrefix(target, "<")
-	target = strings.TrimSuffix(target, ">")
-	if target == "" {
-		return "", false, fmt.Errorf("parse link header: missing url")
-	}
-
-	parsedCurrent, err := url.Parse(currentURL)
-	if err != nil {
-		return "", false, fmt.Errorf("current pagination url is invalid")
-	}
-	parsedTarget, err := url.Parse(target)
-	if err != nil {
-		return "", false, fmt.Errorf("pagination link url is invalid")
-	}
-	return parsedCurrent.ResolveReference(parsedTarget).String(), true, nil
-}
-
-func (c *Client) nextLinkURL(ctx context.Context, currentURL, header string) (string, bool, error) {
-	nextURL, ok, err := nextLinkURL(currentURL, header)
+func (c *Client) nextLinkURL(ctx context.Context, currentURL string, headers []string) (string, bool, error) {
+	nextURL, ok, err := nextLinkURL(currentURL, headers)
 	if err != nil || !ok {
 		return nextURL, ok, err
 	}

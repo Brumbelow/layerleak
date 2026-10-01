@@ -197,12 +197,17 @@ type PostgresConfig struct {
 	RequireSchema     bool
 }
 
+// DefaultWriteTimeout bounds one SaveScan transaction when PostgresConfig
+// leaves WriteTimeout unset. Callers that persist a finished scan under a
+// context detached from the request (scanservice) use it as their fallback so
+// the write phase is never unbounded.
+const DefaultWriteTimeout = 2 * time.Minute
+
 const (
 	defaultMaxOpenConns    = 10
 	defaultConnMaxLifetime = 30 * time.Minute
 	defaultConnMaxIdleTime = 5 * time.Minute
 	defaultQueryTimeout    = 10 * time.Second
-	defaultWriteTimeout    = 2 * time.Minute
 )
 
 func NewNoopStore() NoopStore {
@@ -281,7 +286,7 @@ func (c PostgresConfig) withDefaults() PostgresConfig {
 		c.QueryTimeout = defaultQueryTimeout
 	}
 	if c.WriteTimeout == 0 {
-		c.WriteTimeout = defaultWriteTimeout
+		c.WriteTimeout = DefaultWriteTimeout
 	}
 	return c
 }

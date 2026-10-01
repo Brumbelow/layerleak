@@ -192,4 +192,35 @@ gh release verify "${version}" --repo Brumbelow/layerleak
 sha256sum --check SHA256SUMS
 ```
 
+Prebuilt CLI archives (`layerleak_<version>_<os>_<arch>.tar.gz` and
+`layerleak_<version>_windows_amd64.zip`) are covered by a `sha256sum` list that
+is keyless-signed with Cosign, and by a SLSA v1 build-provenance attestation
+whose subjects are the five archives. Verify an archive before running it:
+
+```bash
+version=v3.0.0
+checksums="layerleak_${version}_checksums.txt"
+gh release download "${version}" --repo Brumbelow/layerleak \
+  --pattern "layerleak_${version}_*" --pattern release-manifest.json
+sha256sum --check --ignore-missing "${checksums}"
+
+cosign verify-blob \
+  --bundle "${checksums}.sigstore.json" \
+  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${checksums}"
+
+gh attestation verify "layerleak_${version}_linux_amd64.tar.gz" \
+  --repo Brumbelow/layerleak \
+  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
+  --source-ref refs/heads/main \
+  --source-digest "$(jq -r .workflow_sha release-manifest.json)" \
+  --deny-self-hosted-runners
+```
+
+`--source-digest` takes the manifest's `workflow_sha` (the commit the release
+workflow ran at), not `source_sha`: the two differ when a stable release is
+promoted from an accepted release candidate. The composite GitHub Action
+performs the same three checks before it runs a downloaded binary.
+
 See [RELEASING.md](./RELEASING.md) for the complete release trust model.

@@ -150,5 +150,22 @@ class DocumentationValidationTests(unittest.TestCase):
                 self.assert_invalid(f"{field} must be null")
 
 
+    def test_rejects_web_variable_without_readme_row(self):
+        index = self.root / "web" / "docs" / "index.html"
+        index.write_text(
+            index.read_text().replace(
+                "<code>LAYERLEAK_LOG_LEVEL</code>", "<code>LAYERLEAK_NOT_A_REAL_SETTING</code>", 1
+            )
+        )
+
+        self.assert_invalid("LAYERLEAK_NOT_A_REAL_SETTING")
+
+    def test_rejects_damaged_readme_variable_tables(self):
+        readme = self.root / "README.md"
+        readme.write_text(readme.read_text().replace("| `LAYERLEAK_", "| LAYERLEAK_"))
+
+        self.assert_invalid("tables look damaged")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,7 +71,7 @@
     setTabsEnabled(false);
     renderStatsPlaceholder("Replaying simulated scan");
     tableMetaEl.textContent = "Replay in progress";
-    tableWrapEl.innerHTML = '<div class="table-empty">The fake local Postgres snapshot will appear after the replay completes.</div>';
+    tableWrapEl.innerHTML = '<div class="table-empty">The Postgres-style rows derived from this scan appear after the replay completes.</div>';
     renderStatus("booting replay");
 
     stepFrame(0);
@@ -122,17 +122,17 @@
     replayButton.disabled = true;
     terminalEl.textContent =
       "$ " +
-      (state.data ? state.data.command : "layerleak scan vulnerableHost:latest --platform linux/amd64") +
-      "\n\n# Click \"Try it out\" to replay a static layerleak run.\n# The transcript and the database rows below are simulated.";
+      (state.data ? state.data.command : "layerleak scan oci:payments-api:1.4.2 --progress plain --no-db") +
+      "\n\n# Click \"Try it out\" to replay a recorded layerleak run.\n# The image and its secrets are synthetic; nothing is scanned in your browser.";
     renderStatus("waiting to replay");
     renderStatsPlaceholder("Awaiting replay");
     tableMetaEl.textContent = "Run the replay to load rows";
-    tableWrapEl.innerHTML = '<div class="table-empty">Run the simulated scan to load the fake Postgres snapshot.</div>';
+    tableWrapEl.innerHTML = '<div class="table-empty">Run the replay to load the Postgres-style rows.</div>';
   }
 
   function renderStatsPlaceholder(text) {
     statsEl.innerHTML = "";
-    const labels = ["Status", "Coverage", "Actionable findings", "Saved artifacts"];
+    const labels = ["Status", "Coverage", "Actionable findings", "Diagnostics", "Scan record"];
     labels.forEach((label) => {
       const card = document.createElement("article");
       card.className = "stat-card";

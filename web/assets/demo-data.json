@@ -1,85 +1,124 @@
 {
-  "version": 1,
+  "version": 2,
   "synthetic": true,
-  "command": "layerleak scan vulnerableHost:latest --platform linux/amd64",
+  "generator": "go test ./internal/cli -run TestDemoFixtureMatchesRealScan -update-demo",
+  "command": "layerleak scan oci:payments-api:1.4.2 --progress plain --no-db",
   "run_result": {
     "status": "completed",
-    "requested_reference": "vulnerableHost:latest",
-    "repository": "library/vulnerableHost",
-    "resolved_reference": "docker.io/library/vulnerableHost@sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-    "requested_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-    "platform": "linux/amd64",
-    "total_findings": 6,
-    "unique_fingerprints": 6,
-    "suppressed_example_findings": 1,
+    "exit_code": 2,
+    "requested_reference": "oci:payments-api:1.4.2",
+    "repository": "oci:payments-api",
+    "resolved_reference": "oci:payments-api@sha256:e434a2fee88295a309cc43a7b55caa078ac19e17837114ecbd2871f7328b8508",
+    "requested_digest": "sha256:e434a2fee88295a309cc43a7b55caa078ac19e17837114ecbd2871f7328b8508",
+    "scanned_at": "2026-10-01T12:00:00Z",
+    "scanner": {
+      "name": "layerleak",
+      "version": "v3.0.0"
+    },
+    "total_findings": 8,
+    "unique_fingerprints": 8,
+    "suppressed_findings_count": 1,
     "coverage": {
       "complete": true,
-      "manifests_selected": 1,
-      "manifests_completed": 1,
-      "manifests_failed": 0,
-      "files_scanned": 14,
-      "files_skipped_oversize": 0
+      "layers_seen": 2,
+      "layers_completed": 2,
+      "files_seen": 5,
+      "files_scanned": 4,
+      "files_skipped_oversize": 0,
+      "files_excluded_binary": 2,
+      "entries_skipped_unsafe": 0,
+      "metadata_values_scanned": 8,
+      "expanded_layer_bytes": 7680,
+      "retained_bytes": 5886,
+      "detector_input_bytes_scanned": 793,
+      "files_transcoded_utf16": 0,
+      "nested_archives_expanded": 1,
+      "nested_entries_scanned": 1
     },
+    "diagnostics": [
+      {
+        "code": "platform_skipped",
+        "scope": "platform",
+        "subject": "sha256:eb71afd841866b3479f27ad9c5e5e1cc9f4bafd5d493a52c69bbd9ce9562c7ed",
+        "message": "skipped platform windows/amd64: only linux manifests are selected without a platform selector"
+      },
+      {
+        "code": "manifest_skipped",
+        "scope": "platform",
+        "subject": "sha256:f88baebaeadccc307e4e6f10aba030e35d74dcb6cddef8b360626ecf0350aaee",
+        "message": "skipped attestation manifest"
+      }
+    ],
+    "record_schema_version": 2,
+    "result_schema_version": 2,
+    "persistence": "disabled",
     "raw_storage_enabled": false,
     "artifacts": {
-      "findings": "findings/20260328T182355Z-vulnerableHost-demo.json",
-      "scan_record": "findings/scans/20260328T182355Z-vulnerableHost-demo.json"
-    },
-    "runtime": "6.4s"
+      "scan_record": "findings/20261001T120001Z-oci-payments-api-1-4-2-DEMODEMODEMODEMODEMODEMODE.json"
+    }
   },
   "stats": [
     {
       "label": "Status",
-      "value": "completed"
+      "value": "completed (exit 2)"
     },
     {
       "label": "Coverage",
-      "value": "complete"
+      "value": "complete, 4 files scanned"
     },
     {
       "label": "Actionable findings",
-      "value": "6"
+      "value": "8 (+1 suppressed)"
     },
     {
-      "label": "Saved artifacts",
-      "value": "findings + scan record"
+      "label": "Diagnostics",
+      "value": "platform_skipped, manifest_skipped"
+    },
+    {
+      "label": "Scan record",
+      "value": "findings/20261001T120001Z-oci-payments-api-1-4-2-DEMODEMODEMODEMODEMODEMODE.json"
     }
   ],
   "frames": [
     {
-      "delay_ms": 750,
-      "status": "starting scan",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       waiting for tag enumeration\nTargets:    waiting for target selection\nPhase:      Starting\nStatus:     Preparing scan\nProgress:   [--------------------------------] 0/1\nFindings:   0 detected\nCurrent:    waiting"
+      "delay_ms": 500,
+      "status": "preparing scan",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan"
     },
     {
-      "delay_ms": 900,
-      "status": "listing repository tags",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       0/1 complete\nTargets:    waiting for target selection\nPhase:      Listing Tags\nStatus:     Listing repository tags\nProgress:   [--------------------------------] 0/1\nFindings:   0 detected\nCurrent:    waiting"
+      "delay_ms": 500,
+      "status": "resolving image reference",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]"
     },
     {
-      "delay_ms": 950,
-      "status": "resolving latest to a digest",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    0/1 complete\nPhase:      Resolving Tags\nStatus:     Resolving tag digest\nProgress:   [############--------------------] 0/1\nFindings:   0 detected\nCurrent:    latest"
+      "delay_ms": 500,
+      "status": "selected manifests",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Selected manifests (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]"
     },
     {
-      "delay_ms": 1100,
-      "status": "scanning linux/amd64 manifest",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    0/1 complete\nPhase:      Scanning\nStatus:     Scanning linux/amd64 manifest [sha256:8dbedc1c4a77...]\nProgress:   [####################------------] 0/1\nFindings:   2 detected\nCurrent:    latest linux/amd64 [sha256:8dbedc1c4a77...]"
+      "delay_ms": 500,
+      "status": "scanning linux/amd64",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Selected manifests (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Scanning linux/amd64 (0/1, 0 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]"
     },
     {
-      "delay_ms": 1000,
-      "status": "finishing manifest analysis",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    1/1 complete\nPhase:      Target Complete\nStatus:     Scan complete\nProgress:   [################################] 1/1\nFindings:   6 detected\nCurrent:    latest linux/amd64 [sha256:8dbedc1c4a77...]"
+      "delay_ms": 500,
+      "status": "completed linux/amd64",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Selected manifests (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Scanning linux/amd64 (0/1, 0 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Scanning: Completed linux/amd64 (0/1, 8 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]"
     },
     {
-      "delay_ms": 950,
-      "status": "writing redacted findings and scan record",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\n://LAYERLEAK\n\nRepository: library/vulnerableHost\nTags:       1/1 complete\nTargets:    1/1 complete\nPhase:      Saving Results\nStatus:     Writing findings file\nProgress:   [################################] 1/1\nFindings:   6 detected\nCurrent:    latest linux/amd64 [sha256:8dbedc1c4a77...]"
+      "delay_ms": 500,
+      "status": "scan complete",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Selected manifests (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Scanning linux/amd64 (0/1, 0 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Scanning: Completed linux/amd64 (0/1, 8 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Complete: Scan complete (1/1, 8 findings)"
+    },
+    {
+      "delay_ms": 500,
+      "status": "writing scan record",
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Selected manifests (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Scanning linux/amd64 (0/1, 0 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Scanning: Completed linux/amd64 (0/1, 8 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Complete: Scan complete (1/1, 8 findings)\nlayerleak: Saving Results: Writing scan record (1/1, 8 findings)"
     },
     {
       "delay_ms": 1200,
       "status": "showing final summary",
-      "terminal": "$ layerleak scan vulnerableHost:latest --platform linux/amd64\n\nFindings: findings/20260328T182355Z-vulnerableHost-demo.json\nScan record: findings/scans/20260328T182355Z-vulnerableHost-demo.json\n\nRequested Reference:           vulnerableHost:latest\nRepository:                    library/vulnerableHost\nStatus:                        completed\nResolved Reference:            docker.io/library/vulnerableHost@sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf\nRequested Digest:              sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf\nTargets Selected:              1\nTargets Completed:             1\nTargets Partial:               0\nTargets Failed:                0\nManifests Selected:            1\nManifests Completed:           1\nManifests Failed:              0\nCoverage Complete:             true\nFiles Scanned:                 14\nFiles Skipped Oversize:        0\nTotal Findings:                6\nUnique Fingerprints:           6\nSuppressed Example Findings:   1\n\nPlatform             Manifest Digest                                                     Findings  Status\nlinux/amd64          sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401...  6         ok"
+      "terminal": "$ layerleak scan oci:payments-api:1.4.2 --progress plain --no-db\nlayerleak: Starting: Preparing scan\nlayerleak: Scanning: Resolving image reference (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Selected manifests (0/1, 0 findings) [1.4.2 oci:payments-api:1.4.2]\nlayerleak: Scanning: Scanning linux/amd64 (0/1, 0 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Scanning: Completed linux/amd64 (0/1, 8 findings) [1.4.2 linux/amd64 [sha256:c8d05b1f6a7ac...]]\nlayerleak: Complete: Scan complete (1/1, 8 findings)\nlayerleak: Saving Results: Writing scan record (1/1, 8 findings)\nScan record: \"/work/findings/20261001T120001Z-oci-payments-api-1-4-2-DEMODEMODEMODEMODEMODEMODE.json\"\n\nRequested Reference:          oci:payments-api:1.4.2\nRepository:                   oci:payments-api\nStatus:                       completed\nResolved Reference:           oci:payments-api@sha256:e434a2fee88295a309cc43a7b55caa078ac19e17837114ecbd2871f7328b8508\nRequested Digest:             sha256:e434a2fee88295a309cc43a7b55caa078ac19e17837114ecbd2871f7328b8508\nTargets Selected:             1\nTargets Completed:            1\nTargets Partial:              0\nTargets Failed:               0\nManifests Selected:           1\nManifests Completed:          1\nManifests Failed:             0\nCoverage Complete:            true\nFiles Scanned:                4\nFiles Skipped Oversize:       0\nTotal Findings:               8\nUnique Fingerprints:          8\nSuppressed Example Findings:  1\nBaselined Findings:           0\n\nPlatform     Manifest Digest                                                          Findings  Status\nlinux/amd64  sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229  8         ok\n\nDetector                                  Confidence  Location                                                            Redacted Value  Platform\ngithub_token                              high        env:config.env.GH_TOKEN                                             ghp********     linux/amd64\nstripe_api_key                            high        srv/app/.env.production:2                                           sk_********     linux/amd64\nconnection_url_credentials                high        opt/app/lib/payments.jar!BOOT-INF/classes/application.properties:1  pos********     linux/amd64\naws_shared_credentials_access_key_id      high        root/.aws/credentials:2                                             AKI********     linux/amd64\naws_shared_credentials_secret_access_key  high        root/.aws/credentials:3                                             CVW********     linux/amd64\nsensitive_file_private_key                medium      root/.ssh/id_ed25519                                                                linux/amd64\nbasic_auth_url                            high        history:history[1].created_by                                       htt********     linux/amd64\nslack_webhook                             high        label:config.label.com.acme.alerts.webhook                          htt********     linux/amd64"
     }
   ],
   "table_order": [
@@ -90,160 +129,8 @@
     "finding_occurrences"
   ],
   "tables": {
-    "repositories": {
-      "description": "Repository row touched by the replayed scan",
-      "columns": [
-        "id",
-        "registry",
-        "repository",
-        "first_seen_at",
-        "last_seen_at"
-      ],
-      "rows": [
-        {
-          "id": 41,
-          "registry": "docker.io",
-          "repository": "library/vulnerableHost",
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        }
-      ]
-    },
-    "tags": {
-      "description": "Tag mapping written for the latest linux/amd64 run",
-      "columns": [
-        "repository_id",
-        "tag",
-        "manifest_digest",
-        "root_digest",
-        "platform_os",
-        "platform_architecture",
-        "platform_variant",
-        "status",
-        "error",
-        "first_seen_at",
-        "last_seen_at"
-      ],
-      "rows": [
-        {
-          "repository_id": 41,
-          "tag": "latest",
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "root_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "platform_os": "linux",
-          "platform_architecture": "amd64",
-          "platform_variant": "",
-          "status": "scanned",
-          "error": "",
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        }
-      ]
-    },
-    "manifests": {
-      "description": "Manifest row and last scan status for the replayed target",
-      "columns": [
-        "digest",
-        "platform_os",
-        "platform_architecture",
-        "platform_variant",
-        "first_seen_at",
-        "last_seen_at",
-        "last_scan_status",
-        "last_scan_error"
-      ],
-      "rows": [
-        {
-          "digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "platform_os": "linux",
-          "platform_architecture": "amd64",
-          "platform_variant": "",
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z",
-          "last_scan_status": "scanned",
-          "last_scan_error": ""
-        }
-      ]
-    },
-    "findings": {
-      "description": "Fake findings rows as they would look in a local Postgres-backed run",
-      "columns": [
-        "id",
-        "manifest_digest",
-        "fingerprint",
-        "redacted_value",
-        "value",
-        "first_seen_at",
-        "last_seen_at"
-      ],
-      "rows": [
-        {
-          "id": 201,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
-          "redacted_value": "ghp********************************9K",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 202,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
-          "redacted_value": "AKI***************78",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 203,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
-          "redacted_value": "SG.*******************************ure",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 204,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d",
-          "redacted_value": "htt*******************************************************************it",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 205,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
-          "redacted_value": "htt************************************************************************321",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 206,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
-          "redacted_value": "AIza*****************************mn",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 207,
-          "manifest_digest": "sha256:8dbedc1c4a77453b71b590cc6cf3f9c06bb7b78f1c28525b6b2401766400e3cf",
-          "fingerprint": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
-          "redacted_value": "npm********************************56",
-          "value": null,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        }
-      ]
-    },
     "finding_occurrences": {
-      "description": "Occurrence-level provenance, including one suppressed example row",
+      "description": "finding_occurrences: where each value was seen, including the suppressed test fixture",
       "columns": [
         "id",
         "finding_id",
@@ -270,172 +157,390 @@
       ],
       "rows": [
         {
-          "id": 301,
-          "finding_id": 201,
+          "confidence": "high",
+          "context_snippet": "GH_TOKEN=[REDACTED]",
           "detector_name": "github_token",
-          "confidence": "high",
           "disposition": "actionable",
           "disposition_reason": "",
-          "source_type": "env",
-          "platform_os": "linux",
-          "platform_architecture": "amd64",
-          "platform_variant": "",
           "file_path": "",
+          "finding_id": 1,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 1,
+          "last_seen_at": "2026-10-01T12:00:00Z",
           "layer_digest": "",
-          "source_key": "GH_TOKEN",
           "line_number": 1,
-          "context_snippet": "GH_TOKEN=ghp********************************9K",
-          "raw_snippet": null,
-          "source_location": "env:GH_TOKEN",
+          "match_end": 49,
           "match_start": 9,
-          "match_end": 56,
-          "present_in_final_image": true,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 302,
-          "finding_id": 202,
-          "detector_name": "aws_access_key_id",
-          "confidence": "high",
-          "disposition": "actionable",
-          "disposition_reason": "",
-          "source_type": "file_final",
-          "platform_os": "linux",
           "platform_architecture": "amd64",
-          "platform_variant": "",
-          "file_path": "/root/.aws/credentials",
-          "layer_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-          "source_key": "aws_access_key_id",
-          "line_number": 3,
-          "context_snippet": "aws_access_key_id = AKI***************78",
-          "raw_snippet": null,
-          "source_location": "file:/root/.aws/credentials",
-          "match_start": 22,
-          "match_end": 42,
-          "present_in_final_image": true,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 303,
-          "finding_id": 203,
-          "detector_name": "sendgrid_api_key",
-          "confidence": "high",
-          "disposition": "actionable",
-          "disposition_reason": "",
-          "source_type": "file_deleted_layer",
           "platform_os": "linux",
-          "platform_architecture": "amd64",
           "platform_variant": "",
-          "file_path": "/srv/app/.env.bak",
-          "layer_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-          "source_key": "",
-          "line_number": 11,
-          "context_snippet": "SENDGRID_API_KEY=SG.*******************************ure",
-          "raw_snippet": null,
-          "source_location": "file:/srv/app/.env.bak",
-          "match_start": 18,
-          "match_end": 58,
           "present_in_final_image": false,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
+          "raw_snippet": "",
+          "source_key": "config.env.GH_TOKEN",
+          "source_location": "env:config.env.GH_TOKEN",
+          "source_type": "env"
         },
         {
-          "id": 304,
-          "finding_id": 204,
-          "detector_name": "basic_auth_url",
           "confidence": "high",
+          "context_snippet": "oduction\nSTRIPE_API_KEY=[REDACTED]",
+          "detector_name": "stripe_api_key",
           "disposition": "actionable",
           "disposition_reason": "",
-          "source_type": "history",
-          "platform_os": "linux",
+          "file_path": "srv/app/.env.production",
+          "finding_id": 2,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 2,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "sha256:0c7e112d3a4e65d0edc53a21234e2c16ed3460fe0b839d6301e344fa98a3c08a",
+          "line_number": 2,
+          "match_end": 67,
+          "match_start": 35,
           "platform_architecture": "amd64",
-          "platform_variant": "",
-          "file_path": "",
-          "layer_digest": "",
-          "source_key": "created_by",
-          "line_number": 1,
-          "context_snippet": "RUN git clone htt*******************************************************************it",
-          "raw_snippet": null,
-          "source_location": "history:created_by",
-          "match_start": 14,
-          "match_end": 84,
-          "present_in_final_image": true,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 305,
-          "finding_id": 205,
-          "detector_name": "slack_webhook",
-          "confidence": "high",
-          "disposition": "actionable",
-          "disposition_reason": "",
-          "source_type": "label",
           "platform_os": "linux",
-          "platform_architecture": "amd64",
           "platform_variant": "",
-          "file_path": "",
-          "layer_digest": "",
-          "source_key": "com.demo.slack-hook",
-          "line_number": 1,
-          "context_snippet": "com.demo.slack-hook=htt************************************************************************321",
-          "raw_snippet": null,
-          "source_location": "label:com.demo.slack-hook",
-          "match_start": 21,
-          "match_end": 105,
-          "present_in_final_image": true,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 306,
-          "finding_id": 206,
-          "detector_name": "google_api_key",
-          "confidence": "high",
-          "disposition": "actionable",
-          "disposition_reason": "",
-          "source_type": "config",
-          "platform_os": "linux",
-          "platform_architecture": "amd64",
-          "platform_variant": "",
-          "file_path": "",
-          "layer_digest": "",
-          "source_key": "WorkingDir",
-          "line_number": 1,
-          "context_snippet": "WorkingDir=/workspace?key=AIza*****************************mn",
-          "raw_snippet": null,
-          "source_location": "config:WorkingDir",
-          "match_start": 25,
-          "match_end": 63,
-          "present_in_final_image": true,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
-        },
-        {
-          "id": 307,
-          "finding_id": 207,
-          "detector_name": "npm_token",
-          "confidence": "high",
-          "disposition": "example",
-          "disposition_reason": "example_path",
-          "source_type": "file_final",
-          "platform_os": "linux",
-          "platform_architecture": "amd64",
-          "platform_variant": "",
-          "file_path": "/workspace/examples/demo.env",
-          "layer_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "present_in_final_image": false,
+          "raw_snippet": "",
           "source_key": "",
-          "line_number": 5,
-          "context_snippet": "NPM_TOKEN=npm********************************56",
-          "raw_snippet": null,
-          "source_location": "file:/workspace/examples/demo.env",
-          "match_start": 10,
-          "match_end": 50,
+          "source_location": "file_deleted_layer:srv/app/.env.production",
+          "source_type": "file_deleted_layer"
+        },
+        {
+          "confidence": "high",
+          "context_snippet": "spring.datasource.url=[REDACTED]/ledger",
+          "detector_name": "connection_url_credentials",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "file_path": "opt/app/lib/payments.jar!BOOT-INF/classes/application.properties",
+          "finding_id": 3,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 3,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "sha256:0c7e112d3a4e65d0edc53a21234e2c16ed3460fe0b839d6301e344fa98a3c08a",
+          "line_number": 1,
+          "match_end": 96,
+          "match_start": 22,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
           "present_in_final_image": true,
-          "first_seen_at": "2026-03-28T18:23:55Z",
-          "last_seen_at": "2026-03-28T18:23:55Z"
+          "raw_snippet": "",
+          "source_key": "",
+          "source_location": "file_final:opt/app/lib/payments.jar!BOOT-INF/classes/application.properties",
+          "source_type": "file_final"
+        },
+        {
+          "confidence": "high",
+          "context_snippet": "lt]\naws_access_key_id = [REDACTED]\naws_secret_access_key =",
+          "detector_name": "aws_shared_credentials_access_key_id",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "file_path": "root/.aws/credentials",
+          "finding_id": 4,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 4,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "sha256:5950c9ae9a77962c29a3c5831713a9b83262be469abc694834144585f023d277",
+          "line_number": 2,
+          "match_end": 50,
+          "match_start": 30,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "present_in_final_image": true,
+          "raw_snippet": "",
+          "source_key": "",
+          "source_location": "file_final:root/.aws/credentials",
+          "source_type": "file_final"
+        },
+        {
+          "confidence": "high",
+          "context_snippet": "aws_secret_access_key = [REDACTED]",
+          "detector_name": "aws_shared_credentials_secret_access_key",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "file_path": "root/.aws/credentials",
+          "finding_id": 5,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 5,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "sha256:5950c9ae9a77962c29a3c5831713a9b83262be469abc694834144585f023d277",
+          "line_number": 3,
+          "match_end": 115,
+          "match_start": 75,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "present_in_final_image": true,
+          "raw_snippet": "",
+          "source_key": "",
+          "source_location": "file_final:root/.aws/credentials",
+          "source_type": "file_final"
+        },
+        {
+          "confidence": "medium",
+          "context_snippet": "",
+          "detector_name": "sensitive_file_private_key",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "file_path": "root/.ssh/id_ed25519",
+          "finding_id": 6,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 6,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "sha256:5950c9ae9a77962c29a3c5831713a9b83262be469abc694834144585f023d277",
+          "line_number": 0,
+          "match_end": 0,
+          "match_start": 0,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "present_in_final_image": true,
+          "raw_snippet": "",
+          "source_key": "",
+          "source_location": "file_final:root/.ssh/id_ed25519",
+          "source_type": "file_final"
+        },
+        {
+          "confidence": "high",
+          "context_snippet": "NPM_TOKEN=[REDACTED]",
+          "detector_name": "npm_token",
+          "disposition": "example",
+          "disposition_reason": "test_path",
+          "file_path": "srv/app/tests/fixtures/.env",
+          "finding_id": 7,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 7,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "sha256:0c7e112d3a4e65d0edc53a21234e2c16ed3460fe0b839d6301e344fa98a3c08a",
+          "line_number": 1,
+          "match_end": 50,
+          "match_start": 10,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "present_in_final_image": true,
+          "raw_snippet": "",
+          "source_key": "",
+          "source_location": "file_final:srv/app/tests/fixtures/.env",
+          "source_type": "file_final"
+        },
+        {
+          "confidence": "high",
+          "context_snippet": "/bin/sh -c git clone [REDACTED]/platform/payments-api.g",
+          "detector_name": "basic_auth_url",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "file_path": "",
+          "finding_id": 8,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 8,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "",
+          "line_number": 1,
+          "match_end": 77,
+          "match_start": 21,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "present_in_final_image": false,
+          "raw_snippet": "",
+          "source_key": "history[1].created_by",
+          "source_location": "history:history[1].created_by",
+          "source_type": "history"
+        },
+        {
+          "confidence": "high",
+          "context_snippet": "com.acme.alerts.webhook=[REDACTED]",
+          "detector_name": "slack_webhook",
+          "disposition": "actionable",
+          "disposition_reason": "",
+          "file_path": "",
+          "finding_id": 9,
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 9,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "layer_digest": "",
+          "line_number": 1,
+          "match_end": 103,
+          "match_start": 24,
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "present_in_final_image": false,
+          "raw_snippet": "",
+          "source_key": "config.label.com.acme.alerts.webhook",
+          "source_location": "label:config.label.com.acme.alerts.webhook",
+          "source_type": "label"
+        }
+      ]
+    },
+    "findings": {
+      "description": "findings: one row per manifest and fingerprint; value stays empty without LAYERLEAK_PERSIST_RAW_SECRETS",
+      "columns": [
+        "id",
+        "manifest_digest",
+        "fingerprint",
+        "redacted_value",
+        "value",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "fingerprint": "93f2baee569e98235f0cb277e05d115d3a853a5ac37ac3aebfd77342df57a41f",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 1,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "ghp********",
+          "value": ""
+        },
+        {
+          "fingerprint": "9e8933cebb4370f5bf11567f8cd24ec55d9ee3f81265ad0cdbecaea087167ca5",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 2,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "sk_********",
+          "value": ""
+        },
+        {
+          "fingerprint": "01f50caad1c8802857cbc66328d549955debfaa32861e25386be2df4a960b1ef",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 3,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "pos********",
+          "value": ""
+        },
+        {
+          "fingerprint": "8c925ac3030bac1d6e56cfe2481015428ac9a3e3386c31d65be8c67f53620c08",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 4,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "AKI********",
+          "value": ""
+        },
+        {
+          "fingerprint": "264879e1627f07526c79bcfdff56915939017096c9bf0870594a7aac1dbe0034",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 5,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "CVW********",
+          "value": ""
+        },
+        {
+          "fingerprint": "927afcc18da284ae2565b7f70ad310c918fd07c6cae472f6336a622e6972525e",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 6,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "",
+          "value": ""
+        },
+        {
+          "fingerprint": "ae1419d8186f21056db775300091cdc0a67e0a4ed04baf04c1d51ffc67e9bb46",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 7,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "npm********",
+          "value": ""
+        },
+        {
+          "fingerprint": "90ab85d0e3bf2ecf136afb049f4e469ceacab179b029f7b67861be529fcbe2f2",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 8,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "htt********",
+          "value": ""
+        },
+        {
+          "fingerprint": "01a595e2807857597122555b1f6c18e53f4294e78661e6411c67755938c02599",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 9,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "redacted_value": "htt********",
+          "value": ""
+        }
+      ]
+    },
+    "manifests": {
+      "description": "manifests: each scanned platform manifest and its last scan status",
+      "columns": [
+        "digest",
+        "platform_os",
+        "platform_architecture",
+        "platform_variant",
+        "first_seen_at",
+        "last_seen_at",
+        "last_scan_status",
+        "last_scan_error"
+      ],
+      "rows": [
+        {
+          "digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "last_scan_error": "",
+          "last_scan_status": "scanned",
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": ""
+        }
+      ]
+    },
+    "repositories": {
+      "description": "repositories: one row per registry and repository; a local source is stored under the registry local",
+      "columns": [
+        "id",
+        "registry",
+        "repository",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "id": 1,
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "registry": "local",
+          "repository": "oci:payments-api"
+        }
+      ]
+    },
+    "tags": {
+      "description": "tags: the tag mapped to the manifest the scan selected",
+      "columns": [
+        "repository_id",
+        "tag",
+        "manifest_digest",
+        "root_digest",
+        "platform_os",
+        "platform_architecture",
+        "platform_variant",
+        "status",
+        "error",
+        "first_seen_at",
+        "last_seen_at"
+      ],
+      "rows": [
+        {
+          "error": "",
+          "first_seen_at": "2026-10-01T12:00:00Z",
+          "last_seen_at": "2026-10-01T12:00:00Z",
+          "manifest_digest": "sha256:c8d05b1f6a7ac16e72dae93a5e1723739c90d766fcc94dad04a75cca0fc76229",
+          "platform_architecture": "amd64",
+          "platform_os": "linux",
+          "platform_variant": "",
+          "repository_id": 1,
+          "root_digest": "sha256:e434a2fee88295a309cc43a7b55caa078ac19e17837114ecbd2871f7328b8508",
+          "status": "scanned",
+          "tag": "1.4.2"
         }
       ]
     }

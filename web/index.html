@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>layerleak</title>
     <meta
       name="description"
@@ -16,7 +17,7 @@
     <style>
       body {
         margin: 0;
-        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
         background: #f4efe5;
         color: #1a1713;
       }
@@ -44,6 +45,23 @@
       a {
         color: #8f2d12;
       }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #11161c;
+          color: #e8edf2;
+        }
+
+        article {
+          border-color: rgba(232, 237, 242, 0.16);
+          background: #1a2129;
+          box-shadow: none;
+        }
+
+        a {
+          color: #e8825f;
+        }
+      }
     </style>
   </head>
   <body>
@@ -55,8 +73,10 @@
           <a href="https://github.com/brumbelow/layerleak">github.com/brumbelow/layerleak</a>.
         </p>
         <p>
-          Documentation lives at <a href="./docs/">brumbelow.github.io/layerleak/docs</a> and the
-          simulated browser demo lives under that docs site.
+          Documentation for the 3.0.0 line lives at
+          <a href="./docs/">brumbelow.github.io/layerleak/docs</a>, with the
+          <a href="./docs/demo/">browser replay of a real scan</a> and the
+          <a href="./docs/openapi.yaml">OpenAPI specification</a> beside it.
         </p>
       </article>
     </main>

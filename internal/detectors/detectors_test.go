@@ -902,7 +902,8 @@ func TestDefaultSetContainsOnlyNativeRules(t *testing.T) {
 		switch detector.(type) {
 		case regexDetector, pathRegexDetector, keyValueDetector, contextEntropyDetector,
 			contextualTokenDetector, awsSharedCredentialsDetector, gitCredentialsDetector,
-			credentialedURLDetector, discordBotTokenDetector, telegramBotTokenDetector, pemPrivateKeyDetector, pgpassDetector:
+			credentialedURLDetector, discordBotTokenDetector, telegramBotTokenDetector, pemPrivateKeyDetector, pgpassDetector,
+			sensitiveFileDetector:
 		default:
 			t.Fatalf("non-native detector type %T registered in Default()", detector)
 		}

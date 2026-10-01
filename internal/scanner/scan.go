@@ -864,22 +864,93 @@ func scanArtifactsWithBudget(budget *detectionBudget, detectorSet detectors.Set,
 		if budget != nil && (budget.stopped() || budget.err != nil || (budget.ctx != nil && budget.ctx.Err() != nil)) {
 			break
 		}
-		if !artifact.Scannable || len(artifact.Content) == 0 {
+		if artifact.Type != "" && artifact.Type != layers.ArtifactTypeRegularFile && artifact.Type != layers.ArtifactTypeHardlink {
 			continue
 		}
-		content := string(artifact.Content)
-		result = append(result, budget.scan(detectorSet, findings.Input{
+		input := findings.Input{
 			ManifestDigest:      manifestDigest,
 			Platform:            platform,
 			SourceType:          sourceType,
 			FilePath:            artifact.Path,
 			LayerDigest:         artifact.LayerDigest,
-			Content:             content,
 			PresentInFinalImage: presentInFinalImage,
-		}, detectors.ScanInput{
-			Content: content,
-			Path:    artifact.Path,
-		})...)
+		}
+		if artifact.Scannable {
+			if len(artifact.Content) == 0 {
+				// An empty text file holds nothing, whatever its name.
+				continue
+			}
+			input.Content = string(artifact.Content)
+			result = append(result, budget.scan(detectorSet, input, detectors.ScanInput{
+				Content: input.Content,
+				Path:    artifact.Path,
+			})...)
+			continue
+		}
+		// Binary or oversize content the detectors never see: report the
+		// artifact by its path when the name alone says it is sensitive
+		// (LAY-12). A readable file is judged by its content only.
+		result = append(result, budget.scanPath(detectorSet, input)...)
+	}
+	return result
+}
+
+// scanPath reports a path-only finding for an artifact whose content could
+// not be scanned (binary or oversize). The detector match covers the path, so
+// the normalizer runs with the path as its content (which redacts any secret
+// inside the path and classifies test and example locations as usual); the
+// value-derived fields are then dropped, because there is no secret value:
+// the redacted value and context snippet are empty and the fingerprint is
+// that of the layer digest and path rather than of a value.
+func (b *detectionBudget) scanPath(detectorSet detectors.Set, input findings.Input) []findings.DetailedFinding {
+	if b != nil {
+		if b.stopped() || b.err != nil {
+			return nil
+		}
+		if b.exhausted() {
+			b.markExceeded(input.ManifestDigest)
+			return nil
+		}
+		if b.ctx != nil {
+			if err := b.ctx.Err(); err != nil {
+				b.err = err
+				return nil
+			}
+		}
+	}
+	matches := detectorSet.ScanPath(input.FilePath)
+	if len(matches) == 0 {
+		return nil
+	}
+	input.Content = input.FilePath
+	normalizer, err := findings.NewDetailedNormalizerWithProvenance(input, nil, scanProvenance(detectorSet, input.FilePath, maxArchivePathBytes), nil)
+	if err != nil {
+		return nil
+	}
+	fingerprint := findings.Fingerprint(input.LayerDigest + "\n" + input.FilePath)
+	result := make([]findings.DetailedFinding, 0, len(matches))
+	for _, match := range matches {
+		if b != nil && b.maxFindings > 0 && b.retained >= b.maxFindings {
+			b.exceeded = true
+			b.observed = b.retained + 1
+			b.diagnosticManifest = input.ManifestDigest
+			break
+		}
+		finding, err := normalizer.NormalizeWithRaw(match, false)
+		if err != nil {
+			continue
+		}
+		finding.RedactedValue = ""
+		finding.ContextSnippet = ""
+		finding.LineNumber = 0
+		finding.Fingerprint = fingerprint
+		finding.Finding.MatchStart, finding.Finding.MatchEnd = 0, 0
+		finding.MatchStart, finding.MatchEnd = 0, 0
+		finding.Value, finding.RawSnippet = "", ""
+		result = append(result, finding)
+		if b != nil {
+			b.retained++
+		}
 	}
 	return result
 }

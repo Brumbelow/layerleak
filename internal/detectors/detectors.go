@@ -182,6 +182,8 @@ func Default() Set {
 	rules = append(rules, cloudFormatDetectors()...)
 	rules = append(rules, frameworkSecretDetectors()...)
 	rules = append(rules, saasTokenDetectors()...)
+	// Path-only classification runs through Set.ScanPath, never Set.Scan.
+	rules = append(rules, sensitiveFileDetector{})
 	rules = append(rules, contextEntropyDetector{})
 	return Set{detectors: rules}
 }

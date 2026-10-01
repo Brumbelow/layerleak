@@ -218,6 +218,29 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - `LAYERLEAK_LOG_FORMAT` (`json` default, `text`) and
   `layerleak scan --log-format json|text` select the log encoding for both the
   CLI and `layerleak-api`; invalid values are rejected at config load.
+- UTF-16 text: a file with a UTF-16 byte-order mark or an alternating-NUL
+  shape is transcoded to UTF-8 before classification and detection (bounded by
+  `LAYERLEAK_MAX_FILE_BYTES` on the decoded size) and counts as scanned; the
+  additive coverage counter `files_transcoded_utf16` reports them.
+- Nested archives: a zip, jar, war, wheel, egg, gzip or tar file stored in a
+  layer is expanded one level in memory and its regular files are scanned
+  under the provenance path `outer/path!inner/path`. New bounds
+  `LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES` (default 64 MiB per archive, `0`
+  disables expansion) and `LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES` (default
+  10000, `0` lifts only that bound) apply, nested expansion is charged to its
+  own copy of the layer and image budgets, and an archive inside a nested
+  archive is never opened. Encrypted, malformed, oversize or unsafe archives
+  are bounded skips reported by the `nested_archive_skipped` diagnostic and do
+  not make coverage partial. Additive coverage counters
+  `nested_archives_expanded` and `nested_entries_scanned`.
+- An optional per-sweep layer cache for `--all-tags`,
+  `LAYERLEAK_MAX_LAYER_CACHE_BYTES` (default `0`, off): a layer whose files
+  produced no findings is remembered by digest (entry metadata only, never
+  file content or matches) so tags sharing it are not fetched and replayed
+  again. Results are byte-identical with and without the cache; layers with
+  findings, nested archives or hardlinks into other layers are always
+  re-fetched. `BenchmarkRepositorySweepSharedLayers` measures roughly half the
+  time and memory on a sweep whose tags share most layers.
 
 ### Changed
 
@@ -443,6 +466,14 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   add `baselined` to the `disposition` enum (additive). The OpenAPI
   `disposition` enum is unchanged because the value never reaches the
   database.
+- Layer replay keeps an undo journal instead of cloning the whole replay state
+  for every layer; rollback behaviour is unchanged and
+  `BenchmarkReplayManyLayers` drops from 2.25s to 0.17s per operation with a
+  tenth of the allocations.
+- The result and scan-record JSON Schemas, the OpenAPI `Coverage` schema and
+  the golden fixtures gain the additive coverage counters
+  `files_transcoded_utf16`, `nested_archives_expanded` and
+  `nested_entries_scanned`.
 
 ### Security
 
@@ -498,6 +529,12 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   401/403 exits 1 with "authentication to <registry host> failed".
 - `context_snippet` redacts every copy of a matched secret inside the window,
   not only the first one.
+- A nested zip's central directory is bounded before `archive/zip` parses it:
+  the end-of-central-directory record (and its zip64 successor) is read and
+  the headers are counted in place, so an archive whose directory declares or
+  holds more entries than the allowance is refused whole instead of
+  allocating every header first. A fuzz target checks that arbitrary bytes
+  never panic the scan. Zip readers never trust declared entry sizes.
 
 ### Removed
 

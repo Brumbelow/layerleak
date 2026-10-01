@@ -49,6 +49,26 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Pinned CI validation for OpenAPI 3.1, real handler response fixtures,
   documented response examples, local documentation links, and synthetic demo
   structure.
+- `layerleak version` prints the version, commit (with a modified marker),
+  build time, Go version, and platform, or the same as JSON with
+  `--format json`; `--version` stays an alias for the first line.
+- Registry HTTP failures are typed (`registry.StatusError` with helpers such as
+  `IsNotFound`, `IsRateLimited`, `IsUnauthorized`) and transport failures are
+  `registry.RequestError`, so callers can tell a missing image from an outage.
+- Every registry and token request sends `User-Agent: layerleak/<version>`.
+- `LAYERLEAK_DATABASE_URL` accepts unix-socket URLs
+  (`postgres:///db?host=/var/run/postgresql`) and libpq keyword strings in
+  addition to `postgres://` URLs; the password may be supplied through
+  `PGPASSWORD` or `PGPASSFILE`.
+- `layerleak-migrate-up` reads `LAYERLEAK_MIGRATION_TIMEOUT` (default `30m`,
+  `0` disables) and `LAYERLEAK_MIGRATION_LOCK_TIMEOUT` (default `15s`), bounds
+  its advisory-lock waits with three attempts, and prints progress to stderr.
+- A golden-checksum test freezes the shipped `migrations/*.sql` files and
+  `.gitattributes` forces LF checkouts, so an accidental edit fails CI instead
+  of breaking every API startup against existing databases.
+- Windows consoles are switched into virtual-terminal mode for the dynamic
+  progress display, with a plain-text fallback when the console refuses.
+- Booleans accept `yes`/`no`/`on`/`off` as well as `1`/`true`/`0`/`false`.
 
 ### Changed
 
@@ -79,6 +99,52 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Multi-platform container builds now compile each binary for the requested
   target architecture and verify the image metadata and ELF architecture
   before runtime smoke tests.
+- The registry client works behind `HTTPS_PROXY`: proxied requests keep the
+  registry hostname as the `CONNECT` target, skip local DNS pinning (the proxy
+  is the egress control), and honour `NO_PROXY`; https-only and the allowlists
+  still apply.
+- One long-lived hardened transport per client with keep-alive; destination
+  pinning lives in the dialer, which tries every validated address (IPv6/IPv4
+  fallback). DNS is resolved once per request instead of twice.
+- Repository tag sweeps parse RFC 8288 `Link` headers (several relations,
+  unquoted `rel`, any parameter order, multiple headers); a header that cannot
+  be parsed makes the sweep partial instead of silently truncating it.
+- Retries back off exponentially with jitter (capped at 5s) or honour
+  `Retry-After` (capped at 30s); only `GET`/`HEAD` are retried, on 408/429/5xx
+  and transient transport failures. `LAYERLEAK_HTTP_TIMEOUT` applies per
+  attempt and also bounds dial, TLS handshake, and the response headers of
+  blob requests.
+- `WWW-Authenticate` parsing honours quoted commas and escaped quotes, reads
+  every header, and picks the first Bearer challenge even when Basic is listed
+  first; `registry-1.docker.io/<name>`, `index.docker.io/<name>` and
+  mixed-case `DOCKER.IO/<name>` keep the `library/` prefix.
+- Findings and occurrences are written as multi-row batched upserts:
+  persisting 10,000 findings dropped from 18.4s to 1.0s on loopback. Stored
+  results are unchanged.
+- Each migration transaction sets `lock_timeout` and retries a lock timeout
+  instead of queuing indefinitely behind an idle-in-transaction reader; schema
+  checks resolve every object in `current_schema()`.
+- `storage.PostgresConfig` keeps up to five idle connections by default
+  (capped at `MaxOpenConns`) instead of none when unset.
+- A scan that completes after its client disconnected or after the scan
+  deadline is still persisted under its own write deadline; only scans
+  interrupted mid-flight are discarded.
+- Configuration is validated at load: `LAYERLEAK_API_ADDR` must be
+  `host:port`, `LAYERLEAK_REGISTRY_BASE_URL`/`AUTH_URL` must be absolute
+  http(s) URLs, and `LAYERLEAK_LOG_LEVEL` accepts exactly `debug`, `info`,
+  `warn`, `error`. The unused `Config.MigrationsDir` is gone.
+- Compose: the `api` service waits for the `migrate` service, so a fresh
+  volume becomes ready with one `docker compose up -d`; the database password
+  reaches the containers as `PGPASSWORD` rather than inside three URLs; a 35s
+  `stop_grace_period` lets the shutdown drain finish.
+- Dockerfile: the floating `# syntax=docker/dockerfile:1.7` frontend is
+  gone (the digest-pinned BuildKit supplies its own), builds pass
+  `-buildvcs=false` explicitly, and `.dockerignore` is an allowlist.
+- Release tooling pins move to Grype 0.119.0, cosign 3.1.3, Buildx 0.37.2,
+  BuildKit 0.33.1 and GitHub CLI 2.102.0; the image scan job runs the
+  checksum-pinned Grype directly instead of a third-party action.
+- Multi-platform selection and layer handling: see the detector, layer and
+  scanner entries added by the 3.0.0 fix waves below.
 
 ### Security
 
@@ -90,6 +156,29 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   and resource exhaustion produce explicit incomplete/failure results.
 - Raw finding material is omitted from memory by default and has a scan-wide
   byte cap when persistence is explicitly enabled.
+- Redirects from https to http are refused even for allowlisted hosts, so a
+  bearer token can never be downgraded to cleartext.
+- Transport errors no longer echo redirect targets with query strings;
+  pre-signed CDN credentials are redacted to scheme, host and path.
+- Deprecated site-local (`fec0::/10`) and IPv4-compatible (`::/96`) IPv6
+  ranges are classified as non-public.
+- A NUL byte or other control character in an image-config key, snippet or
+  raw value no longer aborts persistence of the whole scan (which let a hostile
+  image evade the audit trail); such characters become U+FFFD consistently in
+  API JSON, CLI output and stored rows.
+- `.env.example` no longer ships a live `postgres://postgres:postgres` DSN or
+  a `change-me` password; both are blank so a forgotten edit fails loudly.
+- The GitHub CLI pin moves to 2.102.0 (GHSA-wjmr-j3rp-mh2g,
+  GHSA-4mq3-hpgx-9cx8, GHSA-39wj-f2f4-978v).
+
+### Removed
+
+- `cmd/scanner`, a byte-identical duplicate of the module root CLI; use
+  `go run .` for development.
+- `scripts/layerleak-migrate-up.sh`, an unreferenced wrapper around
+  `go run ./cmd/migrate`.
+- The `# syntax=docker/dockerfile:1.7` directive and the image-level
+  `LAYERLEAK_FINDINGS_DIR` default.
 
 ### Compatibility
 
@@ -103,6 +192,17 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Existing `findings/*.json` files remain findings arrays. The new object
   record uses the same basename under `findings/scans/`, so non-recursive
   consumers remain compatible.
+- Go API users: `registry.NewClient` returns `(*Client, error)` and reports
+  configuration errors eagerly (`registry.MustNewClient` panics instead);
+  transport failures are `*registry.RequestError` rather than `*url.Error`.
+- `LAYERLEAK_LOG_LEVEL` values other than the four names (for example
+  `info+2` or `warning`) are rejected at startup.
+- `LAYERLEAK_HTTP_TIMEOUT` is a per-attempt deadline; the worst-case wall time
+  of a request is attempts x timeout plus backoff.
+- The container image no longer sets `LAYERLEAK_FINDINGS_DIR` and Compose no
+  longer passes it; the API never wrote local findings.
+- Compose users run `docker compose up -d` instead of running `migrate` by
+  hand; `migrate` left the `tools` profile.
 
 ## [v2.5.0] - 2026-05-20
 

@@ -50,8 +50,11 @@ func frameworkSecretDetectors() []Detector {
 		newRegexDetector("wordpress_auth_salt", regexp.MustCompile(`define\(\s*["'](?:auth_key|secure_auth_key|logged_in_key|nonce_key|auth_salt|secure_auth_salt|logged_in_salt|nonce_salt)["']\s*,\s*["']([^"']{32,})["']`), 1, ConfidenceHigh, looksLikeFrameworkSecretKey).onLoweredContent(),
 		// define('DB_PASSWORD', '...') and any other password/secret/key/token
 		// constant: an explicit literal credential, high. Configuration
-		// references and the WordPress "password_here" sample are rejected.
-		newRegexDetector("php_define_password", regexp.MustCompile(`define\(\s*["'][a-z0-9_]*(?:password|passwd|secret|api_?key|token)[a-z0-9_]*["']\s*,\s*["']([^"'\s]{8,})["']`), 1, ConfidenceHigh, looksLikePHPDefinedPassword).onLoweredContent(),
+		// references, paths, file names, numbers and the WordPress
+		// "password_here" sample are rejected, as are constants whose name
+		// qualifies the credential word (API_TOKEN_TTL, JWT_SECRET_KEY_PATH):
+		// they describe the credential and do not hold it.
+		newRegexDetector("php_define_password", regexp.MustCompile(`define\(\s*["'][a-z0-9_]*(?:password|passwd|secret|api_?key|token)[a-z0-9_]*["']\s*,\s*["']([^"'\s]{8,})["']`), 1, ConfidenceHigh, looksLikePHPDefinedPassword).onLoweredContent().skipping(isPHPNonCredentialConstant),
 		// <password>...</password> elements (Jenkins credentials.xml, Tomcat
 		// and Maven descriptors) and password="..." attributes (tomcat-users.xml
 		// users, server.xml JNDI resources). Matches inside <!-- --> comments,
@@ -135,14 +138,78 @@ func looksLikeXMLPassword(value string) bool {
 	return !xmlPasswordKeywords[strings.ToLower(trimmed)]
 }
 
+var (
+	phpCredentialWordExpression = regexp.MustCompile(`(?:password|passwd|secret|api_?key|token)`)
+	phpFileNameExpression       = regexp.MustCompile(`(?i)^[a-z0-9_.-]+\.(?:pem|key|crt|cer|der|p12|pfx|jks|txt|json|ya?ml|ini|cfg|conf|xml|env|php|log|db|sqlite)$`)
+	// phpNonCredentialQualifiers are the name components that, after the
+	// credential word of a define()d constant, make it a property of the
+	// credential rather than the credential: a duration, a location, a size.
+	phpNonCredentialQualifiers = map[string]bool{
+		"path": true, "file": true, "dir": true, "url": true, "uri": true,
+		"ttl": true, "expiry": true, "expires": true, "expiration": true, "lifetime": true, "timeout": true,
+		"length": true, "len": true, "size": true, "min": true, "max": true, "rounds": true, "cost": true,
+		"name": true, "header": true, "prefix": true, "algo": true, "algorithm": true, "version": true, "type": true,
+		"enabled": true, "required": true,
+	}
+)
+
 // looksLikePHPDefinedPassword accepts literal passwords in define() calls
-// and rejects paths, references and the WordPress "password_here" sample.
+// and rejects paths, file names, numbers, references and the WordPress
+// "password_here" sample.
 func looksLikePHPDefinedPassword(value string) bool {
-	if !looksLikeLiteralPassword(value) || strings.HasPrefix(value, "/") {
+	if !looksLikeLiteralPassword(value) || strings.ContainsAny(value, "/\\") {
+		return false
+	}
+	if isAllDigits(value) || phpFileNameExpression.MatchString(value) {
 		return false
 	}
 	lower := strings.ToLower(value)
 	return !strings.HasSuffix(lower, "_here") && lower != "password"
+}
+
+// isPHPNonCredentialConstant reports whether the define()d constant whose
+// value starts at start carries a non-credential qualifier after its
+// credential word: API_TOKEN_TTL, JWT_SECRET_KEY_PATH, SECRET_SALT_FILE and
+// PASSWORD_MIN_LENGTH describe a credential, URL_SIGNING_SECRET is one. The
+// content is the lowered view the rule matched.
+func isPHPNonCredentialConstant(content string, start int) bool {
+	open := strings.LastIndex(content[:start], "define(")
+	if open < 0 {
+		return false
+	}
+	name := content[open+len("define(") : start]
+	first := strings.IndexAny(name, `"'`)
+	if first < 0 {
+		return false
+	}
+	name = name[first+1:]
+	if end := strings.IndexAny(name, `"'`); end >= 0 {
+		name = name[:end]
+	}
+	// The last credential word leaves the shortest tail, so a constant is
+	// only rejected on what follows every credential word in its name.
+	tail := ""
+	for _, span := range phpCredentialWordExpression.FindAllStringIndex(name, -1) {
+		tail = name[span[1]:]
+	}
+	for _, component := range strings.Split(tail, "_") {
+		if phpNonCredentialQualifiers[component] {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // insideXMLComment reports whether offset start lies inside an unterminated

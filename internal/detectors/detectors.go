@@ -347,6 +347,10 @@ type regexDetector struct {
 	// lowered runs the rule over the ASCII-lowercased content; the rule must
 	// then be written in lowercase without (?i), which keeps a literal prefix.
 	lowered bool
+	// skip drops a match by its position in the haystack (the lowered
+	// content for a lowered rule), for context the value alone cannot show,
+	// such as the name of the constant a value is assigned to.
+	skip func(content string, start int) bool
 }
 
 func newRegexDetector(name string, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool) regexDetector {
@@ -374,6 +378,13 @@ func (d regexDetector) onLoweredContent() regexDetector {
 	return d
 }
 
+// skipping returns the detector with a positional filter applied after the
+// value validator.
+func (d regexDetector) skipping(skip func(content string, start int) bool) regexDetector {
+	d.skip = skip
+	return d
+}
+
 func (d regexDetector) Name() string {
 	return d.name
 }
@@ -387,7 +398,17 @@ func (d regexDetector) Scan(input ScanInput) []Match {
 	if d.lowered {
 		haystack = input.loweredView()
 	}
-	return scanRegexMatches(d.name, d.rule, d.group, d.base, priorityLocal, d.validator, input, haystack)
+	matches := scanRegexMatches(d.name, d.rule, d.group, d.base, priorityLocal, d.validator, input, haystack)
+	if d.skip == nil {
+		return matches
+	}
+	kept := matches[:0]
+	for _, match := range matches {
+		if !d.skip(haystack.Content, match.Start) {
+			kept = append(kept, match)
+		}
+	}
+	return kept
 }
 
 type pathRegexDetector struct {

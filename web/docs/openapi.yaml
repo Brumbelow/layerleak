@@ -857,8 +857,9 @@ components:
         introduced within API v1. `GET /api/v1/scans/{id}` returns the stored
         result as it was produced, so only the fields every
         `result_schema_version` carries are required here; the fields that
-        version 2 added (`scanned_at`, `scanner`, the always-present
-        `tags_*` and `suppressed_*` counters) are optional in this schema and
+        version 2 added (`scanned_at`, `duration_ms`, `scanner`, the
+        always-present `tags_*` and `suppressed_*` counters) are optional in
+        this schema and
         guaranteed, with the stricter shape, by `schemas/result-v2.schema.json`
         for results whose `result_schema_version` is 2.
       additionalProperties: false
@@ -887,7 +888,7 @@ components:
           description: >-
             Version of the result shape. Stored scans return the version they
             were produced with; consumers branch on it. Version 2 (3.0.0)
-            added `scanned_at`, `scanner`, typed `tag_results.status`,
+            added `scanned_at`, `duration_ms`, `scanner`, typed `tag_results.status`,
             always-present counters and omitted empty `platform` objects. The
             full schema is published at `schemas/result-v2.schema.json`.
         scanned_at:
@@ -896,6 +897,13 @@ components:
           description: >-
             UTC time the scan started, RFC 3339. Present when
             `result_schema_version` is 2 or later.
+        duration_ms:
+          type: integer
+          minimum: 0
+          description: >-
+            Wall-clock milliseconds from the scan start (`scanned_at`) to
+            completion, rounded up; 0 only when the elapsed time is unknown.
+            Present when `result_schema_version` is 2 or later.
         scanner:
           type: object
           description: >-
@@ -909,6 +917,13 @@ components:
               enum: [layerleak]
             version:
               type: string
+            detector_set_version:
+              type: string
+              pattern: "^sha256:[0-9a-f]{64}$"
+              description: >-
+                sha256 over the sorted detector catalog identifiers the scan
+                ran with, joined by newlines. Changes whenever a detector id
+                is added, removed or renamed.
         status:
           $ref: "#/components/schemas/ResultStatus"
         requested_reference:

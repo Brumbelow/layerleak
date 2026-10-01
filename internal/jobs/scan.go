@@ -19,8 +19,9 @@ import (
 )
 
 // ResultSchemaVersion is the result_schema_version every Result reports.
-// Version 2 (3.0.0) added scanned_at and scanner, typed tag statuses, always
-// present counters and omitted empty platforms.
+// Version 2 (3.0.0) added scanned_at, duration_ms and scanner (with
+// detector_set_version), typed tag statuses, always present counters and
+// omitted empty platforms.
 const ResultSchemaVersion = 2
 
 // ScannerName is the scanner.name every Result reports.
@@ -38,7 +39,8 @@ type Request struct {
 	// ScannerVersion is reported as scanner.version; empty means the build
 	// version of this binary.
 	ScannerVersion string
-	// Now supplies scanned_at; nil means time.Now.
+	// Now supplies scanned_at and, read again when the scan ends,
+	// duration_ms; nil means time.Now.
 	Now                func() time.Time
 	MaxFileBytes       int64
 	MaxLayerBytes      int64
@@ -149,11 +151,15 @@ type ProgressFunc func(ProgressUpdate)
 type ScannerInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	// DetectorSetVersion is detectors.Set.CatalogDigest of the detector set
+	// the scan ran with: sha256 over its sorted identifiers.
+	DetectorSetVersion string `json:"detector_set_version"`
 }
 
 type Result struct {
 	ResultSchemaVersion          int                        `json:"result_schema_version"`
 	ScannedAt                    time.Time                  `json:"scanned_at"`
+	DurationMS                   int64                      `json:"duration_ms"`
 	Scanner                      ScannerInfo                `json:"scanner"`
 	Status                       ResultStatus               `json:"status"`
 	RequestedReference           string                     `json:"requested_reference"`
@@ -199,7 +205,8 @@ const (
 	TagStatusPartial TagStatus = "partial"
 	// TagStatusFailed: the tag could not be resolved or its target failed.
 	TagStatusFailed TagStatus = "failed"
-	// TagStatusSkipped: the sweep stopped before the tag's target was scanned.
+	// TagStatusSkipped: the sweep stopped before the tag's target was scanned,
+	// or before the tag was resolved (the repository target bound).
 	TagStatusSkipped TagStatus = "skipped"
 )
 
@@ -234,40 +241,65 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 	if request.Registry == nil {
 		return Result{}, fmt.Errorf("registry client is required")
 	}
-	if request.AllTags {
-		if !request.Reference.IsRepositoryOnly() {
-			return Result{}, fmt.Errorf("--all-tags requires a bare repository reference")
-		}
-		return scanRepository(ctx, request)
+	if request.AllTags && !request.Reference.IsRepositoryOnly() {
+		return Result{}, fmt.Errorf("--all-tags requires a bare repository reference")
 	}
-	return scanSingleReference(ctx, request)
-}
-
-// newResult starts a Result with the schema version, timestamp and scanner
-// identity every result carries.
-func newResult(request Request, mode string) Result {
 	now := time.Now
 	if request.Now != nil {
 		now = request.Now
 	}
+	// The untruncated start keeps time.Now's monotonic reading, so
+	// duration_ms is immune to wall-clock steps during the scan.
+	started := now()
+	var result Result
+	var err error
+	if request.AllTags {
+		result, err = scanRepository(ctx, request, started)
+	} else {
+		result, err = scanSingleReference(ctx, request, started)
+	}
+	if result.ResultSchemaVersion > 0 {
+		result.DurationMS = durationMillis(started, now())
+	}
+	return result, err
+}
+
+// durationMillis is the elapsed time in whole milliseconds, rounded up so a
+// measured scan never reports 0; 0 means the elapsed time is unknown (the
+// clock did not advance or went backwards).
+func durationMillis(started, finished time.Time) int64 {
+	elapsed := finished.Sub(started)
+	if elapsed <= 0 {
+		return 0
+	}
+	return int64((elapsed + time.Millisecond - 1) / time.Millisecond)
+}
+
+// newResult starts a Result with the schema version, start time and scanner
+// identity every result carries.
+func newResult(request Request, mode string, started time.Time) Result {
 	scannerVersion := strings.TrimSpace(request.ScannerVersion)
 	if scannerVersion == "" {
 		scannerVersion = version.Effective()
 	}
 	return Result{
 		ResultSchemaVersion: ResultSchemaVersion,
-		ScannedAt:           now().UTC().Truncate(time.Second),
-		Scanner:             ScannerInfo{Name: ScannerName, Version: scannerVersion},
-		RequestedReference:  request.Reference.Original,
-		Repository:          request.Reference.Repository,
-		Mode:                mode,
+		ScannedAt:           started.UTC().Truncate(time.Second),
+		Scanner: ScannerInfo{
+			Name:               ScannerName,
+			Version:            scannerVersion,
+			DetectorSetVersion: request.Detectors.CatalogDigest(),
+		},
+		RequestedReference: request.Reference.Original,
+		Repository:         request.Reference.Repository,
+		Mode:               mode,
 	}
 }
 
-func scanSingleReference(ctx context.Context, request Request) (Result, error) {
+func scanSingleReference(ctx context.Context, request Request, started time.Time) (Result, error) {
 	// scanned_at is the scan start, so the result is created before the
 	// target is scanned, exactly as scanRepository does.
-	result := newResult(request, "reference")
+	result := newResult(request, "reference", started)
 	tags := scannedTags(request.Reference)
 	scanResult, err := scanTarget(ctx, request, request.Reference, tags, progressState{
 		targetsTotal:   1,
@@ -357,8 +389,8 @@ func progressFromResult(request Request, result Result, phase ProgressPhase, mes
 	}
 }
 
-func scanRepository(ctx context.Context, request Request) (Result, error) {
-	result := newResult(request, "repository")
+func scanRepository(ctx context.Context, request Request, started time.Time) (Result, error) {
+	result := newResult(request, "repository", started)
 	result.ResolvedReference = request.Reference.RepositoryString()
 	result.TagResults = make([]TagResult, 0)
 	result.Targets = make([]TargetResult, 0)
@@ -378,7 +410,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 	}
 
 	groups := make(map[string]*targetGroup)
-	for _, tag := range tags {
+	for tagIndex, tag := range tags {
 		emitProgress(request, progressFromResult(request, result, ProgressPhaseResolvingTags, "Resolving tag digest", tag, ""))
 
 		resolved, err := request.Registry.ResolveManifest(ctx, request.Reference.Repository, tag)
@@ -420,6 +452,17 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			groups[resolved.Digest] = group
 		}
 		group.tags = append(group.tags, tag)
+
+		// The target bound is applied while resolving: once this tag adds the
+		// first target past it, the sweep fails with the limit error without
+		// sending one more manifest request for the remaining tags.
+		if request.MaxRepositoryTargets > 0 && len(groups) > request.MaxRepositoryTargets {
+			limitErr := limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
+			markUnresolvedTags(&result, tags[tagIndex+1:], limitErr)
+			result.TargetCount = len(groups)
+			finalizeResult(&result, nil, nil)
+			return result, limitErr
+		}
 	}
 
 	if len(groups) == 0 {
@@ -437,10 +480,6 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 	})
 
 	result.TargetCount = len(groupList)
-	if request.MaxRepositoryTargets > 0 && len(groupList) > request.MaxRepositoryTargets {
-		finalizeResult(&result, nil, nil)
-		return result, limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
-	}
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
@@ -573,6 +612,19 @@ func markUnscannedTargets(result *Result, request Request, remaining []targetGro
 	}
 	if len(remaining) > 0 {
 		result.Coverage.Complete = false
+	}
+}
+
+// markUnresolvedTags records the tags a sweep stopped before resolving as
+// skipped, so tag_results still lists every enumerated tag.
+func markUnresolvedTags(result *Result, remaining []string, cause error) {
+	reason := "not resolved: the sweep stopped before this tag: " + cause.Error()
+	for _, tag := range remaining {
+		result.TagResults = append(result.TagResults, TagResult{
+			Tag:    tag,
+			Status: TagStatusSkipped,
+			Error:  reason,
+		})
 	}
 }
 

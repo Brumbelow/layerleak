@@ -1,9 +1,11 @@
 {
   "result_schema_version": 2,
   "scanned_at": "2026-10-01T12:00:00Z",
+  "duration_ms": 4210,
   "scanner": {
     "name": "layerleak",
-    "version": "v3.0.0"
+    "version": "v3.0.0",
+    "detector_set_version": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   },
   "status": "partial",
   "requested_reference": "ghcr.io/example/app",

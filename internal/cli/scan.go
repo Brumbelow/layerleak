@@ -51,25 +51,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var baselinePath string
 
 	cmd := &cobra.Command{
-		Use:   "scan <image-ref>",
-		Short: "Scan an OCI image from a registry, an OCI layout or a docker save archive",
-		Long: `Scan an OCI image for likely secrets.
-
-<image-ref> is a registry reference (alpine:3.20, ghcr.io/org/app@sha256:...)
-or a local image source:
-
-  oci:<dir>[:<tag>][@<digest>]                 OCI image layout directory
-  oci-archive:<file.tar>[:<tag>][@<digest>]    tar archive of an OCI image layout
-  docker-archive:<file.tar>[:<repo>[:<tag>]][@<digest>]   docker save archive
-
-The path ends at the first colon (a Windows drive letter stays in the path).
-A local source that holds one image needs no tag; one that holds several
-needs a tag (an index.json ref.name such as 1.2 or docker.io/library/app:1.2,
-or a docker save RepoTags name such as app:1.2) or a digest. --all-tags
-enumerates the tags a local source holds. Registry credentials
-(--username/--password-stdin, LAYERLEAK_REGISTRY_USERNAME) are refused for
-local sources.`,
-		Args: cobra.ExactArgs(1),
+		Use:     "scan <image-ref>",
+		Short:   "Scan an OCI image from a registry, an OCI layout or a docker save archive",
+		Long:    scanLongHelp,
+		Example: scanExample,
+		Args:    exactArgsWithHint(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			outputFormat, err := parseOutputFormat(format)
 			if err != nil {

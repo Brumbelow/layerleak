@@ -142,7 +142,8 @@ func goldenOutcome() scanservice.Outcome {
 	result := jobs.Result{
 		ResultSchemaVersion: jobs.ResultSchemaVersion,
 		ScannedAt:           time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC),
-		Scanner:             jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0"},
+		DurationMS:          4210,
+		Scanner:             jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0", DetectorSetVersion: "sha256:" + strings.Repeat("d", 64)},
 		Status:              jobs.ResultStatusPartial,
 		RequestedReference:  "ghcr.io/example/app",
 		Repository:          "example/app",

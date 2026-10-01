@@ -28,6 +28,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_API_SHUTDOWN_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "")
 	t.Setenv("LAYERLEAK_API_READINESS_TIMEOUT", "")
+	t.Setenv("LAYERLEAK_API_READINESS_CACHE_TTL", "")
 	t.Setenv("LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS", "")
 	t.Setenv("LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS", "")
 	t.Setenv("LAYERLEAK_REGISTRY_MAX_REDIRECTS", "")
@@ -79,6 +80,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.APIPreStopDelay != 0 {
 		t.Fatalf("cfg.APIPreStopDelay = %s", cfg.APIPreStopDelay)
+	}
+	if cfg.APIReadinessCacheTTL != 5*time.Second {
+		t.Fatalf("cfg.APIReadinessCacheTTL = %s", cfg.APIReadinessCacheTTL)
 	}
 
 	if cfg.RegistryBaseURL != "" {
@@ -166,24 +170,35 @@ func TestLoadRejectsNonPositiveTimeout(t *testing.T) {
 	}
 }
 
-func TestLoadPreStopDelayAllowsZeroRejectsNegative(t *testing.T) {
-	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "0s")
-	cfg, err := Load()
-	if err != nil || cfg.APIPreStopDelay != 0 {
-		t.Fatalf("Load() with 0s = (%s, %v)", cfg.APIPreStopDelay, err)
+func TestLoadNonNegativeDurationsAllowZeroRejectNegative(t *testing.T) {
+	tests := []struct {
+		key  string
+		read func(Config) time.Duration
+	}{
+		{key: "LAYERLEAK_API_PRESTOP_DELAY", read: func(cfg Config) time.Duration { return cfg.APIPreStopDelay }},
+		{key: "LAYERLEAK_API_READINESS_CACHE_TTL", read: func(cfg Config) time.Duration { return cfg.APIReadinessCacheTTL }},
 	}
+	for _, test := range tests {
+		t.Run(test.key, func(t *testing.T) {
+			t.Setenv(test.key, "0s")
+			cfg, err := Load()
+			if err != nil || test.read(cfg) != 0 {
+				t.Fatalf("Load() with 0s = (%s, %v)", test.read(cfg), err)
+			}
 
-	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "7s")
-	cfg, err = Load()
-	if err != nil || cfg.APIPreStopDelay != 7*time.Second {
-		t.Fatalf("Load() with 7s = (%s, %v)", cfg.APIPreStopDelay, err)
-	}
+			t.Setenv(test.key, "7s")
+			cfg, err = Load()
+			if err != nil || test.read(cfg) != 7*time.Second {
+				t.Fatalf("Load() with 7s = (%s, %v)", test.read(cfg), err)
+			}
 
-	for _, value := range []string{"-1s", "soon"} {
-		t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", value)
-		if _, err := Load(); err == nil {
-			t.Fatalf("Load() with %q error = nil", value)
-		}
+			for _, value := range []string{"-1s", "soon"} {
+				t.Setenv(test.key, value)
+				if _, err := Load(); err == nil {
+					t.Fatalf("Load() with %q error = nil", value)
+				}
+			}
+		})
 	}
 }
 

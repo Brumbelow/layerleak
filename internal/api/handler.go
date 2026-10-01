@@ -19,6 +19,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,6 +41,7 @@ const (
 	defaultQueryTimeout       = 10 * time.Second
 	defaultReadinessTimeout   = 2 * time.Second
 	defaultResponseTimeout    = 30 * time.Second
+	defaultReadinessCacheTTL  = 5 * time.Second
 )
 
 type scanExecutor interface {
@@ -57,6 +59,15 @@ type Handler struct {
 	logger    *slog.Logger
 	draining  atomic.Bool
 	serve     http.Handler
+
+	// readiness caches the last store check for ReadinessCacheTTL. The mutex
+	// also serialises probes so one slow check is not run by every prober.
+	readiness struct {
+		sync.Mutex
+		checkedAt time.Time
+		err       error
+		cached    bool
+	}
 }
 
 type HandlerOptions struct {
@@ -67,6 +78,10 @@ type HandlerOptions struct {
 	ReadinessTimeout   time.Duration
 	ResponseTimeout    time.Duration
 	RequestID          func() string
+	// ReadinessCacheTTL is how long a /readyz result is reused before the
+	// store's schema-contract validation runs again. Zero disables the cache
+	// and a negative value selects the 5 s default.
+	ReadinessCacheTTL time.Duration
 	// Logger receives request and lifecycle logs. Nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -293,6 +308,9 @@ func (options HandlerOptions) withDefaults() HandlerOptions {
 	if options.ResponseTimeout <= 0 {
 		options.ResponseTimeout = defaultResponseTimeout
 	}
+	if options.ReadinessCacheTTL < 0 {
+		options.ReadinessCacheTTL = defaultReadinessCacheTTL
+	}
 	if options.RequestID == nil {
 		options.RequestID = newRequestID
 	}
@@ -306,7 +324,7 @@ func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, healthResponse{Status: "ok", Version: version.Effective()})
 }
 
-func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request) {
+func (h *Handler) handleReady(writer http.ResponseWriter, _ *http.Request) {
 	if h.isDraining() {
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "the API is draining before shutdown")
 		return
@@ -316,14 +334,32 @@ func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request)
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database readiness check is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), h.options.ReadinessTimeout)
-	defer cancel()
-	if err := checker.Ready(ctx); err != nil {
-		slog.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
+	if err := h.checkReadiness(checker); err != nil {
+		h.logger.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database is not ready")
 		return
 	}
 	writeJSON(writer, http.StatusOK, healthResponse{Status: "ready", Version: version.Effective()})
+}
+
+// checkReadiness runs the store's readiness check, reusing the previous
+// result while it is younger than ReadinessCacheTTL. The check runs under
+// its own bounded context rather than the prober's so a probe that hangs up
+// cannot poison the shared result.
+func (h *Handler) checkReadiness(checker readinessChecker) error {
+	h.readiness.Lock()
+	defer h.readiness.Unlock()
+	ttl := h.options.ReadinessCacheTTL
+	if ttl > 0 && h.readiness.cached && time.Since(h.readiness.checkedAt) < ttl {
+		return h.readiness.err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), h.options.ReadinessTimeout)
+	defer cancel()
+	err := checker.Ready(ctx)
+	h.readiness.err = err
+	h.readiness.checkedAt = time.Now()
+	h.readiness.cached = ttl > 0
+	return err
 }
 
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {

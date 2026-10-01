@@ -23,6 +23,7 @@ type Config struct {
 	APIShutdownTimeout          time.Duration
 	APIPreStopDelay             time.Duration
 	APIReadinessTimeout         time.Duration
+	APIReadinessCacheTTL        time.Duration
 	RegistryBaseURL             string
 	RegistryAuthURL             string
 	AllowedPrivateRegistryHosts []string
@@ -106,6 +107,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	apiReadinessTimeout, err := durationFromEnv("LAYERLEAK_API_READINESS_TIMEOUT", 2*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	apiReadinessCacheTTL, err := nonNegativeDurationFromEnv("LAYERLEAK_API_READINESS_CACHE_TTL", 5*time.Second)
 	if err != nil {
 		return Config{}, err
 	}
@@ -250,6 +255,7 @@ func Load() (Config, error) {
 		APIShutdownTimeout:          apiShutdownTimeout,
 		APIPreStopDelay:             apiPreStopDelay,
 		APIReadinessTimeout:         apiReadinessTimeout,
+		APIReadinessCacheTTL:        apiReadinessCacheTTL,
 		RegistryBaseURL:             envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", ""),
 		RegistryAuthURL:             envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", ""),
 		AllowedPrivateRegistryHosts: allowedPrivateRegistryHosts,

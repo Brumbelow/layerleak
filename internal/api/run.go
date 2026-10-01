@@ -209,6 +209,7 @@ func Run() error {
 			MaxConcurrentScans: cfg.APIMaxConcurrentScans,
 			QueryTimeout:       cfg.DatabaseQueryTimeout,
 			ReadinessTimeout:   cfg.APIReadinessTimeout,
+			ReadinessCacheTTL:  cfg.APIReadinessCacheTTL,
 			ResponseTimeout:    cfg.APIResponseWriteTimeout,
 			Logger:             logger,
 		},

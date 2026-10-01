@@ -53,9 +53,12 @@ paths:
       summary: Check database and schema readiness
       description: |
         Returns success only when PostgreSQL responds and the installed schema
-        is exactly version 0004. Reports 503 `not_ready` while the process
-        drains before shutdown (`LAYERLEAK_API_PRESTOP_DELAY`), so load
-        balancers stop routing to it before in-flight requests are cancelled.
+        is exactly version 0004. The result is reused for
+        `LAYERLEAK_API_READINESS_CACHE_TTL` (5 s by default) so frequent probes
+        do not re-run the catalog validation. Reports 503 `not_ready` while
+        the process drains before shutdown (`LAYERLEAK_API_PRESTOP_DELAY`), so
+        load balancers stop routing to it before in-flight requests are
+        cancelled.
       operationId: getReadiness
       responses:
         "200":

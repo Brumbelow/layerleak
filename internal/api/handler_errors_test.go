@@ -343,3 +343,94 @@ func TestMiddlewareRecoversPanicsWithStack(t *testing.T) {
 		t.Fatalf("panic log leaked the panic value: %s", logged)
 	}
 }
+
+// accessLogRecords returns the decoded "api request" records in logs.
+func accessLogRecords(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line is not JSON: %v: %q", err, line)
+		}
+		if record["msg"] == "api request" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// TestAccessLogRecordsRoutePatternNotPath pins API-11: every request logs one
+// Info record with the method, the matched route pattern, status, bytes,
+// duration, request id and remote address, and never the path or query that
+// may carry repository names or reference strings.
+func TestAccessLogRecordsRoutePatternNotPath(t *testing.T) {
+	logs := &bytes.Buffer{}
+	store := &stubReadStore{}
+	handler := NewHandlerWithOptions(&stubScanner{}, store, HandlerOptions{Logger: testLogger(logs)})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories/library/app/scans?registry=ghcr.io&limit=5", nil)
+	request.Header.Set("X-Request-ID", "access-1")
+	request.RemoteAddr = "192.0.2.10:4242"
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	records := accessLogRecords(t, logs)
+	if len(records) != 1 {
+		t.Fatalf("access records = %d: %s", len(records), logs.String())
+	}
+	record := records[0]
+	if record["level"] != "INFO" || record["method"] != "GET" || record["route"] != "GET /api/v1/repositories/" || record["status"] != float64(200) || record["request_id"] != "access-1" || record["remote_addr"] != "192.0.2.10:4242" {
+		t.Fatalf("record = %v", record)
+	}
+	if bytes, ok := record["bytes"].(float64); !ok || int(bytes) != recorder.Body.Len() {
+		t.Fatalf("bytes = %v, want %d", record["bytes"], recorder.Body.Len())
+	}
+	if _, ok := record["duration_ms"].(float64); !ok {
+		t.Fatalf("duration_ms = %v", record["duration_ms"])
+	}
+	for _, leaked := range []string{"library/app", "registry=", "ghcr.io", "limit=5"} {
+		if strings.Contains(logs.String(), leaked) {
+			t.Fatalf("access log leaked %q: %s", leaked, logs.String())
+		}
+	}
+}
+
+// TestAccessLogCoversErrorPathsAndOmitsBodies: scan requests, panics and
+// pre-mux rejections are logged with their final status, without the body.
+func TestAccessLogCoversErrorPathsAndOmitsBodies(t *testing.T) {
+	logs := &bytes.Buffer{}
+	handler := NewHandlerWithOptions(&stubScanner{err: scanErrorFor(fmt.Errorf("synthetic upstream detail"))}, &panickingStore{stubReadStore: &stubReadStore{}, value: "boom"}, HandlerOptions{Logger: testLogger(logs)})
+
+	handler.ServeHTTP(httptest.NewRecorder(), newJSONScanRequest(`{"reference":"library/app:latest"}`))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/repositories", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1//repositories", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodDelete, "/api/v1/scans", nil))
+
+	records := accessLogRecords(t, logs)
+	if len(records) != 4 {
+		t.Fatalf("access records = %d: %s", len(records), logs.String())
+	}
+	want := []struct {
+		method string
+		route  string
+		status float64
+	}{
+		{method: "POST", route: "POST /api/v1/scans", status: 502},
+		{method: "GET", route: "GET /api/v1/repositories", status: 500},
+		{method: "GET", route: "", status: 404},
+		{method: "DELETE", route: "/api/v1/scans", status: 405},
+	}
+	for index, expected := range want {
+		record := records[index]
+		if record["method"] != expected.method || record["route"] != expected.route || record["status"] != expected.status {
+			t.Fatalf("record %d = %v, want %+v", index, record, expected)
+		}
+	}
+	if strings.Contains(logs.String(), "library/app:latest") || strings.Contains(logs.String(), "synthetic upstream detail") {
+		t.Fatalf("access log leaked request detail: %s", logs.String())
+	}
+}

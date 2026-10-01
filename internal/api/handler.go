@@ -997,6 +997,8 @@ type apiResponseWriter struct {
 	requestID    string
 	writeTimeout time.Duration
 	wroteHeader  bool
+	status       int
+	bytes        int64
 }
 
 func (w *apiResponseWriter) WriteHeader(statusCode int) {
@@ -1004,6 +1006,7 @@ func (w *apiResponseWriter) WriteHeader(statusCode int) {
 		return
 	}
 	w.wroteHeader = true
+	w.status = statusCode
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
@@ -1011,7 +1014,9 @@ func (w *apiResponseWriter) Write(body []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	return w.ResponseWriter.Write(body)
+	written, err := w.ResponseWriter.Write(body)
+	w.bytes += int64(written)
+	return written, err
 }
 
 func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
@@ -1020,6 +1025,7 @@ func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
 
 func (h *Handler) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
 		requestID := validRequestID(request.Header.Get("X-Request-ID"))
 		if requestID == "" {
 			requestID = h.requestID()
@@ -1032,6 +1038,27 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 		wrapped.Header().Set("X-Request-ID", requestID)
 		wrapped.Header().Set("Cache-Control", "no-store")
 		wrapped.Header().Set("X-Content-Type-Options", "nosniff")
+
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					// net/http's convention: abort the response silently.
+					panic(recovered)
+				}
+				// The stack names frames, never values; the panic value itself may
+				// carry request or upstream detail and is reported by type only.
+				h.logger.Error("panic serving api request",
+					"panic_type", fmt.Sprintf("%T", recovered),
+					"stack", string(debug.Stack()),
+					"request_id", requestID,
+				)
+				if !wrapped.wroteHeader {
+					writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+				}
+			}
+			h.logAccess(wrapped, request, started)
+		}()
+
 		if h.isDraining() && request.Context().Err() != nil {
 			// The drain cancelled the base context before this request ran.
 			writeAPIError(wrapped, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
@@ -1041,29 +1068,27 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 			h.handleNotFound(wrapped, request)
 			return
 		}
-
-		defer func() {
-			recovered := recover()
-			if recovered == nil {
-				return
-			}
-			if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
-				// net/http's convention: abort the response silently.
-				panic(recovered)
-			}
-			// The stack names frames, never values; the panic value itself may
-			// carry request or upstream detail and is reported by type only.
-			h.logger.Error("panic serving api request",
-				"panic_type", fmt.Sprintf("%T", recovered),
-				"stack", string(debug.Stack()),
-				"request_id", requestID,
-			)
-			if !wrapped.wroteHeader {
-				writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
-			}
-		}()
 		next.ServeHTTP(wrapped, request)
 	})
+}
+
+// logAccess records one Info line per request. It logs the matched route
+// pattern (request.Pattern), never the path or query, because repository
+// names and reference strings belong to the caller, not the log stream.
+func (h *Handler) logAccess(wrapped *apiResponseWriter, request *http.Request, started time.Time) {
+	status := wrapped.status
+	if !wrapped.wroteHeader {
+		status = http.StatusOK
+	}
+	h.logger.Info("api request",
+		"method", request.Method,
+		"route", request.Pattern,
+		"status", status,
+		"bytes", wrapped.bytes,
+		"duration_ms", float64(time.Since(started).Microseconds())/1000,
+		"request_id", wrapped.requestID,
+		"remote_addr", request.RemoteAddr,
+	)
 }
 
 func (h *Handler) methodNotAllowed(allowed string) http.HandlerFunc {

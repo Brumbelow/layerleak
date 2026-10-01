@@ -488,8 +488,9 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - `result_schema_version` 1 -> 2: new `scanned_at` and `scanner` fields,
   counters are no longer omitted when zero, `platform` is omitted when empty,
   `tag_results[].status` adds `partial` and `skipped` and uses `scanned` in
-  both modes. Stored version 1 results are still returned unchanged by the
-  API.
+  both modes. Stored version 1 results keep their shape and version when the
+  API returns them (they are never upgraded to version 2); only error and
+  diagnostic message strings are neutralised on read, as before.
 - Exit code 3 is new. Scripts that treated exit 1 as retryable must add 3 as
   "incomplete coverage"; `--fail-on` defaults to `low`, which preserves the
   previous exit 2 behaviour.

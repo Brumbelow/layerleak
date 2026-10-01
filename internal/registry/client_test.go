@@ -48,7 +48,7 @@ func TestURLValidationErrorsDoNotEchoUntrustedValues(t *testing.T) {
 
 func TestUnsupportedAuthChallengeDoesNotEchoHeader(t *testing.T) {
 	const marker = "super-secret-marker"
-	_, err := parseBearerChallenge("Basic " + marker)
+	_, err := parseBearerChallenges([]string{"Basic " + marker})
 	if err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("parseBearerChallenge() error = %v", err)
 	}

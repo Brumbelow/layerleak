@@ -361,7 +361,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		return checkResponse(response, method, targetURL)
 	}
 
-	challenge, err := parseBearerChallenge(response.Header.Get("Www-Authenticate"))
+	challenge, err := parseBearerChallenges(response.Header.Values("Www-Authenticate"))
 	_ = response.Body.Close()
 	if err != nil {
 		return nil, err
@@ -604,46 +604,6 @@ func (c *Client) cacheToken(cacheKey, token string) error {
 	c.tokenCache[cacheKey] = token
 	c.tokenCacheBytes = retainedBytes + entryBytes
 	return nil
-}
-
-func parseBearerChallenge(header string) (bearerChallenge, error) {
-	value := strings.TrimSpace(header)
-	if value == "" {
-		return bearerChallenge{}, fmt.Errorf("registry auth challenge is missing")
-	}
-	if !strings.HasPrefix(strings.ToLower(value), "bearer ") {
-		return bearerChallenge{}, fmt.Errorf("unsupported registry auth challenge")
-	}
-
-	value = strings.TrimSpace(value[len("Bearer "):])
-	pieces := strings.Split(value, ",")
-	challenge := bearerChallenge{}
-	for _, piece := range pieces {
-		item := strings.TrimSpace(piece)
-		if item == "" {
-			continue
-		}
-		key, rawValue, found := strings.Cut(item, "=")
-		if !found {
-			continue
-		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		rawValue = strings.TrimSpace(strings.Trim(rawValue, `"`))
-		switch key {
-		case "realm":
-			challenge.Realm = rawValue
-		case "service":
-			challenge.Service = rawValue
-		case "scope":
-			challenge.Scope = rawValue
-		}
-	}
-
-	if challenge.Realm == "" {
-		return bearerChallenge{}, fmt.Errorf("bearer auth challenge did not include a realm")
-	}
-
-	return challenge, nil
 }
 
 func (c *Client) join(parts ...string) string {

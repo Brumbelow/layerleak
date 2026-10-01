@@ -40,7 +40,7 @@ func ParseReference(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("image reference must contain at most one digest separator")
 	}
 
-	named, err := distributionreference.ParseNormalizedNamed(value)
+	named, err := distributionreference.ParseNormalizedNamed(canonicalizeDockerHubDomain(value))
 	if err != nil {
 		return Reference{}, fmt.Errorf("parse image reference: %w", err)
 	}
@@ -166,6 +166,23 @@ func (r Reference) String() string {
 	}
 
 	return value
+}
+
+// canonicalizeDockerHubDomain rewrites the Docker Hub aliases
+// (index.docker.io, registry-1.docker.io, any-case docker.io) to docker.io
+// before normalization, so the library/ prefix rule for official images applies
+// to every spelling of the registry. Other references are returned unchanged.
+func canonicalizeDockerHubDomain(value string) string {
+	slash := strings.IndexByte(value, '/')
+	if slash <= 0 {
+		return value
+	}
+	switch strings.ToLower(value[:slash]) {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return DockerHubRegistry + value[slash:]
+	default:
+		return value
+	}
 }
 
 func normalizeRegistry(value string) string {

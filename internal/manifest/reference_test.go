@@ -50,6 +50,42 @@ func TestParseReference(t *testing.T) {
 			},
 		},
 		{
+			name:  "registry-1.docker.io alias keeps library prefix",
+			input: "registry-1.docker.io/busybox",
+			want: Reference{
+				Registry:   DockerHubRegistry,
+				Repository: "library/busybox",
+			},
+		},
+		{
+			name:  "index.docker.io alias keeps library prefix",
+			input: "index.docker.io/busybox:1.36",
+			want: Reference{
+				Registry:    DockerHubRegistry,
+				Repository:  "library/busybox",
+				Tag:         "1.36",
+				TagExplicit: true,
+			},
+		},
+		{
+			name:  "mixed-case docker.io keeps library prefix",
+			input: "DOCKER.IO/busybox",
+			want: Reference{
+				Registry:   DockerHubRegistry,
+				Repository: "library/busybox",
+			},
+		},
+		{
+			name:  "mixed-case registry-1 alias with namespace",
+			input: "Registry-1.Docker.io/bitnami/postgresql:17",
+			want: Reference{
+				Registry:    DockerHubRegistry,
+				Repository:  "bitnami/postgresql",
+				Tag:         "17",
+				TagExplicit: true,
+			},
+		},
+		{
 			name:  "ghcr.io with namespace and tag",
 			input: "ghcr.io/homebrew/core/hello:latest",
 			want: Reference{
@@ -144,6 +180,19 @@ func TestParseReference(t *testing.T) {
 	}
 }
 
+func TestDockerHubAliasesShareOneCanonicalString(t *testing.T) {
+	want := "docker.io/library/busybox:1.36"
+	for _, input := range []string{"busybox:1.36", "library/busybox:1.36", "docker.io/busybox:1.36", "index.docker.io/busybox:1.36", "registry-1.docker.io/busybox:1.36", "DOCKER.IO/library/busybox:1.36"} {
+		ref, err := ParseReference(input)
+		if err != nil {
+			t.Fatalf("ParseReference(%q) error = %v", input, err)
+		}
+		if got := ref.CanonicalString(""); got != want {
+			t.Fatalf("ParseReference(%q).CanonicalString() = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestParseReferenceRejectsRegistryWithoutRepository(t *testing.T) {
 	if _, err := ParseReference("ghcr.io/"); err == nil {
 		t.Fatal("ParseReference() error = nil")
@@ -182,6 +231,9 @@ func TestParseReferenceRejectsMalformedValues(t *testing.T) {
 		"ghcr.io:0/owner/image:latest",
 		"ghcr.io:65536/owner/image:latest",
 		"bad_host.example/owner/image:latest",
+		"docker.io/",
+		"registry-1.docker.io/",
+		"docker.io/UPPER",
 		"[2001:db8::1/owner/image:latest",
 		"owner/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}

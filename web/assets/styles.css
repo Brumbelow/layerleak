@@ -554,7 +554,7 @@ pre,
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1rem;
 }
 
@@ -574,6 +574,7 @@ pre,
   margin: 0;
   font-size: 1.02rem;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .table-shell {

@@ -133,4 +133,14 @@ test("the checked-in fixture completes and renders its initial table", async (t)
   assert.equal(await page.getByRole("tab", { name: "repositories", exact: true }).getAttribute("aria-selected"), "true");
   assert.equal(await page.locator("tbody tr").count(), 1);
   assert.equal(await page.locator("#demo-tabs button:disabled").count(), 0);
+  // One scan record per scan, printed by the CLI; no findings array and no
+  // scans/ subdirectory.
+  const terminal = await page.locator("#demo-terminal").textContent();
+  assert.ok(terminal.startsWith(`$ ${data.command}\n`));
+  assert.match(terminal, /^Scan record: "\/work\/findings\/\d{8}T\d{6}Z-[\w-]+-[A-Z2-7]{26}\.json"$/m);
+  assert.doesNotMatch(terminal, /findings\/scans\/|^Findings: /m);
+  assert.deepEqual(await page.locator("#demo-stats h3").allTextContents(), ["Status", "Coverage", "Actionable findings", "Diagnostics", "Scan record"]);
+  assert.equal(await page.locator("#demo-stats p").last().textContent(), data.run_result.artifacts.scan_record);
+  await page.getByRole("tab", { name: "findings", exact: true }).click();
+  assert.equal(await page.locator("tbody tr").count(), data.tables.findings.rows.length);
 });

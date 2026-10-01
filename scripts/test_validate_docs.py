@@ -173,8 +173,42 @@ class DocumentationValidationTests(unittest.TestCase):
                 demo["tables"][table]["rows"][0][field] = "raw example"
                 fixture.write_text(json.dumps(demo))
 
-                self.assert_invalid(f"{field} must be null")
+                self.assert_invalid(f"{field} must be empty")
 
+    def test_rejects_demo_with_legacy_two_file_artifacts(self):
+        fixture = self.root / "web" / "assets" / "demo-data.json"
+        original_demo = fixture.read_text()
+        record = json.loads(original_demo)["run_result"]["artifacts"]["scan_record"]
+        name = record.rsplit("/", 1)[-1]
+        for artifacts, message in (
+            (
+                {"findings": "findings/" + name, "scan_record": "findings/scans/" + name},
+                "exactly one scan_record artifact",
+            ),
+            ({"scan_record": "findings/scans/" + name}, "<utc-timestamp>"),
+            ({"scan_record": "findings/20260328T182355Z-app-demo.json"}, "<utc-timestamp>"),
+        ):
+            with self.subTest(artifacts=artifacts):
+                demo = json.loads(original_demo)
+                demo["run_result"]["artifacts"] = artifacts
+                fixture.write_text(json.dumps(demo))
+
+                self.assert_invalid(message)
+
+    def test_rejects_demo_with_unknown_exit_code_or_schema_version(self):
+        fixture = self.root / "web" / "assets" / "demo-data.json"
+        original_demo = fixture.read_text()
+        for field, value, message in (
+            ("exit_code", 4, "exit_code"),
+            ("result_schema_version", 1, "result_schema_version must be 2"),
+            ("record_schema_version", 1, "record_schema_version must be 2"),
+        ):
+            with self.subTest(field=field):
+                demo = json.loads(original_demo)
+                demo["run_result"][field] = value
+                fixture.write_text(json.dumps(demo))
+
+                self.assert_invalid(message)
 
     def test_rejects_web_variable_without_readme_row(self):
         index = self.root / "web" / "docs" / "index.html"

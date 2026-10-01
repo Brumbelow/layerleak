@@ -44,7 +44,7 @@ func Run() error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if !cfg.PersistRawSecrets {
 		warningCtx, cancel := context.WithTimeout(context.Background(), cfg.APIReadinessTimeout)
 		counts, countErr := store.CountRawSecrets(warningCtx)

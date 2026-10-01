@@ -75,7 +75,7 @@ func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult
 	if err != nil {
 		return MigrationResult{}, fmt.Errorf("open postgres connection: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
@@ -83,7 +83,7 @@ func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult
 	if err != nil {
 		return MigrationResult{}, fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if err := connection.PingContext(ctx); err != nil {
 		return MigrationResult{}, fmt.Errorf("ping postgres: %w", err)
 	}
@@ -171,7 +171,7 @@ func loadMigrationFiles(directory string) ([]migrationFile, error) {
 			return nil, fmt.Errorf("duplicate migration version %s in %s and %s", matches[1], previous, entry.Name())
 		}
 		path := filepath.Join(directory, entry.Name())
-		body, err := os.ReadFile(path)
+		body, err := os.ReadFile(path) //nolint:gosec // migrations are read from the operator-configured directory by design
 		if err != nil {
 			return nil, fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
@@ -206,7 +206,7 @@ func readAppliedMigrations(ctx context.Context, queryer interface {
 	if err != nil {
 		return nil, fmt.Errorf("read schema migration ledger: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	applied := make(map[string]migrationRow)
 	for rows.Next() {
@@ -709,7 +709,7 @@ func requireSchemaColumns(ctx context.Context, queryer schemaQueryer, version, l
 	if err != nil {
 		return fmt.Errorf("inspect database schema columns: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	available := make(map[string]map[string]schemaColumnState)
 	for rows.Next() {
@@ -795,7 +795,7 @@ func requireSchemaConstraints(ctx context.Context, queryer schemaQueryer, versio
 	if err != nil {
 		return fmt.Errorf("inspect database schema constraints: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	available := make(map[string][]schemaConstraintState)
 	for rows.Next() {
@@ -911,7 +911,7 @@ func requireSchemaIndexes(ctx context.Context, queryer schemaQueryer, version, l
 	if err != nil {
 		return fmt.Errorf("inspect database schema indexes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	available := make(map[string]schemaIndexState)
 	for rows.Next() {
@@ -1001,7 +1001,7 @@ func checkSchemaVersion(ctx context.Context, queryer schemaQueryer) error {
 	if err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	versions := make([]string, 0, currentMigrationCount)
 	for rows.Next() {
 		var version string

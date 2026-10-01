@@ -184,7 +184,7 @@ func (c *Client) FetchManifest(ctx context.Context, repository, identifier strin
 	if err != nil {
 		return ManifestResponse{}, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	body, err := readManifestBody(response.Body, c.maxManifestBytes, identifier)
 	if err != nil {
@@ -208,7 +208,7 @@ func (c *Client) ResolveManifest(ctx context.Context, repository, identifier str
 		manifest.MediaTypeDockerSchema2Manifest,
 	}, ", "), repository)
 	if err == nil {
-		response.Body.Close()
+		_ = response.Body.Close()
 		cancel()
 		resolved := ManifestMetadata{
 			Digest:    strings.TrimSpace(response.Header.Get("Docker-Content-Digest")),
@@ -249,7 +249,7 @@ func (c *Client) OpenBlob(ctx context.Context, repository, digest string) (BlobR
 	if err := manifest.ValidateDigest(digest); err != nil {
 		return BlobResponse{}, fmt.Errorf("validate blob digest: %w", err)
 	}
-	response, err := c.doRequest(ctx, http.MethodGet, c.BlobURL(repository, digest), "", repository)
+	response, err := c.doRequest(ctx, http.MethodGet, c.BlobURL(repository, digest), "", repository) //nolint:bodyclose // the caller owns BlobResponse.Body and closes it
 	if err != nil {
 		return BlobResponse{}, err
 	}
@@ -296,7 +296,7 @@ func (c *Client) ListTags(ctx context.Context, repository string, pageSize, maxT
 		}
 		linkHeader := response.Header.Get("Link")
 		body, readErr := readTagResponseBody(response.Body, c.maxTagResponseBytes, repository)
-		response.Body.Close()
+		_ = response.Body.Close()
 		cancel()
 		if readErr != nil {
 			sort.Strings(tags)
@@ -364,7 +364,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 	}
 
 	challenge, err := parseBearerChallenge(response.Header.Get("Www-Authenticate"))
-	response.Body.Close()
+	_ = response.Body.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +388,7 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		return nil, fmt.Errorf("perform authorized registry request: %w", err)
 	}
 	if retryResponse.StatusCode == http.StatusUnauthorized {
-		retryResponse.Body.Close()
+		_ = retryResponse.Body.Close()
 		c.invalidateToken(challenge)
 
 		token, err = c.fetchToken(ctx, challenge, false)
@@ -410,7 +410,7 @@ func (c *Client) checkResponse(response *http.Response) (*http.Response, error) 
 		return response, nil
 	}
 
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	return nil, fmt.Errorf("registry request failed: status=%d %s", response.StatusCode, http.StatusText(response.StatusCode))
 }
 
@@ -437,7 +437,7 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 			return nil, err
 		}
 		if attempt+1 < c.requestAttempts && isRetryableStatus(response.StatusCode) {
-			response.Body.Close()
+			_ = response.Body.Close()
 			lastErr = fmt.Errorf("transient registry status %d", response.StatusCode)
 			continue
 		}
@@ -489,7 +489,7 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 	if err != nil {
 		return "", fmt.Errorf("perform auth request: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return "", fmt.Errorf("auth request failed: status=%d %s", response.StatusCode, http.StatusText(response.StatusCode))
@@ -849,7 +849,7 @@ func parseEndpointURL(value string, allowHTTP bool) (*url.URL, error) {
 			return nil, fmt.Errorf("endpoint url port is invalid")
 		}
 	}
-	if parsed.Scheme != "https" && !(allowHTTP && parsed.Scheme == "http") {
+	if parsed.Scheme != "https" && (!allowHTTP || parsed.Scheme != "http") {
 		return nil, fmt.Errorf("endpoint url must use https")
 	}
 	return parsed, nil
@@ -1072,7 +1072,7 @@ func (t *pinnedTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	transport := t.base.Clone()
 	transport.DisableKeepAlives = true
 	transport.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	transport.DialTLS = nil
+	transport.DialTLS = nil //nolint:staticcheck // clear the deprecated hook so the plain dialer and TLSClientConfig below are authoritative
 	transport.DialTLSContext = nil
 	tlsConfig := transport.TLSClientConfig.Clone()
 	tlsConfig.ServerName = originalRequest.URL.Hostname()

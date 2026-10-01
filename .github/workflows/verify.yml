@@ -45,8 +45,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go_directive="$(awk '$1 == "go" { print $2 }' go.mod)"
-          dockerfile_go="$(sed -n 's/^FROM --platform=\$BUILDPLATFORM golang:\([0-9][0-9.]*\)-bookworm@sha256:[0-9a-f]\{64\} AS build$/\1/p' Dockerfile)"
+          go_directive="$(go list -m -f '{{.GoVersion}}')"
+          dockerfile_go="$(grep -oP '^FROM --platform=[$]BUILDPLATFORM golang:\K[0-9][0-9.]*(?=-bookworm@sha256:[0-9a-f]{64} AS build$)' Dockerfile || true)"
           if [[ -z "${dockerfile_go}" || "${go_directive}" != "${dockerfile_go}" ]]; then
             echo "go.mod declares go ${go_directive} but the Dockerfile builds with golang:${dockerfile_go:-<unparsed>}; keep them identical." >&2
             exit 1
@@ -83,6 +83,39 @@ jobs:
           "${install_bin}/layerleak" --help
           "${install_bin}/layerleak" scan --help
           "${install_bin}/layerleak" --version
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned golangci-lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/lint-tools"
+          mkdir -p "${tool_dir}"
+          # Built from source with the go.mod toolchain so it can type-check this module.
+          GOBIN="${tool_dir}" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+
+      - name: Run golangci-lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/lint-tools/golangci-lint" version
+          "${RUNNER_TEMP}/lint-tools/golangci-lint" run ./...
 
   documentation:
     name: OpenAPI and static documentation

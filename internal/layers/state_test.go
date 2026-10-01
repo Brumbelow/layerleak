@@ -18,6 +18,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// legacyTypeRegA is the deprecated archive/tar TypeRegA flag, which the
+// reader normalizes to TypeReg; fixtures still emit it to cover old archives.
+const legacyTypeRegA = '\x00'
+
 func TestReplayTracksDeletedArtifacts(t *testing.T) {
 	layerOne := gzipLayer(t, []tarEntry{
 		{name: "app/.env", body: "TOKEN=ghp_123456789012345678901234567890123456"},
@@ -939,7 +943,7 @@ func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader() error = %v", err)
 		}
-		if typeflag == tar.TypeReg || typeflag == tar.TypeRegA {
+		if typeflag == tar.TypeReg || typeflag == legacyTypeRegA {
 			if _, err := tarWriter.Write([]byte(entry.body)); err != nil {
 				t.Fatalf("Write() error = %v", err)
 			}
@@ -1028,6 +1032,8 @@ func zstdLayer(t *testing.T, entries []tarEntry) []byte {
 	if _, err := encoder.Write(tarBuffer.Bytes()); err != nil {
 		t.Fatalf("encoder.Write() error = %v", err)
 	}
-	encoder.Close()
+	if err := encoder.Close(); err != nil {
+		t.Fatalf("encoder.Close() error = %v", err)
+	}
 	return buffer.Bytes()
 }

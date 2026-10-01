@@ -364,7 +364,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			} else {
 				working.coverage.FilesExcludedBinary++
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg: // archive/tar normalizes the legacy TypeRegA flag to TypeReg
 			working.coverage.FilesSeen++
 			if header.Size <= options.MaxFileBytes {
 				prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.Size
@@ -819,7 +819,7 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 		return Artifact{}, fmt.Errorf("read layer file %q: %w", boundedPathForError(entryPath), err)
 	}
 
-	contentClass := ContentClassText
+	var contentClass ContentClass
 	scannable := int64(len(content)) <= maxFileBytes
 	if !scannable {
 		contentClass = ContentClassOversize
@@ -957,7 +957,8 @@ func decompressLayer(mediaType string, reader io.Reader, maxLayerBytes int64) (i
 			return nil, nil, fmt.Errorf("open gzip layer: %w", err)
 		}
 		return gzipReader, func() {
-			gzipReader.Close()
+			// Stream errors surface through Read; Close only releases decoder state.
+			_ = gzipReader.Close()
 		}, nil
 	case "zstd":
 		decoderLimit := zstdDecoderLimit(maxLayerBytes)

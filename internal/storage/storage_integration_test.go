@@ -20,7 +20,7 @@ import (
 
 func TestMigrationFilesApplyAndRollback(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet(up) error = %v", err)
@@ -39,7 +39,7 @@ func TestMigrationFilesApplyAndRollback(t *testing.T) {
 
 func TestRunMigrationsTracksChecksumsAndIsIdempotent(t *testing.T) {
 	db := openIntegrationDB(t)
-	db.Close()
+	_ = db.Close()
 
 	result, err := RunMigrations(context.Background(), MigrationConfig{
 		DatabaseURL: integrationDatabaseURL(t),
@@ -75,7 +75,7 @@ func TestRunMigrationsAdoptsLegacySchema(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("insert out-of-order legacy repository: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	result, err := RunMigrations(context.Background(), MigrationConfig{
 		DatabaseURL: integrationDatabaseURL(t),
@@ -92,7 +92,7 @@ func TestRunMigrationsAdoptsLegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sql.Open() error = %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var firstSeen, lastSeen time.Time
 	if err := db.QueryRow(`
 		SELECT first_seen_at, last_seen_at
@@ -114,7 +114,7 @@ func TestRunMigrationsRejectsIncompleteLegacySchema(t *testing.T) {
 	if _, err := db.Exec(`ALTER TABLE tags DROP COLUMN root_digest`); err != nil {
 		t.Fatalf("drop legacy column: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	_, err := RunMigrations(context.Background(), MigrationConfig{
 		DatabaseURL: integrationDatabaseURL(t),
@@ -127,7 +127,7 @@ func TestRunMigrationsRejectsIncompleteLegacySchema(t *testing.T) {
 
 func TestPostgresStoreRequireSchemaRejectsDrift(t *testing.T) {
 	db := openIntegrationDB(t)
-	db.Close()
+	_ = db.Close()
 	if _, err := RunMigrations(context.Background(), MigrationConfig{
 		DatabaseURL: integrationDatabaseURL(t),
 		Directory:   filepath.Join(repoRoot(t), "migrations"),
@@ -142,14 +142,14 @@ func TestPostgresStoreRequireSchemaRejectsDrift(t *testing.T) {
 	if _, err := db.Exec(`ALTER TABLE tags DROP COLUMN root_digest`); err != nil {
 		t.Fatalf("drop current column: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	store, err := NewPostgresStore(PostgresConfig{
 		DatabaseURL:   integrationDatabaseURL(t),
 		RequireSchema: true,
 	})
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 	}
 	if err == nil || !strings.Contains(err.Error(), "database schema is missing tags.root_digest") {
 		t.Fatalf("NewPostgresStore() error = %v", err)
@@ -182,7 +182,7 @@ func TestPostgresStoreRequireSchemaRejectsColumnDefinitionDrift(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openMigratedIntegrationDB(t)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if _, err := db.Exec(tt.change); err != nil {
 				t.Fatalf("apply schema drift: %v", err)
 			}
@@ -225,7 +225,7 @@ func TestPostgresStoreRequireSchemaRejectsConstraintDrift(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openMigratedIntegrationDB(t)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if _, err := db.Exec(tt.change); err != nil {
 				t.Fatalf("apply schema drift: %v", err)
 			}
@@ -240,7 +240,7 @@ func TestPostgresStoreRequireSchemaRejectsConstraintDrift(t *testing.T) {
 
 func TestPostgresStoreRequireSchemaRejectsSameNameWrongIndex(t *testing.T) {
 	db := openMigratedIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if _, err := db.Exec(`
 		DROP INDEX findings_manifest_last_seen_idx;
 		CREATE INDEX findings_manifest_last_seen_idx ON findings (fingerprint);
@@ -256,7 +256,7 @@ func TestPostgresStoreRequireSchemaRejectsSameNameWrongIndex(t *testing.T) {
 
 func TestPostgresStoreRequireSchemaValidatesIndexOrdering(t *testing.T) {
 	db := openMigratedIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := checkSchemaVersion(context.Background(), db); err != nil {
 		t.Fatalf("checkSchemaVersion() rejected migration index ordering: %v", err)
@@ -297,7 +297,7 @@ func TestPostgresStoreRequireSchemaValidatesIndexOrdering(t *testing.T) {
 
 func TestPostgresStoreRequireSchemaRejectsInvalidIndex(t *testing.T) {
 	db := openMigratedIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if _, err := db.Exec(`
 		INSERT INTO repositories (registry, repository, first_seen_at, last_seen_at)
 		VALUES ('docker.io', 'library/index-test', '2026-03-15 12:00:00+00', '2026-03-15 12:00:00+00');
@@ -371,7 +371,7 @@ func TestRunMigrationsRejectsLegacyColumnDefinitionDrift(t *testing.T) {
 	if _, err := db.Exec(`ALTER TABLE repositories ALTER COLUMN id DROP DEFAULT`); err != nil {
 		t.Fatalf("drop legacy default: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	_, err := RunMigrations(context.Background(), MigrationConfig{
 		DatabaseURL: integrationDatabaseURL(t),
@@ -388,7 +388,7 @@ func TestRunMigrationsAdoptsSchemaAppliedDirectlyThroughVersionFour(t *testing.T
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
 	assertCount(t, db, "SELECT COUNT(*) FROM schema_migrations", 0)
-	db.Close()
+	_ = db.Close()
 
 	result, err := RunMigrations(context.Background(), MigrationConfig{
 		DatabaseURL: integrationDatabaseURL(t),
@@ -404,7 +404,7 @@ func TestRunMigrationsAdoptsSchemaAppliedDirectlyThroughVersionFour(t *testing.T
 
 func TestRunMigrationsRejectsChangedAppliedMigration(t *testing.T) {
 	db := openIntegrationDB(t)
-	db.Close()
+	_ = db.Close()
 	directory := t.TempDir()
 	for _, migration := range []string{
 		"0001_initial.up.sql",
@@ -440,7 +440,7 @@ func TestRunMigrationsRejectsChangedAppliedMigration(t *testing.T) {
 
 func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -449,7 +449,7 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	if _, err := store.SaveScan(context.Background(), record); err != nil {
@@ -497,7 +497,7 @@ func TestPostgresStoreSaveScanUpsertsAndRetainsProvenance(t *testing.T) {
 
 func TestPostgresStoreSaveScanPersistsRawSecretsWhenEnabled(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -509,7 +509,7 @@ func TestPostgresStoreSaveScanPersistsRawSecretsWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	if _, err := store.SaveScan(context.Background(), record); err != nil {
@@ -535,7 +535,7 @@ func TestPostgresStoreSaveScanPersistsRawSecretsWhenEnabled(t *testing.T) {
 
 func TestPostgresStoreNewerRedactedWritePreservesRawMaterialUntilExplicitPurge(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -551,13 +551,15 @@ func TestPostgresStoreNewerRedactedWritePreservesRawMaterialUntilExplicitPurge(t
 	if _, err := rawStore.SaveScan(context.Background(), record); err != nil {
 		t.Fatalf("SaveScan(raw) error = %v", err)
 	}
-	rawStore.Close()
+	if err := rawStore.Close(); err != nil {
+		t.Fatalf("rawStore.Close() error = %v", err)
+	}
 
 	redactedStore, err := NewPostgresStore(PostgresConfig{DatabaseURL: integrationDatabaseURL(t)})
 	if err != nil {
 		t.Fatalf("NewPostgresStore(redacted) error = %v", err)
 	}
-	defer redactedStore.Close()
+	defer func() { _ = redactedStore.Close() }()
 	record.ScannedAt = record.ScannedAt.Add(time.Hour)
 	if _, err := redactedStore.SaveScan(context.Background(), record); err != nil {
 		t.Fatalf("SaveScan(redacted) error = %v", err)
@@ -570,7 +572,7 @@ func TestPostgresStoreNewerRedactedWritePreservesRawMaterialUntilExplicitPurge(t
 
 func TestPostgresStoreOlderWriteDoesNotRegressTimestampsOrTagMapping(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -578,7 +580,7 @@ func TestPostgresStoreOlderWriteDoesNotRegressTimestampsOrTagMapping(t *testing.
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	newer := integrationScanRecord(time.Date(2026, time.March, 15, 14, 0, 0, 0, time.UTC))
 	older := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
@@ -609,7 +611,7 @@ func TestPostgresStoreOlderWriteDoesNotRegressTimestampsOrTagMapping(t *testing.
 
 func TestPostgresStorePurgeRawSecrets(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -620,7 +622,7 @@ func TestPostgresStorePurgeRawSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if _, err := store.SaveScan(context.Background(), integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))); err != nil {
 		t.Fatalf("SaveScan() error = %v", err)
 	}
@@ -646,7 +648,7 @@ func TestPostgresStorePurgeRawSecrets(t *testing.T) {
 
 func TestPostgresStoreSaveScanPersistsScanRunHistory(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -655,7 +657,7 @@ func TestPostgresStoreSaveScanPersistsScanRunHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	record.Status = ScanRunStatusPartial
@@ -695,7 +697,7 @@ func TestPostgresStoreSaveScanPersistsScanRunHistory(t *testing.T) {
 
 func TestPostgresStoreSaveScanPersistsPartialRelationalStatus(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -704,7 +706,7 @@ func TestPostgresStoreSaveScanPersistsPartialRelationalStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	record.Status = ScanRunStatusPartial
@@ -724,7 +726,7 @@ func TestPostgresStoreSaveScanPersistsPartialRelationalStatus(t *testing.T) {
 
 func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -733,7 +735,7 @@ func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	first := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	second := integrationScanRecord(time.Date(2026, time.March, 15, 13, 0, 0, 0, time.UTC))
@@ -786,7 +788,7 @@ func TestPostgresStoreSaveScanReplacesTouchedTagMappings(t *testing.T) {
 
 func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -795,7 +797,7 @@ func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	first := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	second := integrationScanRecord(time.Date(2026, time.March, 15, 13, 0, 0, 0, time.UTC))
@@ -825,7 +827,7 @@ func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 
 func TestPostgresStoreListRepositoriesPaginatesTiedRegistries(t *testing.T) {
 	db := openMigratedIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	scannedAt := time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)
 	for _, item := range []struct {
@@ -851,7 +853,7 @@ func TestPostgresStoreListRepositoriesPaginatesTiedRegistries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	want := []string{
 		"z.example/library/aaa",
@@ -881,7 +883,7 @@ func TestPostgresStoreListRepositoriesPaginatesTiedRegistries(t *testing.T) {
 
 func TestPostgresStoreListRepositoryScansOrdersByScannedAt(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -890,7 +892,7 @@ func TestPostgresStoreListRepositoryScansOrdersByScannedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	first := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	second := integrationScanRecord(time.Date(2026, time.March, 15, 13, 0, 0, 0, time.UTC))
@@ -924,7 +926,7 @@ func TestPostgresStoreListRepositoryScansOrdersByScannedAt(t *testing.T) {
 
 func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -933,7 +935,7 @@ func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	record.DetailedFindings[1].Disposition = findings.DispositionExample
@@ -974,7 +976,7 @@ func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *
 
 func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -983,7 +985,7 @@ func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	if _, err := store.SaveScan(context.Background(), record); err != nil {
@@ -1018,7 +1020,7 @@ func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
 
 func TestPostgresStoreGetScanRunLoadsRedactedSnapshot(t *testing.T) {
 	db := openIntegrationDB(t)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := applyMigrationSet(t, db, "*.up.sql"); err != nil {
 		t.Fatalf("applyMigrationSet() error = %v", err)
 	}
@@ -1027,7 +1029,7 @@ func TestPostgresStoreGetScanRunLoadsRedactedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPostgresStore() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	record := integrationScanRecord(time.Date(2026, time.March, 15, 12, 0, 0, 0, time.UTC))
 	scanRunID, err := store.SaveScan(context.Background(), record)

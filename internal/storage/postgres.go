@@ -48,16 +48,16 @@ func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	if err := ensureMinimumPostgresServerVersion(ctx, db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if config.RequireSchema {
 		if err := checkSchemaVersion(ctx, db); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}

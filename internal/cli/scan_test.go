@@ -638,7 +638,7 @@ func installCommandRegistry(t *testing.T, transport roundTripFunc) {
 			http.Error(writer, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		for key, values := range response.Header {
 			for _, value := range values {
 				if strings.EqualFold(key, "Www-Authenticate") {

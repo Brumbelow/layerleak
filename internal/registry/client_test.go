@@ -161,7 +161,7 @@ func TestFetchManifestAndBlobWithBearerAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBlob() error = %v", err)
 	}
-	defer blobResponse.Body.Close()
+	defer func() { _ = blobResponse.Body.Close() }()
 
 	body, err := io.ReadAll(blobResponse.Body)
 	if err != nil {
@@ -217,7 +217,7 @@ func TestRequestTimeoutDoesNotCancelOpenBlobBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenBlob() error = %v", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	got, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatalf("ReadAll() error = %v", err)

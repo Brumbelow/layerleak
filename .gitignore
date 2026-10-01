@@ -33,6 +33,9 @@ __pycache__/
 *.pyc
 .venv-docs/
 
+# Pinned lint and vulnerability tools installed by `make tools`
+/.tools/
+
 # Editor/IDE
 # .idea/
 # .vscode/

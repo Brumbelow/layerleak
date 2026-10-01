@@ -52,7 +52,7 @@ func publishResultJSON(dir, name string, value any) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create result directory: %w", err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // directories need the execute bit; 0700 is owner-only
 		return "", fmt.Errorf("secure result directory: %w", err)
 	}
 	file, err := os.CreateTemp(dir, ".layerleak-result-*")
@@ -60,7 +60,8 @@ func publishResultJSON(dir, name string, value any) (string, error) {
 		return "", fmt.Errorf("create result file: %w", err)
 	}
 	temporary := file.Name()
-	defer os.Remove(temporary)
+	// Best-effort cleanup; the explicit removal after publication reports errors.
+	defer func() { _ = os.Remove(temporary) }()
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(value); err != nil {

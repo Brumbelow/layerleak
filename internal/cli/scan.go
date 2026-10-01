@@ -19,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const repositorySweepWarning = "warning: --all-tags enumerates every public tag in the repository and may scan many distinct images"
+const repositorySweepWarning = "warning: --all-tags enumerates every public tag in the repository and may scan many distinct images" //nolint:gosec // user-facing warning text, not a credential
 
 func newScanCmd() *cobra.Command {
 	return newScanCmdWithStore(newStore)
@@ -104,7 +104,8 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			}); err != nil {
 				logger.Debug("progress update failed")
 			}
-			defer progress.Finish()
+			// The explicit Finish call after publication reports errors; this is a safety net.
+			defer func() { _ = progress.Finish() }()
 
 			store, err := openStore(cfg)
 			if err != nil {
@@ -118,7 +119,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				return err
 			}
 			if closer, ok := store.(interface{ Close() error }); ok {
-				defer closer.Close()
+				defer func() {
+					if err := closer.Close(); err != nil {
+						logger.Debug("store close failed", "error", err)
+					}
+				}()
 			}
 
 			service := scanservice.New(cfg, store)

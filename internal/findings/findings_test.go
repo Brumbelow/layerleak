@@ -292,7 +292,13 @@ func TestNormalizeDetailedRedactsSecretsFromFilePathAndSourceLocation(t *testing
 }
 
 func TestDetailedNormalizerBoundsLargeMetadataProvenanceWithManyMatches(t *testing.T) {
-	input, matches := manyMatchNormalizationFixture(4000)
+	count := 4000
+	if testing.Short() {
+		// The full count dominates the short suite (about 70% of its wall time);
+		// CI runs the unabridged variant in the non-short PostgreSQL job.
+		count = 400
+	}
+	input, matches := manyMatchNormalizationFixture(count)
 	input.Key = strings.Repeat("metadata-世界/", 5000)
 
 	normalizer, err := NewDetailedNormalizer(input, matches)

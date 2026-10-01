@@ -52,7 +52,9 @@ installation, set `DEMO_BROWSER_PATH` to its executable path when running
 
 ## Required verification
 
-Run the checks that match `.github/workflows/verify.yml`:
+Run the checks that match `.github/workflows/verify.yml`. `make verify` runs
+the same list and installs the pinned lint and vulnerability tools under
+`.tools/`; `make db-test` runs the PostgreSQL suite.
 
 ```bash
 git diff --check
@@ -60,6 +62,7 @@ test -z "$(gofmt -l .)"
 go mod verify
 go mod tidy -diff
 go vet ./...
+golangci-lint run ./...
 go test -short ./... -count=1
 go test -short -race ./... -count=1
 go test ./... -count=1 # with LAYERLEAK_TEST_DATABASE_URL

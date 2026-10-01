@@ -42,7 +42,7 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int)
 	if err != nil {
 		return nil, fmt.Errorf("list repositories: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]RepositorySummary, 0)
 	for rows.Next() {
@@ -105,7 +105,7 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repos
 	if err != nil {
 		return nil, fmt.Errorf("list repository scans: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]ScanRunSummary, 0)
 	for rows.Next() {
@@ -166,7 +166,7 @@ func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, re
 	if err != nil {
 		return nil, fmt.Errorf("list repository findings: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]FindingSummary, 0)
 	for rows.Next() {
@@ -324,7 +324,7 @@ func (s *PostgresStore) GetFinding(ctx context.Context, id int64) (FindingDetail
 	if err != nil {
 		return FindingDetail{}, fmt.Errorf("query finding occurrences: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	occurrences := make([]FindingOccurrence, 0)
 	for rows.Next() {

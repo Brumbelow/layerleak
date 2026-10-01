@@ -1,0 +1,4 @@
+# Released migration files are checksum-frozen by the schema_migrations ledger:
+# a CRLF checkout would change their SHA-256 and make every API startup fail
+# against existing databases. Always check them out with LF line endings.
+migrations/*.sql text eol=lf

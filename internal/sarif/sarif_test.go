@@ -199,6 +199,48 @@ func TestFromResultStructure(t *testing.T) {
 	}
 }
 
+// TestBaselinedFindingsBecomeExternalSuppressions covers the third
+// disposition: a baselined finding is a result with an accepted external
+// suppression whose justification is the caller's baseline reason when one is
+// supplied and a fixed sentence otherwise.
+func TestBaselinedFindingsBecomeExternalSuppressions(t *testing.T) {
+	result := fixtureResult()
+	baselined := result.Findings[0]
+	baselined.Disposition = findings.DispositionBaselined
+	baselined.DispositionReason = ""
+	result.Findings = nil
+	result.SuppressedFindings = []findings.Finding{baselined}
+	result.TotalFindings, result.SuppressedFindingsCount = 0, 1
+
+	log := FromResult(result, Options{})
+	if len(log.Runs[0].Results) != 1 {
+		t.Fatalf("results = %d", len(log.Runs[0].Results))
+	}
+	suppressions := log.Runs[0].Results[0].Suppressions
+	if len(suppressions) != 1 || suppressions[0].Kind != "external" || suppressions[0].Status != "accepted" || suppressions[0].Justification != "accepted by the caller's baseline file" {
+		t.Fatalf("suppressions = %+v", suppressions)
+	}
+	if log.Runs[0].Results[0].Properties["disposition"] != "baselined" {
+		t.Fatalf("properties = %v", log.Runs[0].Results[0].Properties)
+	}
+
+	log = FromResult(result, Options{Justification: func(item findings.Finding) string {
+		if item.Disposition == findings.DispositionBaselined {
+			return "baseline: rotated 2026-09-01, old layer only"
+		}
+		return ""
+	}})
+	if got := log.Runs[0].Results[0].Suppressions[0].Justification; got != "baseline: rotated 2026-09-01, old layer only" {
+		t.Fatalf("justification = %q", got)
+	}
+
+	// An actionable finding never gains a suppression, whatever the callback says.
+	log = FromResult(fixtureResult(), Options{Justification: func(findings.Finding) string { return "never" }})
+	if len(log.Runs[0].Results[0].Suppressions) != 0 {
+		t.Fatalf("actionable result gained suppressions: %+v", log.Runs[0].Results[0].Suppressions)
+	}
+}
+
 func TestFromResultNeverContainsRawMaterial(t *testing.T) {
 	result := fixtureResult()
 	result.DetailedFindings = []findings.DetailedFinding{{Finding: result.Findings[0], Value: "RAWSECRETVALUE-aaaaaaaa", RawSnippet: "GITHUB_TOKEN=RAWSECRETVALUE-aaaaaaaa"}}

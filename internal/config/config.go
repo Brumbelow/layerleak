@@ -28,7 +28,10 @@ func (s Secret) GoString() string {
 }
 
 type Config struct {
-	LogLevel                string
+	LogLevel string
+	// LogFormat is the stderr log encoding shared by the CLI and the API:
+	// "json" (default) or "text"; see internal/logging.
+	LogFormat               string
 	APIAddr                 string
 	APIMaxRequestBytes      int64
 	APIScanTimeout          time.Duration
@@ -90,6 +93,10 @@ type Config struct {
 
 func Load() (Config, error) {
 	logLevel, err := logLevelFromEnv("LAYERLEAK_LOG_LEVEL", "info")
+	if err != nil {
+		return Config{}, err
+	}
+	logFormat, err := logFormatFromEnv("LAYERLEAK_LOG_FORMAT", "json")
 	if err != nil {
 		return Config{}, err
 	}
@@ -298,6 +305,7 @@ func Load() (Config, error) {
 
 	return Config{
 		LogLevel:                    logLevel,
+		LogFormat:                   logFormat,
 		APIAddr:                     apiAddr,
 		APIMaxRequestBytes:          apiMaxRequestBytes,
 		APIScanTimeout:              apiScanTimeout,
@@ -364,6 +372,17 @@ func logLevelFromEnv(key, fallback string) (string, error) {
 		return value, nil
 	}
 	return "", fmt.Errorf("parse %s: must be one of debug, info, warn, or error", key)
+}
+
+// logFormatFromEnv accepts the two log encodings (case-insensitively) that
+// internal/logging renders; anything else fails loudly like a bad level.
+func logFormatFromEnv(key, fallback string) (string, error) {
+	value := strings.ToLower(envOrDefault(key, fallback))
+	switch value {
+	case "json", "text":
+		return value, nil
+	}
+	return "", fmt.Errorf("parse %s: must be one of json or text", key)
 }
 
 // endpointURLFromEnv validates an optional registry or auth endpoint override

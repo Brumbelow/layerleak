@@ -243,11 +243,13 @@ Useful scan flags:
 | `--no-artifacts` | Do not write a scan record. |
 | `--no-db` | Ignore `LAYERLEAK_DATABASE_URL` and run a purely local scan. |
 | `--fail-on low|medium|high|none` | Lowest confidence of an actionable finding that produces exit code `2`. `low` (default) is every actionable finding; `none` reports without failing. |
+| `--baseline <file>` | Accept reviewed findings by fingerprint; see "Baselines" below. Matched findings are reported with `disposition: baselined` and never produce exit code `2`. Nothing is read implicitly. |
 | `--allow-partial` | Accept usable incomplete coverage (exit `0` or `2` instead of `3`) while preserving `status`, coverage, and diagnostics. |
 | `--platform os[/arch[/variant]]` | Select platforms from a multi-platform image; omitted parts match anything, so `--platform linux` selects every Linux manifest and `linux/arm64/v8` is equivalent to `linux/arm64`. Defaults to every `linux` manifest. A single-manifest image that does not match fails with `platform_not_found`. |
 | `--username <name>` / `--password-stdin` | Authenticate to a private registry for this scan; see "Private registries" below. |
 | `--all-tags` | Enumerate every public tag for a bare repository. |
 | `--progress auto|tty|plain|off` | Select interactive, log-safe, or disabled progress output. `auto` uses plain lines when `LAYERLEAK_LOG_LEVEL=debug`, `TERM=dumb` or `CI=true`. |
+| `--log-format json|text` | Encoding of the log records on stderr. `json` (default) is one object per line for log shippers; `text` is `key=value` for reading a `debug` run on a terminal. Overrides `LAYERLEAK_LOG_FORMAT`. |
 | `--tag-page-size` | Override the tag-list page size for `--all-tags`. |
 | `--max-repository-tags` | Override the tag enumeration bound for `--all-tags`; `0` disables it. |
 | `--max-repository-targets` | Override the distinct target bound for `--all-tags`; `0` disables it. |
@@ -287,6 +289,71 @@ code scanning from a workflow:
 - uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
   with:
     sarif_file: layerleak.sarif
+```
+
+### Baselines
+
+A repository with one historical finding (a secret rotated but still present
+in an old layer, a vendor test key the placeholder heuristics do not know)
+would otherwise fail every pipeline run. A baseline file lists the findings
+you have reviewed and accepted, keyed on their `fingerprint` (the sha256 of
+the raw value, stable across installs), and is passed explicitly:
+
+```bash
+layerleak scan ghcr.io/org/app:1.2 --format json --output result.json --fail-on none
+layerleak baseline create --from result.json --reason "rotated 2026-09-01; old layer only"
+layerleak scan ghcr.io/org/app:1.2 --baseline layerleak-baseline.json
+```
+
+`baseline create` reads a result (`--format json` output) or a scan record,
+writes one entry per actionable finding (`fingerprint`, `detector`, `reason`)
+to `layerleak-baseline.json` (`--output`, `-` for stdout) with mode `0600`,
+refuses to overwrite an existing file without `--force`, and never writes
+values, paths or snippets. The file is plain JSON you can edit:
+
+```json
+{
+  "baseline_schema_version": 1,
+  "entries": [
+    {"fingerprint": "<64 hex>", "detector": "github_token", "reason": "rotated 2026-09-01", "expires": "2027-01-01T00:00:00Z"}
+  ]
+}
+```
+
+An entry with a `detector` matches only that detector, so the same value
+reported by another detector stays actionable; drop the field to accept the
+fingerprint under any detector. `expires` (RFC 3339) is optional; an expired
+entry is ignored with a warning that names a fingerprint prefix only. A
+malformed file, an unknown `baseline_schema_version` or an unknown field is
+an error (exit `1`) before the scan starts.
+
+A matched finding keeps every field but is reported with `disposition:
+baselined` among `suppressed_findings`: it is excluded from `total_findings`
+and `unique_fingerprints`, counted in `suppressed_findings_count` and
+`suppressed_unique_fingerprints`, shown as "Baselined Findings" in the
+summary, and written to SARIF as a result with an accepted `external`
+suppression whose justification is the entry's reason. Per-target
+`findings_count` values keep the scanner's numbers. Baselines are a
+per-caller view applied after the scan: stdout, the scan record, SARIF and
+the exit code see it, while the PostgreSQL row and therefore the HTTP API keep
+the scanner's `actionable` disposition. Path-only `sensitive_file_*` findings
+can be baselined too; their fingerprint is derived from the layer digest and
+path. A `.layerleakignore` file in the working directory is never read
+implicitly: only `--baseline` applies a baseline.
+
+### Detector catalog
+
+`layerleak detectors list` prints every detector identifier a finding can
+carry in `detector_name` (and SARIF `ruleId`) with the confidence tier a match
+starts from, the matching strategy and a one-line description;
+`--format json` prints the same rows as JSON. The catalog is compiled in and
+read-only: there is no rule file or custom-rule syntax by design. The same
+data generates [docs/detectors.md](docs/detectors.md), and a test keeps that
+page and the code in step.
+
+```bash
+layerleak detectors list
+layerleak detectors list --format json | jq -r '.detectors[] | select(.confidence == "high") | .id'
 ```
 
 ### Private registries
@@ -374,7 +441,8 @@ The record (`record_schema_version` 2, schema at
 
 - `result`: the same redacted result as `--format json`, with real,
   control-character-sanitised error and diagnostic messages;
-- `findings`: every finding (actionable first, then suppressed) with detector,
+- `findings`: every finding (actionable first, then suppressed, including
+  any the `--baseline` file accepted as `baselined`) with detector,
   confidence, disposition and suppression reason, redacted value and redacted
   context, manifest, platform, file, layer, line and `source_location`
   provenance, and whether the occurrence survives in the final filesystem;
@@ -430,6 +498,7 @@ variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LAYERLEAK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` (case-insensitive); any other spelling is rejected. |
+| `LAYERLEAK_LOG_FORMAT` | `json` | Log record encoding on stderr for the CLI and the API: `json` (one object per line, safe for log shippers) or `text` (`key=value` records for a terminal); case-insensitive, anything else is rejected. The CLI flag `--log-format` overrides it for one scan. |
 | `LAYERLEAK_FINDINGS_DIR` | `./findings` | CLI only. Directory for scan records (one JSON file per scan); relative values resolve against the working directory. `--output-dir` overrides it, `--no-artifacts` skips it. |
 | `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Boolean. Unsafe opt-in for raw values and snippets. |
 | `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Per-attempt deadline for manifest, config, tag, and auth requests and for the response headers of blob requests; also bounds dial and TLS handshake. |

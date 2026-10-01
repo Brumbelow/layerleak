@@ -204,6 +204,7 @@ layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
                   </thead>
                   <tbody>
                     <tr><td><code>LAYERLEAK_LOG_LEVEL</code></td><td><code>info</code></td><td><code>debug</code>, <code>info</code>, <code>warn</code>, or <code>error</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_LOG_FORMAT</code></td><td><code>json</code></td><td>Log record encoding on stderr for the CLI and the API: <code>json</code> or <code>text</code>.</td></tr>
                     <tr><td><code>LAYERLEAK_FINDINGS_DIR</code></td><td>auto</td><td>CLI only: where scan records are saved.</td></tr>
                     <tr><td><code>LAYERLEAK_DATABASE_URL</code></td><td>empty</td><td>PostgreSQL URL for persistent CLI mode and the API; the password may come from <code>PGPASSWORD</code>.</td></tr>
                     <tr><td><code>LAYERLEAK_PERSIST_RAW_SECRETS</code></td><td><code>0</code></td><td>Unsafe opt-in that stores raw values in PostgreSQL.</td></tr>

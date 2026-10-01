@@ -8,6 +8,7 @@ Reference material that does not fit the README.
 | [threat-model.md](threat-model.md) | Assets, adversaries, the bounds on every untrusted input, and what is deliberately left to the deployment. |
 | [api-operations.md](api-operations.md) | Running `layerleak-api`: probes, shutdown sequence, logging, error classes to alert on. |
 | [false-positives.md](false-positives.md) | How dispositions and suppression reasons work and how to tune them. |
+| [detectors.md](detectors.md) | The detector catalog: every `detector_name` with its confidence tier, strategy and description. Generated from the code by `go test ./internal/cli -run TestDetectorsDocMatchesCatalog -update-docs`; the same data backs `layerleak detectors list`. |
 | [plans/2026-09-30-v3-release-plan.md](plans/2026-09-30-v3-release-plan.md) | The 3.0.0 release plan: decisions, workstreams, verification and operator steps. |
 | [plans/2026-09-30-v3-audit-findings.csv](plans/2026-09-30-v3-audit-findings.csv) | The audit ledger behind that plan, one row per finding. |
 | [reviews/](reviews/) | Inherited code-scanning alert reviews. |

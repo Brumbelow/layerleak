@@ -690,6 +690,39 @@ func TestLoadRestrictsLogLevelNames(t *testing.T) {
 	}
 }
 
+func TestLoadRestrictsLogFormatNames(t *testing.T) {
+	clearLayerleakEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LogFormat != "json" {
+		t.Fatalf("default LogFormat = %q, want json", cfg.LogFormat)
+	}
+	for value, want := range map[string]string{"JSON": "json", "text": "text", " Text ": "text"} {
+		t.Run(value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_LOG_FORMAT", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.LogFormat != want {
+				t.Fatalf("LogFormat = %q, want %q", cfg.LogFormat, want)
+			}
+		})
+	}
+	for _, value := range []string{"logfmt", "yaml", "json,text", "pretty"} {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_LOG_FORMAT", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_LOG_FORMAT") {
+				t.Fatalf("Load() error = %v, want rejection", err)
+			}
+		})
+	}
+}
+
 // TestREADMEDocumentsEveryVariable keeps the README configuration tables and
 // .env.example in lockstep: every variable in one must appear in the other.
 func TestREADMEDocumentsEveryVariable(t *testing.T) {

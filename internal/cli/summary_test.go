@@ -54,6 +54,7 @@ Files Skipped Oversize:       7
 Total Findings:               8
 Unique Fingerprints:          5
 Suppressed Example Findings:  3
+Baselined Findings:           0
 
 Reference                 Tags  Findings  Status
 library/app@sha256:first  2     5         ok
@@ -91,6 +92,7 @@ Files Skipped Oversize:       7
 Total Findings:               8
 Unique Fingerprints:          5
 Suppressed Example Findings:  3
+Baselined Findings:           0
 
 Platform     Manifest Digest  Findings  Status
 linux/amd64  sha256:first     5         ok
@@ -163,6 +165,7 @@ Files Skipped Oversize:       7
 Total Findings:               8
 Unique Fingerprints:          5
 Suppressed Example Findings:  3
+Baselined Findings:           0
 
 Platform     Manifest Digest  Findings  Status
 linux/amd64  sha256:first     3         ok

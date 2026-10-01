@@ -134,7 +134,10 @@ func ValidateImageManifest(value ImageManifest) error {
 		return err
 	}
 	for index, descriptor := range value.Layers {
-		if err := validateDescriptor(descriptor, IsLayerMediaType, fmt.Sprintf("layer[%d]", index)); err != nil {
+		// Foreign and non-distributable layers are legitimate descriptors even
+		// though they cannot be scanned; whether the manifest is scannable is
+		// decided by the layer engine, not by document integrity.
+		if err := validateDescriptor(descriptor, IsLayerDescriptorMediaType, fmt.Sprintf("layer[%d]", index)); err != nil {
 			return err
 		}
 	}
@@ -152,7 +155,11 @@ func ValidateImageIndex(value ImageIndex) error {
 		return &IntegrityError{Kind: IntegrityInvalidDocument, Subject: "image index", Expected: "at least one manifest descriptor", Actual: "none"}
 	}
 	for index, descriptor := range value.Manifests {
-		if err := validateDescriptor(descriptor, IsManifestMediaType, fmt.Sprintf("manifest[%d]", index)); err != nil {
+		// Every entry needs a well-formed digest, size and platform. The media
+		// type is not constrained here: nested indexes, attestation and artifact
+		// descriptors are legal index entries that selection skips with a
+		// diagnostic instead of failing the whole document.
+		if err := validateDescriptor(descriptor, anyMediaType, fmt.Sprintf("manifest[%d]", index)); err != nil {
 			return err
 		}
 		if err := ValidatePlatform(descriptor.Platform, false); err != nil {
@@ -160,6 +167,10 @@ func ValidateImageIndex(value ImageIndex) error {
 		}
 	}
 	return nil
+}
+
+func anyMediaType(string) bool {
+	return true
 }
 
 func validateDescriptor(descriptor Descriptor, supportedMediaType func(string) bool, subject string) error {

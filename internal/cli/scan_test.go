@@ -345,7 +345,7 @@ func TestScanCommandValidatesOutputAndScopeBeforeScanning(t *testing.T) {
 	}{
 		{name: "invalid format", args: []string{"scan", "library/app", "--format", "xml"}, want: "unsupported output format"},
 		{name: "invalid progress", args: []string{"scan", "library/app", "--progress", "sometimes"}, want: "unsupported progress mode"},
-		{name: "invalid platform", args: []string{"scan", "library/app", "--platform", "linux"}, want: "invalid --platform"},
+		{name: "invalid platform", args: []string{"scan", "library/app", "--platform", "linux/amd64/"}, want: "invalid --platform"},
 		{name: "all tags pinned", args: []string{"scan", "library/app:latest", "--all-tags"}, want: "requires a bare repository"},
 		{name: "scope limit without all tags", args: []string{"scan", "library/app", "--tag-page-size", "50"}, want: "requires --all-tags"},
 	}

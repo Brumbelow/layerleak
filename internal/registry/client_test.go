@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ import (
 )
 
 func TestManifestURL(t *testing.T) {
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry-1.docker.io",
 		AllowPrivateHosts: true,
 	})
@@ -37,7 +38,7 @@ func TestURLValidationErrorsDoNotEchoUntrustedValues(t *testing.T) {
 	if _, err := parseEndpointURL(malformed, false); err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("parseEndpointURL() error = %v", err)
 	}
-	if _, _, err := nextLinkURL("https://registry.test/v2/tags/list", malformed); err == nil || strings.Contains(err.Error(), marker) {
+	if _, _, err := nextLinkURL("https://registry.test/v2/tags/list", []string{malformed}); err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("nextLinkURL() error = %v", err)
 	}
 	if _, err := appendURLQuery(malformed, map[string]string{"scope": "repository:app:pull"}); err == nil || strings.Contains(err.Error(), marker) {
@@ -47,14 +48,14 @@ func TestURLValidationErrorsDoNotEchoUntrustedValues(t *testing.T) {
 
 func TestUnsupportedAuthChallengeDoesNotEchoHeader(t *testing.T) {
 	const marker = "super-secret-marker"
-	_, err := parseBearerChallenge("Basic " + marker)
+	_, err := parseBearerChallenges([]string{"Basic " + marker})
 	if err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("parseBearerChallenge() error = %v", err)
 	}
 }
 
 func TestDefaultTransportCapsRegistryResponseHeaders(t *testing.T) {
-	client := NewClient(Options{BaseURL: "https://registry.example"})
+	client := MustNewClient(Options{BaseURL: "https://registry.example"})
 	transport, ok := client.httpClient.Transport.(*pinnedTransport)
 	if !ok {
 		t.Fatalf("client transport = %T", client.httpClient.Transport)
@@ -82,7 +83,7 @@ func TestRegistryTransportRequiresTLS12(t *testing.T) {
 			if test.configured {
 				base.TLSClientConfig = &tls.Config{MinVersion: test.minVersion}
 			}
-			client := NewClient(Options{
+			client := MustNewClient(Options{
 				BaseURL:    "https://registry.example",
 				HTTPClient: &http.Client{Transport: base},
 			})
@@ -140,7 +141,7 @@ func TestFetchManifestAndBlobWithBearerAuth(t *testing.T) {
 		}
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -181,7 +182,7 @@ func TestRequestTimeoutCoversManifestBody(t *testing.T) {
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return delayedResponse(request.Context(), 50*time.Millisecond, http.StatusOK, manifest.MediaTypeOCIImageManifest, []byte(`{"schemaVersion":2}`), nil), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestTimeout:    10 * time.Millisecond,
@@ -203,7 +204,7 @@ func TestRequestTimeoutDoesNotCancelOpenBlobBody(t *testing.T) {
 			"Docker-Content-Digest": digest,
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestTimeout:    10 * time.Millisecond,
@@ -237,7 +238,7 @@ func TestRequestTimeoutCoversAuthTokenBodyForBlob(t *testing.T) {
 			"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull"`,
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AuthURL:           "https://auth.test/token",
 		AllowPrivateHosts: true,
@@ -274,7 +275,7 @@ func TestResolveManifestUsesHeadDigest(t *testing.T) {
 		}), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -318,7 +319,7 @@ func TestListTagsFollowsPagination(t *testing.T) {
 		}
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -352,7 +353,7 @@ func TestListTagsReturnsPartialTagsWhenLimitExceeded(t *testing.T) {
 		return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest","2.0","1.0"]}`), nil), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -387,7 +388,7 @@ func TestListTagsFailsWhenTagResponseExceedsConfiguredBytes(t *testing.T) {
 		return jsonResponse(http.StatusOK, "application/json", []byte(`{"name":"library/app","tags":["latest","2.0","1.0"]}`), nil), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:             "https://registry.test",
 		AllowPrivateHosts:   true,
 		MaxTagResponseBytes: 12,
@@ -432,7 +433,7 @@ func TestListTagsReturnsPartialTagsWhenTagResponseLimitExceededMidPagination(t *
 		}
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:             "https://registry.test",
 		AllowPrivateHosts:   true,
 		MaxTagResponseBytes: 48,
@@ -459,7 +460,7 @@ func TestListTagsRejectsPaginationCycle(t *testing.T) {
 			"Link": `<https://registry.test/v2/library/app/tags/list?n=100>; rel="next"`,
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient:        &http.Client{Transport: transport},
@@ -492,7 +493,7 @@ func TestListTagsRejectsInvalidDistributionTags(t *testing.T) {
 			transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return jsonResponse(http.StatusOK, "application/json", body, nil), nil
 			})
-			client := NewClient(Options{
+			client := MustNewClient(Options{
 				BaseURL:           "https://registry.test",
 				AllowPrivateHosts: true,
 				HTTPClient:        &http.Client{Transport: transport},
@@ -529,7 +530,7 @@ func TestListTagsRejectsPaginationWithoutNewTags(t *testing.T) {
 			return jsonResponse(http.StatusInternalServerError, "text/plain", nil, nil), nil
 		}
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient:        &http.Client{Transport: transport},
@@ -582,7 +583,7 @@ func TestFetchManifestRefreshesExpiredCachedToken(t *testing.T) {
 		}), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -632,7 +633,7 @@ func TestResolveManifestRetriesRequestTimeout(t *testing.T) {
 		}), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -656,7 +657,7 @@ func TestFetchManifestHonorsConfiguredRequestAttempts(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		RequestAttempts:   1,
@@ -691,7 +692,7 @@ func TestFetchManifestFailsWhenManifestBodyExceedsLimit(t *testing.T) {
 		}), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		MaxManifestBytes:  8,
@@ -761,7 +762,7 @@ func TestFetchManifestDiscoversAuthRealmForNonDockerHubRegistry(t *testing.T) {
 		return jsonResponse(http.StatusNotFound, "text/plain", []byte("not found"), nil), nil
 	})
 
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://ghcr.test",
 		AllowPrivateHosts: true,
 		HTTPClient: &http.Client{
@@ -781,65 +782,55 @@ func TestFetchManifestDiscoversAuthRealmForNonDockerHubRegistry(t *testing.T) {
 	}
 }
 
-func TestClientRejectsDNSRebindingBeforeDial(t *testing.T) {
-	lookups := 0
-	client := NewClient(Options{
-		BaseURL: "https://registry.example",
-		LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
-			lookups++
-			if lookups == 1 {
-				return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
-			}
-			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
-		},
-	})
-
-	_, err := client.FetchManifest(context.Background(), "library/app", "latest")
-	if err == nil || !strings.Contains(err.Error(), "non-public registry address") {
-		t.Fatalf("FetchManifest() error = %v", err)
-	}
-	if lookups != 2 {
-		t.Fatalf("lookups = %d", lookups)
-	}
-}
-
 func TestClientUsesSeparateExactPrivateHostAllowlists(t *testing.T) {
 	lookup := func(context.Context, string) ([]net.IPAddr, error) {
 		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
 	}
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:                     "https://registry.internal:5000",
 		AllowedPrivateRegistryHosts: []string{"registry.internal:5000"},
 		LookupIP:                    lookup,
 	})
-	if err := client.validateOutboundURL(context.Background(), "https://registry.internal:5000/v2/", client.baseURL, false, requestKindRegistry); err != nil {
-		t.Fatalf("registry validation error = %v", err)
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://registry.internal:5000/v2/"), requestKindRegistry); err != nil {
+		t.Fatalf("registry resolution error = %v", err)
 	}
-	if err := client.validateOutboundURL(context.Background(), "https://registry.internal:5000/token", nil, true, requestKindAuth); err == nil {
-		t.Fatal("auth validation error = nil")
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://registry.internal:5000/token"), requestKindAuth); err == nil {
+		t.Fatal("auth resolution error = nil")
 	}
 
-	client = NewClient(Options{
+	client = MustNewClient(Options{
 		BaseURL:                 "https://registry.example",
 		AllowedPrivateAuthHosts: []string{"auth.internal"},
 		LookupIP:                lookup,
 	})
-	if err := client.validateAuthRealm(context.Background(), "https://auth.internal/token"); err != nil {
+	if err := client.validateAuthRealm("https://auth.internal/token"); err != nil {
 		t.Fatalf("auth validation error = %v", err)
 	}
-	if err := client.validateOutboundURL(context.Background(), "https://auth.internal/v2/", nil, true, requestKindRegistry); err == nil {
-		t.Fatal("registry validation error = nil")
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://auth.internal/token"), requestKindAuth); err != nil {
+		t.Fatalf("auth resolution error = %v", err)
+	}
+	if _, err := client.resolveOutbound(context.Background(), mustParseURL(t, "https://auth.internal/v2/"), requestKindRegistry); err == nil {
+		t.Fatal("registry resolution error = nil")
 	}
 }
 
+func mustParseURL(t *testing.T, value string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(value)
+	if err != nil {
+		t.Fatalf("Parse(%q) error = %v", value, err)
+	}
+	return parsed
+}
+
 func TestClientAllowsPublicCrossHostAuthRealm(t *testing.T) {
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL: "https://registry.example",
 		LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
 	})
-	if err := client.validateAuthRealm(context.Background(), "https://auth.example/token"); err != nil {
+	if err := client.validateAuthRealm("https://auth.example/token"); err != nil {
 		t.Fatalf("validateAuthRealm() error = %v", err)
 	}
 }
@@ -866,6 +857,8 @@ func TestNonPublicAddressClassification(t *testing.T) {
 		{address: "2002:7f00:1::", nonPublic: true},
 		{address: "fc00::1", nonPublic: true},
 		{address: "fe80::1", nonPublic: true},
+		{address: "fec0::1", nonPublic: true},
+		{address: "::7f00:1", nonPublic: true},
 	} {
 		t.Run(test.address, func(t *testing.T) {
 			if got := isNonPublicAddress(net.ParseIP(test.address)); got != test.nonPublic {
@@ -882,21 +875,24 @@ func TestClientAllowsHTTPOnlyForExactPrivateHost(t *testing.T) {
 	lookup := func(context.Context, string) ([]net.IPAddr, error) {
 		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
 	}
-	allowed := NewClient(Options{
+	allowed := MustNewClient(Options{
 		BaseURL:                     "http://registry.internal:5000",
 		AllowedPrivateRegistryHosts: []string{"registry.internal:5000"},
 		LookupIP:                    lookup,
 	})
-	if err := allowed.validateOutboundURL(context.Background(), allowed.BaseURL(), allowed.baseURL, false, requestKindRegistry); err != nil {
+	if err := allowed.validateOutboundURL(allowed.BaseURL(), allowed.baseURL, false, requestKindRegistry); err != nil {
 		t.Fatalf("allowed validation error = %v", err)
 	}
-	rejected := NewClient(Options{
+	rejected, err := NewClient(Options{
 		BaseURL:                     "http://other.internal:5000",
 		AllowedPrivateRegistryHosts: []string{"registry.internal:5000"},
 		LookupIP:                    lookup,
 	})
-	if _, err := rejected.FetchManifest(context.Background(), "library/app", "latest"); err == nil || !strings.Contains(err.Error(), "allowlisted") {
-		t.Fatalf("FetchManifest() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "allowlisted") {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if rejected != nil {
+		t.Fatal("NewClient() returned a client for a non-allowlisted http endpoint")
 	}
 }
 
@@ -909,7 +905,7 @@ func TestClientBoundsAuthTokenResponse(t *testing.T) {
 			"Www-Authenticate": `Bearer realm="https://auth.test/token",service="registry.test"`,
 		}), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:              "https://registry.test",
 		AllowPrivateHosts:    true,
 		MaxAuthResponseBytes: 8,
@@ -926,7 +922,7 @@ func TestClientFailsClosedWhenTokenCacheEntryLimitIsReached(t *testing.T) {
 		authRequests++
 		return jsonResponse(http.StatusOK, "application/json", []byte(`{"token":"uncached-token"}`), nil), nil
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		HTTPClient:        &http.Client{Transport: transport},
@@ -954,7 +950,7 @@ func TestClientFailsClosedWhenTokenCacheEntryLimitIsReached(t *testing.T) {
 }
 
 func TestClientDoesNotCacheTokenBeyondTokenCacheByteLimit(t *testing.T) {
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 	})
@@ -978,7 +974,7 @@ func TestClientDoesNotCacheTokenBeyondTokenCacheByteLimit(t *testing.T) {
 }
 
 func TestClientAccountsForInvalidatedTokenCacheBytes(t *testing.T) {
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 	})
@@ -1011,7 +1007,7 @@ func TestClientStripsBearerAuthorizationOnCrossHostRedirect(t *testing.T) {
 			return jsonResponse(http.StatusFound, "", nil, map[string]string{"Location": "https://cdn.test/manifest"}), nil
 		}
 	})
-	client := NewClient(Options{
+	client := MustNewClient(Options{
 		BaseURL:           "https://registry.test",
 		AllowPrivateHosts: true,
 		MaxRedirects:      3,

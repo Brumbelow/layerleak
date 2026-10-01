@@ -147,7 +147,7 @@ func TestScanMultiArchImage(t *testing.T) {
 
 	limitedResult, limitedErr := Scan(context.Background(), Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},
@@ -161,7 +161,7 @@ func TestScanMultiArchImage(t *testing.T) {
 	progressUpdates := make([]ProgressUpdate, 0)
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -370,7 +370,7 @@ func TestScanReturnsUnderlyingManifestFailureWhenAllSelectedManifestsFail(t *tes
 
 	_, err = Scan(context.Background(), Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -446,7 +446,7 @@ func TestScanReturnsPartialResultWhenConfigLimitExceededAfterCompletedManifest(t
 
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -511,7 +511,7 @@ func TestScanReturnsEmptyPartialResultWhenConfigLimitExceededBeforeAnyManifestCo
 
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -593,7 +593,7 @@ func TestScanPreservesMetadataFindingsWhenLayerLimitsExceeded(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := Scan(context.Background(), Request{
 				Reference: ref,
-				Registry: registry.NewClient(registry.Options{
+				Registry: registry.MustNewClient(registry.Options{
 					BaseURL:           "https://registry.test",
 					AllowPrivateHosts: true,
 					HTTPClient: &http.Client{
@@ -700,7 +700,7 @@ func TestScanPreservesBlobDeadlineWhenParentContextIsLive(t *testing.T) {
 	parentCtx := context.Background()
 	result, err := Scan(parentCtx, Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			RequestAttempts:   1,
@@ -761,7 +761,7 @@ func TestScanPreservesConfigDeadlineWhenParentContextIsLive(t *testing.T) {
 	parentCtx := context.Background()
 	result, err := Scan(parentCtx, Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},
@@ -824,7 +824,7 @@ func TestScanMaxFindingsStopsBeforeNextPlatformAtExactBoundary(t *testing.T) {
 	}
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},

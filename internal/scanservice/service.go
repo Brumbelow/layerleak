@@ -3,6 +3,7 @@ package scanservice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -69,7 +70,7 @@ type Service struct {
 	store             storage.Store
 	now               func() time.Time
 	detectors         detectors.Set
-	newRegistryClient func(registry.Options) *registry.Client
+	newRegistryClient func(registry.Options) (*registry.Client, error)
 }
 
 func New(cfg config.Config, store storage.Store) *Service {
@@ -86,10 +87,15 @@ func New(cfg config.Config, store storage.Store) *Service {
 }
 
 func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, error) {
+	registryClient, err := s.registryClient(request.Reference)
+	if err != nil {
+		configErr := fmt.Errorf("configure registry client: %w", err)
+		return Outcome{ScanError: configErr}, wrapScanError(configErr)
+	}
 	result, scanErr := jobs.Scan(ctx, jobs.Request{
 		Reference:            request.Reference,
 		Platform:             request.Platform,
-		Registry:             s.registryClient(request.Reference),
+		Registry:             registryClient,
 		Detectors:            s.detectors,
 		Logger:               request.Logger,
 		MaxFileBytes:         s.config.MaxFileBytes,
@@ -156,7 +162,7 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	return outcome, wrapScanError(scanErr)
 }
 
-func (s *Service) registryClient(ref manifest.Reference) *registry.Client {
+func (s *Service) registryClient(ref manifest.Reference) (*registry.Client, error) {
 	baseURL := s.config.RegistryBaseURL
 	if baseURL == "" {
 		baseURL = registry.BaseURLForRegistry(ref.Registry)

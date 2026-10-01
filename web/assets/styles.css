@@ -434,6 +434,9 @@ pre,
 
 .docs-content {
   display: grid;
+  /* minmax(0, 1fr): a long code line scrolls inside its pre instead of
+     widening the column past the viewport. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.1rem;
 }
 
@@ -940,6 +943,7 @@ pre,
   margin: 0;
   padding: 0.4rem 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.45rem;
 }
 
@@ -961,6 +965,7 @@ pre,
   padding: 0;
   border-radius: 0;
   display: inline;
+  overflow-wrap: anywhere;
 }
 
 .verb {
@@ -987,6 +992,76 @@ pre,
   background: rgba(193, 79, 43, 0.1);
   color: var(--accent-deep);
   border: 1px solid rgba(193, 79, 43, 0.25);
+}
+
+/* Reference tables scroll inside their own frame on narrow screens, so the
+   page itself never scrolls sideways. */
+.docs-page .table-shell {
+  padding: 0;
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.docs-page .table-shell:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.docs-page .table-shell table {
+  width: 100%;
+  min-width: 34rem;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.docs-page .table-shell caption {
+  padding: 0.7rem 0.8rem 0.35rem;
+  text-align: left;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.docs-page .table-shell th,
+.docs-page .table-shell td {
+  padding: 0.5rem 0.8rem;
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+
+.docs-page .table-shell th {
+  color: var(--ink);
+}
+
+.docs-page .table-shell td:first-child code {
+  white-space: nowrap;
+}
+
+/* On a phone the variable names wrap so the purpose column keeps a
+   readable width inside the scrolling frame. */
+@media (max-width: 720px) {
+  .docs-page .table-shell table {
+    min-width: 0;
+  }
+
+  .docs-page .table-shell th,
+  .docs-page .table-shell td {
+    padding: 0.45rem 0.5rem;
+  }
+
+  .docs-page .table-shell td:first-child {
+    width: 34%;
+  }
+
+  .docs-page .table-shell td code,
+  .docs-page .table-shell td:first-child code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 .docs-page .callout {
@@ -1053,13 +1128,46 @@ pre,
   .table-wrap th {
     background: #222b35;
   }
+
+  /* Panels use fixed light fills in the light scheme; give them the dark
+     paper so light ink stays readable. */
+  .hero-card,
+  .feature-panel,
+  .terminal-shell,
+  .table-shell,
+  .doc-block,
+  .callout,
+  .stat-card,
+  .card,
+  .docs-nav,
+  .docs-status-strip,
+  .docs-page .docs-nav,
+  .docs-page .doc-block,
+  .docs-page .table-shell,
+  .docs-grid article,
+  .api-list li,
+  .table-wrap,
+  .layer-stack span,
+  .command-chip,
+  .button-secondary,
+  .nav-link.is-active {
+    background: var(--paper-strong);
+  }
+
+  .docs-page .callout {
+    background: rgba(79, 184, 168, 0.1);
+  }
+
+  .docs-page .callout.callout-warn {
+    background: var(--warn-soft);
+  }
 }
 
 @media (max-width: 1024px) {
   .hero,
   .docs-shell,
   .docs-hero {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .docs-nav {
@@ -1114,7 +1222,7 @@ pre,
   .stat-grid,
   .docs-status-strip,
   .docs-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .docs-hero {

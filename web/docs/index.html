@@ -6,7 +6,7 @@
     <title>layerleak docs</title>
     <meta
       name="description"
-      content="Install, operate, and deploy layerleak, a daemonless OCI image secret scanner."
+      content="Install, run, and deploy layerleak, a daemonless OCI image secret scanner for registries and local image layouts."
     >
     <link rel="stylesheet" href="../assets/styles.css">
     <script defer src="../assets/site.js"></script>
@@ -33,28 +33,30 @@
         <section class="docs-hero">
           <div class="docs-hero-copy">
             <span class="site-kicker">Operator notes</span>
-            <h1>Scan public OCI images without a daemon.</h1>
+            <h1>Scan OCI images for secrets without a daemon.</h1>
             <p>
-              layerleak reads registry manifests, image config, build history, and decompressed
-              filesystem layers directly. It is read-only, runs as a single Go binary, and keeps
-              actionable findings separated from likely test fixtures and example placeholders.
+              layerleak reads manifests, image config, build history, and decompressed filesystem
+              layers directly from a registry or from a local OCI layout or <code>docker save</code>
+              archive. It is read-only, verifies every blob against its OCI digest, reports
+              incomplete coverage instead of hiding it, and keeps actionable findings separate from
+              likely test fixtures and placeholders. Values are always redacted in its output.
             </p>
             <div class="button-row">
               <a class="button-primary" href="#quickstart">Install</a>
-              <a class="button-secondary" href="demo/">Open simulated demo</a>
+              <a class="button-secondary" href="demo/">Open the demo replay</a>
             </div>
             <p class="muted">
               This copy documents the 3.0.0 line on the
               <code>github.com/brumbelow/layerleak/v3</code> module path. The changelog and OpenAPI
               version are frozen at 3.0.0 so an accepted release candidate can be promoted from the
-              same source commit.
+              same source commit; a release command shown here works once that tag is published.
             </p>
           </div>
 
-          <div class="layer-map" role="img" aria-label="layerleak scan flow: registry manifest and config feed layer extraction, then redacted JSON output and optional Postgres persistence">
+          <div class="layer-map" role="img" aria-label="layerleak scan flow: a registry or local image source feeds digest-verified layer replay, then redacted output, one scan record per scan, and optional Postgres persistence">
             <div class="layer-node registry">
               <span>input</span>
-              <strong>registry manifest + config</strong>
+              <strong>registry · oci: layout · docker save</strong>
             </div>
             <div class="layer-rail" aria-hidden="true"></div>
             <div class="layer-stack" aria-hidden="true">
@@ -65,7 +67,7 @@
             </div>
             <div class="layer-node findings">
               <span>output</span>
-              <strong>redacted JSON · optional Postgres</strong>
+              <strong>summary · JSON · SARIF · scan record</strong>
             </div>
           </div>
         </section>
@@ -73,10 +75,10 @@
         <section class="docs-status-strip" aria-label="Project facts">
           <div>
             <span>Install</span>
-            <strong>github.com/brumbelow/layerleak/v3@latest</strong>
+            <strong>signed release archive · go install …/v3</strong>
           </div>
           <div>
-            <span>Runtime</span>
+            <span>Build from source</span>
             <strong>Go 1.27.1+</strong>
           </div>
           <div>
@@ -108,32 +110,92 @@
                 <span>01</span>
                 <h2>Quickstart</h2>
               </div>
+              <h3 class="schema-heading">Download a release archive</h3>
               <p>
-                The <code>/v3</code> module path is the supported CLI entrypoint. Install from there or
-                build the checkout, then
-                scan a public image reference. <code>GOBIN</code> or <code>GOPATH/bin</code> must be
-                on <code>PATH</code> after <code>go install</code>.
+                Every release attaches prebuilt CLI archives, so no Go toolchain is needed:
+                <code>layerleak_&lt;version&gt;_&lt;os&gt;_&lt;arch&gt;.tar.gz</code> for
+                <code>linux</code> and <code>darwin</code> on <code>amd64</code> and
+                <code>arm64</code>, and <code>layerleak_&lt;version&gt;_windows_amd64.zip</code>.
+                The <code>layerleak_&lt;version&gt;_checksums.txt</code> file is signed keylessly by
+                the release workflow and every archive carries a build-provenance attestation.
+                Verify before you run:
               </p>
+              <pre><code>version=v3.0.0
+archive="layerleak_${version}_linux_amd64.tar.gz"
+checksums="layerleak_${version}_checksums.txt"
+base="https://github.com/brumbelow/layerleak/releases/download/${version}"
+curl --fail --location --proto '=https' --tlsv1.2 --remote-name-all \
+  "${base}/${archive}" "${base}/${checksums}" "${base}/${checksums}.sigstore.json"
+
+sha256sum --check --ignore-missing "${checksums}"
+cosign verify-blob \
+  --bundle "${checksums}.sigstore.json" \
+  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${checksums}"
+gh attestation verify "${archive}" --repo Brumbelow/layerleak \
+  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+
+tar -xzf "${archive}" layerleak
+./layerleak version</code></pre>
+              <p>
+                <code>layerleak version</code> prints the version, commit, build time, Go version,
+                and platform (<code>--format json</code> for the same as JSON);
+                <code>layerleak --version</code> prints the first line only.
+              </p>
+
+              <h3 class="schema-heading">GitHub Action</h3>
+              <p>
+                The repository root is a composite action that downloads the archive for the
+                runner, verifies its checksum, the checksums file's cosign bundle, and the archive
+                attestation, then runs <code>layerleak scan</code> with <code>--no-artifacts</code>.
+                Pin it to a release tag; the matching archive is downloaded from that release.
+              </p>
+              <pre><code>name: Image secrets
+on: { push: { branches: [main] } }
+permissions: { contents: read, security-events: write }
+jobs:
+  layerleak:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: scan
+        uses: brumbelow/layerleak@v3.0.0
+        with: { image: "ghcr.io/${{ github.repository }}:${{ github.sha }}", fail-on: none }
+      - uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        if: ${{ always() &amp;&amp; steps.scan.outputs.sarif-file != '' }}
+        with: { sarif_file: "${{ steps.scan.outputs.sarif-file }}" }</code></pre>
+              <p>
+                Inputs are <code>image</code> (required), <code>version</code>,
+                <code>format</code> (default <code>sarif</code>), <code>fail-on</code> (default
+                <code>low</code>), <code>allow-partial</code>, <code>platform</code>,
+                <code>output-file</code>, and <code>extra-args</code>; outputs are
+                <code>exit-code</code>, <code>result-file</code>, <code>sarif-file</code>, and
+                <code>version</code>. The
+                step fails exactly when the CLI exits non-zero. See the
+                <a href="https://github.com/brumbelow/layerleak#github-action">README action reference</a>
+                for every input.
+              </p>
+
+              <h3 class="schema-heading">Go install or source build</h3>
               <pre><code>go install github.com/brumbelow/layerleak/v3@latest
-layerleak --help
-layerleak scan library/nginx:latest --format json</code></pre>
-              <p>
-                Source builds use the same module:
-              </p>
+layerleak version
+layerleak scan library/nginx:1.29 --format json</code></pre>
               <pre><code>git clone https://github.com/brumbelow/layerleak.git
 cd layerleak
 go build -o layerleak .
-./layerleak scan alpine:latest --platform linux/amd64</code></pre>
+./layerleak scan alpine:3.20 --platform linux/amd64</code></pre>
               <p class="muted">
-                To pin a published release, replace <code>@latest</code> with the
-                <code>v3.x.y</code> tag you want. The module path is
-                <code>github.com/brumbelow/layerleak/v3</code>; the root path without
+                Building needs Go 1.27.1 or newer, and <code>GOBIN</code> or
+                <code>GOPATH/bin</code> must be on <code>PATH</code> after <code>go install</code>.
+                Pin a release with <code>@v3.0.0</code> instead of <code>@latest</code>. The module
+                path is <code>github.com/brumbelow/layerleak/v3</code>; the root path without
                 <code>/v3</code> stays at <code>v1.0.0</code> forever, so always include the suffix.
-                A command such as <code>go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1</code>
-                becomes available only after that tag is published, and the installed binary is still
-                named <code>layerleak</code>. Module-installed binaries report that version through
-                <code>layerleak --version</code>; local checkout builds report the version Go embeds
-                for the checkout, falling back to <code>dev</code> when no module version is available.
+                The binary is still named <code>layerleak</code>. Module-installed binaries report
+                the resolved module version; checkout builds report a VCS-derived development
+                version, or <code>dev</code> without VCS information. The CLI runs on Linux, macOS,
+                and Windows on amd64 and arm64; the API image supports <code>linux/amd64</code> and
+                <code>linux/arm64</code>.
               </p>
             </section>
 
@@ -143,44 +205,180 @@ go build -o layerleak .
                 <h2>Scan model</h2>
               </div>
               <p>
-                layerleak supports public images on OCI-compatible registries including Docker Hub,
-                GHCR, Quay, GCR, MCR, Amazon ECR Public, and self-hosted registries. It does not
-                require a local Docker daemon and does not verify discovered secrets.
+                layerleak resolves images on Docker Hub, GHCR, Quay, GCR, MCR, Amazon ECR Public, and
+                other OCI-compatible registries, and reads local image layouts and archives. It does
+                not need a Docker daemon and does not check whether a detected credential is live.
               </p>
               <div class="docs-grid">
                 <article>
                   <h3>Single image</h3>
-                  <p>Use a tag or digest when the target scope should stay narrow.</p>
-                  <pre><code>layerleak scan mongo:latest
-layerleak scan repo/app@sha256:...</code></pre>
+                  <p>A bare repository scans its <code>latest</code> tag. Use a tag or digest for an immutable target.</p>
+                  <pre><code>layerleak scan ubuntu
+layerleak scan alpine@sha256:&lt;digest&gt;
+layerleak scan ghcr.io/homebrew/core/hello:latest</code></pre>
                 </article>
                 <article>
                   <h3>Repository sweep</h3>
-                  <p>A bare repository scans <code>latest</code>. Add <code>--all-tags</code> to explicitly enumerate public tags, resolve each one to a digest, and group duplicate digests.</p>
-                  <pre><code>layerleak scan mongo
-layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
+                  <p><code>--all-tags</code> explicitly enumerates the public tags of a bare repository, resolves each to a digest, and scans each distinct digest once.</p>
+                  <pre><code>layerleak scan mongo --all-tags \
+  --max-repository-tags 500 \
+  --max-repository-targets 200</code></pre>
+                </article>
+                <article>
+                  <h3>Local image</h3>
+                  <p>Images that were never pushed are read from the filesystem. The CLI only: the HTTP API rejects these references.</p>
+                  <pre><code>layerleak scan oci:./build/image:1.2
+layerleak scan oci-archive:app.tar:app:1.2
+layerleak scan docker-archive:save.tar:app:1.2</code></pre>
+                </article>
+                <article>
+                  <h3>Private registry</h3>
+                  <p>The password or token is read from standard input; there is no <code>--password</code> flag.</p>
+                  <pre><code>printf '%s' "$REGISTRY_TOKEN" | layerleak scan \
+  ghcr.io/org/private-app:1.2 \
+  --username robot --password-stdin</code></pre>
                 </article>
               </div>
+
+              <h3 class="schema-heading">Platforms</h3>
               <p>
-                Multi-arch indexes can be narrowed with
-                <code>--platform os/arch[/variant]</code>. Attestation and provenance manifests
-                (for example <code>application/vnd.in-toto+json</code>) are skipped instead of
-                counted as platform scan failures.
+                Without <code>--platform</code>, every <code>linux</code> manifest of a
+                multi-platform index (and every manifest that names no operating system) is
+                scanned. Manifests for other operating systems are not downloaded and are reported
+                as <code>platform_skipped</code> diagnostics. Index entries that are not image
+                manifests are never scanned and are reported as <code>manifest_skipped</code>:
+                BuildKit attestation manifests (annotated
+                <code>vnd.docker.reference.type: attestation-manifest</code>), manifests that
+                declare an <code>artifactType</code> such as <code>application/vnd.in-toto+json</code>,
+                <code>unknown/unknown</code> platform entries, nested indexes, and descriptors of
+                any other media type. Skipped entries do not fail the scan.
               </p>
               <p>
-                Repository sweeps accept per-command scope flags that override the matching
-                environment variables: <code>--tag-page-size</code> for tag-list page size,
-                <code>--max-repository-tags</code> to cap how many tags are enumerated, and
-                <code>--max-repository-targets</code> to cap how many distinct digests are
-                resolved. <code>--max-repository-tags</code> and
-                <code>--max-repository-targets</code> accept <code>0</code> to disable the cap;
-                <code>--tag-page-size</code> must be greater than zero. These flags are
-                non-interactive and safe for automation.
+                <code>--platform os[/arch[/variant]]</code> selects platforms explicitly; omitted
+                parts match anything and variants are normalised like containerd, so
+                <code>--platform linux</code> selects every Linux manifest and
+                <code>linux/arm64/v8</code> equals <code>linux/arm64</code>. With a selector,
+                non-matching entries are left out without a diagnostic, and a single-manifest image
+                whose config does not match fails with <code>platform_not_found</code>. A selected
+                manifest whose layers are foreign or non-distributable (Windows base layers) or use
+                an unknown media type is reported as <code>manifest_unsupported</code>: that
+                platform fails, the others still run, and the result is <code>partial</code>.
+              </p>
+
+              <h3 class="schema-heading">Local inputs</h3>
+              <div class="table-shell" role="region" aria-label="Local image reference forms" tabindex="0">
+                <table>
+                  <thead>
+                    <tr><th scope="col">Reference</th><th scope="col">Source</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>oci:&lt;dir&gt;[:&lt;tag&gt;][@&lt;digest&gt;]</code></td><td>An OCI image layout directory (<code>oci-layout</code>, <code>index.json</code>, <code>blobs/</code>), as written by <code>buildx --output type=oci</code>, <code>skopeo copy ... oci:</code>, or <code>crane pull --format oci</code>.</td></tr>
+                    <tr><td><code>oci-archive:&lt;file.tar&gt;[:&lt;tag&gt;][@&lt;digest&gt;]</code></td><td>The same layout inside a tar archive (<code>buildx --output type=oci,dest=...</code>, <code>skopeo copy ... oci-archive:</code>).</td></tr>
+                    <tr><td><code>docker-archive:&lt;file.tar&gt;[:&lt;repo&gt;[:&lt;tag&gt;]][@&lt;digest&gt;]</code></td><td>A <code>docker save</code> archive (<code>manifest.json</code>, config and layer tars, optional <code>repositories</code>).</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>
+                The path is absolute or relative to the working directory and ends at the first
+                colon (a Windows drive letter stays in the path). The tag is the
+                <code>org.opencontainers.image.ref.name</code> annotation (for <code>oci:</code> and
+                <code>oci-archive:</code>) or the <code>docker save</code> <code>RepoTags</code> name,
+                and an image name matches in any spelling that normalises to it. A source holding
+                several images needs a tag or <code>@&lt;digest&gt;</code>; <code>--all-tags</code>
+                enumerates the tags the source holds. The source string becomes the
+                <code>repository</code> (<code>oci:/srv/images/app</code>) and the stored registry
+                is <code>local</code>. Every blob is verified against its descriptor digest and
+                size, archives are indexed in memory and never extracted, links inside archives are
+                never followed, and registry credentials are refused for a local source (exit
+                <code>1</code>).
+              </p>
+
+              <h3 class="schema-heading">Private registries and egress</h3>
+              <p>
+                <code>--username &lt;name&gt; --password-stdin</code> supplies a credential for one
+                scan; both flags are required together and exactly one trailing newline is removed
+                from standard input. Without the flags, the CLI applies the
+                <code>LAYERLEAK_REGISTRY_USERNAME</code>/<code>LAYERLEAK_REGISTRY_PASSWORD</code>
+                pair to the registry of the reference on the command line. The API applies that pair
+                only when <code>LAYERLEAK_REGISTRY_BASE_URL</code> pins the registry endpoint, so a
+                caller can never make the server send the operator's credential to a registry the
+                caller names. <code>LAYERLEAK_DOCKER_CONFIG</code> names a Docker
+                <code>config.json</code> whose <code>auths</code> entries supply credentials by
+                registry host in both; credential helpers are not invoked and
+                <code>~/.docker/config.json</code> is never read implicitly. A credential is bound to
+                the one registry host it was given for, is sent only over https, and never appears in
+                logs, output, scan records, or the database. A <code>401</code> or <code>403</code>
+                exits <code>1</code> with <code>authentication to &lt;registry host&gt; failed</code>.
               </p>
               <p>
-                Detection uses Layerleak's native detector set. Findings on paths that look like
-                tests, fixtures, examples, specs, or e2e suites are kept as suppressed findings
-                rather than counted as actionable.
+                <code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, and <code>NO_PROXY</code> are
+                honoured. When a proxy is selected for a request, the registry hostname is sent as
+                the <code>CONNECT</code> target and local DNS resolution and IP pinning are skipped,
+                because the proxy is the egress control; the https-only rule and the private-host
+                allowlists still apply. Hosts matched by <code>NO_PROXY</code> are connected
+                directly with address pinning. <code>LAYERLEAK_REGISTRY_BASE_URL</code> is not a
+                proxy setting: it replaces the registry endpoint for every scan (a pull-through
+                mirror or an alternate registry). Private, loopback, link-local, and other
+                non-public destinations are blocked unless their exact <code>host[:port]</code> is
+                listed in <code>LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS</code> or
+                <code>LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS</code>; allowlisting a host is also what
+                permits plain <code>http://</code> to it.
+              </p>
+
+              <h3 class="schema-heading">What is scanned</h3>
+              <ul class="config-notes">
+                <li>
+                  <strong>Filesystem.</strong> Regular files in the final filesystem
+                  (<code>file_final</code>) and earlier versions of files that a later layer
+                  deleted or overwrote (<code>file_deleted_layer</code>), reconstructed layer by
+                  layer with whiteouts.
+                  Files with a UTF-16 byte-order mark or shape are transcoded to UTF-8 first.
+                  Binary files are excluded; files over <code>LAYERLEAK_MAX_FILE_BYTES</code> are
+                  skipped with a <code>files_skipped_oversize</code> diagnostic and coverage
+                  becomes partial.
+                </li>
+                <li>
+                  <strong>Nested archives.</strong> A zip, jar, war, wheel, egg, gzip, or tar file
+                  inside a layer is expanded one level in memory and its entries are reported under
+                  <code>outer/path!inner/path</code>. An archive inside a nested archive is never
+                  opened; anything beyond a bound is a <code>nested_archive_skipped</code>
+                  diagnostic and coverage stays complete.
+                </li>
+                <li>
+                  <strong>Image metadata.</strong> Config environment variables
+                  (<code>env</code>), labels (<code>label</code>), build history commands,
+                  comments, and authors (<code>history</code>), and other config fields such as the
+                  command, entrypoint, user, and working directory (<code>config</code>).
+                </li>
+                <li>
+                  <strong>Unreadable sensitive files.</strong> A binary or oversize file whose path
+                  marks a private key, keystore, password database, credential store, or GPG keyring
+                  is reported by path alone under the <code>sensitive_file_*</code> identifiers,
+                  with an empty <code>redacted_value</code> and <code>context_snippet</code> and
+                  zero offsets.
+                </li>
+                <li>
+                  <strong>Placeholders.</strong> Matches that look like test fixtures, examples,
+                  or placeholders (test and example paths, placeholder markers, known dummy values,
+                  example hosts, well-known default credentials) are reported as suppressed
+                  findings with disposition <code>example</code> and a
+                  <code>disposition_reason</code>, and do not count as actionable.
+                </li>
+              </ul>
+              <p>
+                Detection uses a compiled, read-only catalog of 161 detector identifiers; there is
+                no rule file or custom-rule syntax. <code>layerleak detectors list</code> prints
+                each identifier with its confidence tier, matching strategy, and description
+                (<code>--format json</code> for JSON), and the same data is published as the
+                <a href="https://github.com/Brumbelow/layerleak/blob/main/docs/detectors.md">detector catalog</a>.
+              </p>
+              <p>
+                Repository sweeps accept <code>--tag-page-size</code>,
+                <code>--max-repository-tags</code>, and <code>--max-repository-targets</code>, which
+                override the matching environment variables for one command.
+                <code>--max-repository-tags</code> and <code>--max-repository-targets</code> accept
+                <code>0</code> to disable the cap; <code>--tag-page-size</code> must be greater than
+                zero.
               </p>
             </section>
 
@@ -190,82 +388,129 @@ layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
                 <h2>Configuration</h2>
               </div>
               <p>
-                Every setting is an environment variable with a safe default; the process never
-                reads a <code>.env</code> file itself. <code>.env.example</code> in the repository
-                lists all of them with their defaults, and the
+                Every setting is an environment variable with a safe default; no process reads a
+                <code>.env</code> file itself. <code>.env.example</code> in the repository lists them
+                with their defaults and the
                 <a href="https://github.com/brumbelow/layerleak#configuration">README configuration tables</a>
-                document each one. A test keeps the example, the Compose defaults and the tables in
-                lockstep. The most common knobs:
+                are the reference; the tables below carry the same rows. Durations use Go syntax
+                (<code>30s</code>, <code>10m</code>, <code>1h</code>). Booleans accept
+                <code>1</code>, <code>true</code>, <code>yes</code>, <code>on</code> and
+                <code>0</code>, <code>false</code>, <code>no</code>, <code>off</code>. Rows marked
+                <strong>must be positive</strong> reject <code>0</code>; every other
+                <code>MAX_*</code> bound accepts <code>0</code> to disable it. Exceeding a bound never
+                truncates silently: the scan becomes <code>partial</code> or <code>failed</code> and a
+                diagnostic names the bound.
               </p>
-              <div class="table-shell">
+              <div class="table-shell" role="region" aria-label="Core and registry variables" tabindex="0">
                 <table>
+                  <caption>Core and registry</caption>
                   <thead>
                     <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
                   </thead>
                   <tbody>
-                    <tr><td><code>LAYERLEAK_LOG_LEVEL</code></td><td><code>info</code></td><td><code>debug</code>, <code>info</code>, <code>warn</code>, or <code>error</code>.</td></tr>
-                    <tr><td><code>LAYERLEAK_LOG_FORMAT</code></td><td><code>json</code></td><td>Log record encoding on stderr for the CLI and the API: <code>json</code> or <code>text</code>.</td></tr>
-                    <tr><td><code>LAYERLEAK_FINDINGS_DIR</code></td><td>auto</td><td>CLI only: where scan records are saved.</td></tr>
-                    <tr><td><code>LAYERLEAK_DATABASE_URL</code></td><td>empty</td><td>PostgreSQL URL for persistent CLI mode and the API; the password may come from <code>PGPASSWORD</code>.</td></tr>
-                    <tr><td><code>LAYERLEAK_PERSIST_RAW_SECRETS</code></td><td><code>0</code></td><td>Unsafe opt-in that stores raw values in PostgreSQL.</td></tr>
+                    <tr><td><code>LAYERLEAK_LOG_LEVEL</code></td><td><code>info</code></td><td><code>debug</code>, <code>info</code>, <code>warn</code>, or <code>error</code> (case-insensitive); any other spelling is rejected.</td></tr>
+                    <tr><td><code>LAYERLEAK_LOG_FORMAT</code></td><td><code>json</code></td><td>Log record encoding on stderr for the CLI and the API: <code>json</code> (one object per line, safe for log shippers) or <code>text</code> (<code>key=value</code> records for a terminal); case-insensitive, anything else is rejected. The CLI flag <code>--log-format</code> overrides it for one scan.</td></tr>
+                    <tr><td><code>LAYERLEAK_FINDINGS_DIR</code></td><td><code>./findings</code></td><td>CLI only. Directory for scan records (one JSON file per scan); relative values resolve against the working directory. <code>--output-dir</code> overrides it, <code>--no-artifacts</code> skips it.</td></tr>
+                    <tr><td><code>LAYERLEAK_PERSIST_RAW_SECRETS</code></td><td><code>0</code></td><td>Boolean. Unsafe opt-in for raw values and snippets.</td></tr>
+                    <tr><td><code>LAYERLEAK_HTTP_TIMEOUT</code></td><td><code>30s</code></td><td>Per-attempt deadline for manifest, config, tag, and auth requests and for the response headers of blob requests; also bounds dial and TLS handshake.</td></tr>
+                    <tr><td><code>LAYERLEAK_BLOB_TIMEOUT</code></td><td><code>10m</code></td><td>Layer blob transfer deadline.</td></tr>
                     <tr><td><code>LAYERLEAK_SCAN_TIMEOUT</code></td><td><code>30m</code></td><td>End-to-end CLI scan deadline.</td></tr>
-                    <tr><td><code>LAYERLEAK_HTTP_TIMEOUT</code></td><td><code>30s</code></td><td>Per-attempt deadline for manifest, config, tag, and auth requests.</td></tr>
-                    <tr><td><code>LAYERLEAK_BLOB_TIMEOUT</code></td><td><code>10m</code></td><td>Deadline for one layer transfer.</td></tr>
-                    <tr><td><code>LAYERLEAK_MAX_FILE_BYTES</code></td><td><code>1048576</code></td><td>Largest file scanned; bigger files are skipped and coverage becomes partial.</td></tr>
-                    <tr><td><code>LAYERLEAK_MAX_LAYER_BYTES</code></td><td><code>536870912</code></td><td>Decompressed bytes allowed per layer.</td></tr>
-                    <tr><td><code>LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES</code></td><td><code>67108864</code></td><td>Largest archive inside a layer (zip/jar/whl, gzip, tar) expanded one level deep, and the most bytes decompressed out of it; <code>0</code> disables nested expansion.</td></tr>
-                    <tr><td><code>LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES</code></td><td><code>10000</code></td><td>Entries examined per nested archive; <code>0</code> lifts this bound.</td></tr>
-                    <tr><td><code>LAYERLEAK_MAX_LAYER_CACHE_BYTES</code></td><td><code>0</code></td><td>Memory for the <code>--all-tags</code> layer cache (metadata of layers without findings, so shared layers are fetched once per sweep); <code>0</code> disables it. Results are identical either way.</td></tr>
-                    <tr><td><code>LAYERLEAK_MAX_FINDINGS_PER_SCAN</code></td><td><code>10000</code></td><td>Findings retained for one scan.</td></tr>
-                    <tr><td><code>LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS</code></td><td>empty</td><td>Exact <code>host[:port]</code> allowlist for private registries.</td></tr>
-                    <tr><td><code>LAYERLEAK_API_ADDR</code></td><td><code>127.0.0.1:8080</code></td><td>API listen address; the image defaults to <code>0.0.0.0:8080</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS</code></td><td><code>2</code></td><td>Attempts including the first request; retries back off exponentially (jittered, at most 5s) or honour <code>Retry-After</code> (at most 30s); must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_REGISTRY_MAX_REDIRECTS</code></td><td><code>3</code></td><td>Redirect cap; each destination is revalidated; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_AUTH_RESPONSE_BYTES</code></td><td><code>1048576</code></td><td>Maximum registry token response size; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS</code></td><td>empty</td><td>Comma-separated exact private registry <code>host[:port]</code> allowlist.</td></tr>
+                    <tr><td><code>LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS</code></td><td>empty</td><td>Comma-separated exact private auth <code>host[:port]</code> allowlist.</td></tr>
+                    <tr><td><code>LAYERLEAK_REGISTRY_BASE_URL</code></td><td>empty</td><td>Registry endpoint override for a pull-through mirror or alternate registry; validated at startup. Use <code>HTTPS_PROXY</code> for forward proxies.</td></tr>
+                    <tr><td><code>LAYERLEAK_REGISTRY_AUTH_URL</code></td><td>empty</td><td>Token endpoint override matching the registry override; validated at startup.</td></tr>
+                    <tr><td><code>LAYERLEAK_REGISTRY_USERNAME</code></td><td>empty</td><td>Registry username; requires <code>LAYERLEAK_REGISTRY_PASSWORD</code>. The CLI applies the pair to the registry of the scanned reference when <code>--username</code> is not given; the API applies it only to the registry pinned by <code>LAYERLEAK_REGISTRY_BASE_URL</code>, never to a registry a caller names. Sent only to that one host, over https.</td></tr>
+                    <tr><td><code>LAYERLEAK_REGISTRY_PASSWORD</code></td><td>empty</td><td>Password or access token paired with <code>LAYERLEAK_REGISTRY_USERNAME</code>; never logged, persisted, or sent to any other host.</td></tr>
+                    <tr><td><code>LAYERLEAK_DOCKER_CONFIG</code></td><td>empty</td><td>Path to a Docker <code>config.json</code> whose <code>auths</code> entries supply credentials by registry host (<code>auth</code> or <code>username</code>/<code>password</code> fields; Docker Hub aliases resolve). Credential helpers are not invoked. Must be a regular file; blank skips Docker configuration.</td></tr>
                   </tbody>
                 </table>
               </div>
-              <ul class="config-notes">
-                <li>
-                  <strong>Limits.</strong> Every <code>MAX_*</code> bound accepts <code>0</code> to
-                  disable it except <code>MAX_FILE_BYTES</code> and
-                  <code>MAX_AUTH_RESPONSE_BYTES</code>, which must be positive, as must the
-                  page size, attempt, redirect, concurrency, request-body, and connection-pool
-                  settings. Exceeding a bound never truncates silently: the scan becomes
-                  <code>partial</code> or <code>failed</code> and a diagnostic names the bound.
-                </li>
-                <li>
-                  <strong>Timeouts.</strong> Durations use Go syntax (<code>30s</code>,
-                  <code>2m</code>, <code>1h</code>). <code>LAYERLEAK_HTTP_TIMEOUT</code> applies to
-                  each attempt of a manifest, config, tag, or auth request and to the response
-                  headers of a blob request; <code>LAYERLEAK_BLOB_TIMEOUT</code> bounds a whole
-                  layer transfer; <code>LAYERLEAK_SCAN_TIMEOUT</code> caps the CLI run.
-                </li>
-                <li>
-                  <strong>Proxies.</strong> <code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, and
-                  <code>NO_PROXY</code> are honoured. A proxied request sends the registry hostname
-                  as the <code>CONNECT</code> target and skips local DNS pinning because the proxy
-                  is the egress control; the https-only rule and the allowlists still apply.
-                </li>
-                <li>
-                  <strong>Registry overrides.</strong>
-                  <code>LAYERLEAK_REGISTRY_BASE_URL</code> and
-                  <code>LAYERLEAK_REGISTRY_AUTH_URL</code> are optional. Leave them unset unless
-                  pointing at a pull-through mirror or an alternate registry or auth endpoint;
-                  use <code>HTTPS_PROXY</code> for forward proxies.
-                </li>
-                <li>
-                  <strong>Private destinations.</strong> Private registry and auth hosts are blocked
-                  by default. Exact, kind-specific exceptions can be set with the two
-                  <code>ALLOWED_PRIVATE_*</code> lists; schemes, paths, credentials, and wildcards
-                  are rejected, and allowlisting a host is also what permits plain
-                  <code>http://</code> to it.
-                </li>
-                <li>
-                  <strong>Compose.</strong> <code>docker-compose.yml</code> adds its own
-                  <code>LAYERLEAK_IMAGE</code>, <code>LAYERLEAK_API_HOST</code>,
-                  <code>LAYERLEAK_API_PORT</code>, <code>LAYERLEAK_DB_NAME</code>,
-                  <code>LAYERLEAK_DB_USER</code>, and required <code>LAYERLEAK_DB_PASSWORD</code>;
-                  the example file ships the password empty on purpose.
-                </li>
-              </ul>
+              <div class="table-shell" role="region" aria-label="Resource bound variables" tabindex="0">
+                <table>
+                  <caption>Resource bounds</caption>
+                  <thead>
+                    <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>LAYERLEAK_MAX_FILE_BYTES</code></td><td><code>1048576</code></td><td>Maximum decompressed bytes buffered for one file; must be positive. Larger files are not scanned: they are reported with a <code>files_skipped_oversize</code> diagnostic and coverage becomes partial.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_LAYER_BYTES</code></td><td><code>536870912</code></td><td>Maximum decompressed stream bytes for one layer.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_LAYER_ENTRIES</code></td><td><code>50000</code></td><td>Maximum tar entries for one layer.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_IMAGE_LAYERS</code></td><td><code>512</code></td><td>Maximum layers selected for one image.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_IMAGE_MANIFESTS</code></td><td><code>64</code></td><td>Maximum platform manifests selected from one image index.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_IMAGE_LAYER_BYTES</code></td><td><code>4294967296</code></td><td>Aggregate advertised compressed and expanded layer bytes.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_IMAGE_ARTIFACTS</code></td><td><code>250000</code></td><td>Aggregate tar entry count across all selected layers, including directories, links, whiteouts, and device nodes.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_RETAINED_BYTES</code></td><td><code>1073741824</code></td><td>Bytes retained while reconstructing final state.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES</code></td><td><code>67108864</code></td><td>Per archive stored in a layer (zip/jar/war/whl/egg, gzip, tar): the largest archive buffered for one-level expansion and the most decompressed bytes read out of it. Entries are scanned under <code>outer/path!inner/path</code>; expansion is charged to its own copy of the layer and image byte and entry budgets, tracked separately from the layer stream, so one layer can process up to twice its configured byte budget. Anything beyond a bound is skipped and reported with a <code>nested_archive_skipped</code> diagnostic while coverage stays complete. <code>0</code> disables nested archive expansion entirely.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES</code></td><td><code>10000</code></td><td>Maximum entries examined per nested archive; the rest are skipped and reported. <code>0</code> disables this bound (the layer and image entry budgets still apply).</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_LAYER_CACHE_BYTES</code></td><td><code>0</code></td><td>Memory for the per-sweep layer cache used by <code>--all-tags</code>: a layer whose files held no findings is remembered by digest (entry metadata only, never file content) so tags sharing it do not fetch and replay it again. Results are identical with and without the cache; it trades memory for time and registry traffic. Layers with findings, nested archives or hardlinks into other layers are always re-fetched. The budget is a conservative estimate of heap use. <code>0</code> (the default) disables the cache.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_MANIFEST_BYTES</code></td><td><code>8388608</code></td><td>Maximum manifest response size.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_CONFIG_BYTES</code></td><td><code>8388608</code></td><td>Maximum image config response size.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_TAG_RESPONSE_BYTES</code></td><td><code>8388608</code></td><td>Maximum tag-list response page size.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_FINDINGS_PER_SCAN</code></td><td><code>10000</code></td><td>Maximum findings retained for one scan.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_RAW_FINDING_BYTES</code></td><td><code>67108864</code></td><td>Maximum raw value and context bytes retained when raw-secret persistence is enabled. Once reached, detection continues with raw retention disabled, coverage stays complete, and a <code>raw_retention_truncated</code> diagnostic reports how many findings were recorded without raw values.</td></tr>
+                    <tr><td><code>LAYERLEAK_TAG_PAGE_SIZE</code></td><td><code>100</code></td><td>Registry tag-list page size; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_REPOSITORY_TAGS</code></td><td><code>1000</code></td><td>Maximum tags enumerated by <code>--all-tags</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_REPOSITORY_TARGETS</code></td><td><code>250</code></td><td>Maximum distinct targets scanned by <code>--all-tags</code>.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="table-shell" role="region" aria-label="API and PostgreSQL variables" tabindex="0">
+                <table>
+                  <caption>API and PostgreSQL</caption>
+                  <thead>
+                    <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>LAYERLEAK_API_ADDR</code></td><td><code>127.0.0.1:8080</code></td><td>API listen address as <code>host:port</code> (the host may be empty, a hostname, or an IP); validated at startup; image default is <code>0.0.0.0:8080</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_MAX_REQUEST_BYTES</code></td><td><code>16384</code></td><td>Maximum JSON request body; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_SCAN_TIMEOUT</code></td><td><code>30m</code></td><td>Deadline for an API scan.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_MAX_CONCURRENT_SCANS</code></td><td><code>1</code></td><td>In-process scan concurrency; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_READ_HEADER_TIMEOUT</code></td><td><code>5s</code></td><td>HTTP header deadline.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_READ_TIMEOUT</code></td><td><code>15s</code></td><td>HTTP request read deadline.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT</code></td><td><code>30s</code></td><td>Non-scan response write deadline.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_IDLE_TIMEOUT</code></td><td><code>60s</code></td><td>Keep-alive idle timeout.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_SHUTDOWN_TIMEOUT</code></td><td><code>30s</code></td><td>How long shutdown waits for in-flight handlers after the drain window; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_PRESTOP_DELAY</code></td><td><code>0s</code></td><td>Drain window after <code>SIGTERM</code>/<code>SIGINT</code>: <code>/readyz</code> answers 503 <code>not_ready</code> and new scans are refused with 503 <code>server_shutting_down</code> while in-flight requests keep running; when it elapses, in-flight scans are cancelled with 503 <code>server_shutting_down</code>. May be <code>0s</code>. Keep <code>LAYERLEAK_API_STOP_GRACE_PERIOD</code> above this plus <code>LAYERLEAK_API_SHUTDOWN_TIMEOUT</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_READINESS_TIMEOUT</code></td><td><code>2s</code></td><td>Database readiness query deadline.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_READINESS_CACHE_TTL</code></td><td><code>5s</code></td><td>How long a <code>/readyz</code> result (success or failure) is reused before the ping and schema-contract validation run again; concurrent probes share one check. <code>0s</code> validates on every probe.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_BEARER_TOKENS</code></td><td>empty</td><td>Opt-in authentication: comma-separated bearer tokens, each at least 32 printable ASCII characters. When set, every <code>/api/</code> request needs <code>Authorization: Bearer &lt;token&gt;</code> (401 <code>unauthorized</code> otherwise); <code>/health</code>, <code>/livez</code> and <code>/readyz</code> stay open. Tokens are kept only as SHA-256 digests and compared in constant time. Mutually exclusive with <code>LAYERLEAK_API_BEARER_TOKENS_FILE</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_BEARER_TOKENS_FILE</code></td><td>empty</td><td>Path of a file with one bearer token per line (blank lines ignored, at most 64 KiB), read once at startup; the same rules as <code>LAYERLEAK_API_BEARER_TOKENS</code> apply. Use it to mount tokens as a secret instead of an environment variable.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_METRICS_ADDR</code></td><td>empty</td><td>Optional <code>host:port</code> for a second listener that serves Prometheus text-format metrics at <code>GET /metrics</code> (request counts and durations by route pattern, scan outcomes and error codes, in-flight scans, process start time). Empty disables it; it must differ from <code>LAYERLEAK_API_ADDR</code>, because metrics are never served on the API port. Bind it to a private interface: the endpoint is unauthenticated.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_URL</code></td><td>empty</td><td>PostgreSQL connection URL. The password may be left out of the URL and supplied through <code>PGPASSWORD</code> or <code>PGPASSFILE</code>; the driver fills any field the URL omits from the standard <code>PG*</code> variables.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_MAX_OPEN_CONNS</code></td><td><code>10</code></td><td>Open connection cap; must be positive.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_MAX_IDLE_CONNS</code></td><td><code>5</code></td><td>Idle connection cap.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_CONN_MAX_LIFETIME</code></td><td><code>30m</code></td><td>Connection lifetime.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME</code></td><td><code>5m</code></td><td>Idle connection lifetime.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_QUERY_TIMEOUT</code></td><td><code>10s</code></td><td>Read and readiness query deadline.</td></tr>
+                    <tr><td><code>LAYERLEAK_DATABASE_WRITE_TIMEOUT</code></td><td><code>2m</code></td><td>Transactional persistence deadline.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="table-shell" role="region" aria-label="Compose-only variables" tabindex="0">
+                <table>
+                  <caption>Compose only (read by <code>docker-compose.yml</code>, never by the binaries)</caption>
+                  <thead>
+                    <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>LAYERLEAK_IMAGE</code></td><td><code>ghcr.io/brumbelow/layerleak:latest</code></td><td>Image used by the <code>api</code>, <code>migrate</code>, and <code>purge-raw-secrets</code> services.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_HOST</code></td><td><code>127.0.0.1</code></td><td>Host interface the API port is published on.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_PORT</code></td><td><code>8080</code></td><td>Host port published for the API.</td></tr>
+                    <tr><td><code>LAYERLEAK_DB_NAME</code></td><td><code>layerleak</code></td><td>Database created by the <code>db</code> service.</td></tr>
+                    <tr><td><code>LAYERLEAK_DB_USER</code></td><td><code>layerleak</code></td><td>Role created by the <code>db</code> service.</td></tr>
+                    <tr><td><code>LAYERLEAK_DB_PASSWORD</code></td><td>required</td><td>Password for that role. <code>.env.example</code> ships it empty and Compose refuses to start until it is set.</td></tr>
+                    <tr><td><code>LAYERLEAK_API_STOP_GRACE_PERIOD</code></td><td><code>35s</code></td><td>How long Compose waits for the API to drain before killing it; keep it above <code>LAYERLEAK_API_SHUTDOWN_TIMEOUT</code>.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>
+                <code>layerleak-migrate-up</code> and <code>layerleak-purge-raw-secrets</code> read
+                four more variables of their own; they are listed under
+                <a href="#postgres">Postgres</a>.
+              </p>
             </section>
 
             <section class="doc-block" id="results">
@@ -274,60 +519,154 @@ layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
                 <h2>Results</h2>
               </div>
               <p>
-                Actionable findings remain in <code>findings</code> and drive the non-zero scan
-                exit status. Likely test, example, fixture, and spec placeholders are emitted as
-                suppressed findings with disposition metadata, and do not count toward
-                <code>total_findings</code>.
+                <code>--format summary</code> (the default) prints counts, a per-target table, and
+                the first 50 actionable findings; <code>--format json</code> prints the stable result
+                (<code>result_schema_version</code> 2, described by
+                <a href="schemas/result-v2.schema.json">schemas/result-v2.schema.json</a>);
+                <code>--format sarif</code> prints a SARIF 2.1.0 log. <code>--output &lt;file&gt;</code>
+                writes the formatted output to a file created with mode <code>0600</code> instead of
+                stdout (<code>-</code> is stdout). Every result has a top-level <code>status</code>
+                (<code>completed</code>, <code>partial</code>, or <code>failed</code>), a coverage
+                object, per-target, per-platform, and per-tag status, and diagnostics.
+                <code>--format json</code> prints the result for failed scans too, so automation can
+                read the diagnostics; cancellation is the only silent path.
+              </p>
+
+              <h3 class="schema-heading">Exit codes</h3>
+              <div class="table-shell" role="region" aria-label="CLI exit codes" tabindex="0">
+                <table>
+                  <thead>
+                    <tr><th scope="col">Code</th><th scope="col">Meaning</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>0</code></td><td>Complete scan with no blocking findings, or an accepted (<code>--allow-partial</code>) usable partial scan with none.</td></tr>
+                    <tr><td><code>1</code></td><td>Invalid input, operational failure (registry, network, authentication), persistence failure, or cancellation (<code>LAYERLEAK_SCAN_TIMEOUT</code>, SIGINT, SIGTERM).</td></tr>
+                    <tr><td><code>2</code></td><td>One or more actionable findings at or above <code>--fail-on</code>. Findings take precedence over incomplete coverage.</td></tr>
+                    <tr><td><code>3</code></td><td>The scan finished with usable but incomplete coverage and <code>--allow-partial</code> was not given.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p>
+                <code>--fail-on low|medium|high|none</code> sets the lowest confidence of an
+                actionable finding that produces exit code <code>2</code>: <code>low</code> (the
+                default) is every actionable finding and <code>none</code> reports without failing.
+                <code>--allow-partial</code> accepts usable incomplete coverage (exit <code>0</code>
+                or <code>2</code> instead of <code>3</code>) without hiding the missing coverage.
+                Scripts that retry on <code>1</code> should treat <code>3</code> as "investigate
+                coverage". A second <code>SIGINT</code> or <code>SIGTERM</code> terminates the
+                process immediately.
+              </p>
+
+              <h3 class="schema-heading">One scan record per scan</h3>
+              <p>
+                Every scan that produced a result, whether completed, partial, or failed, writes
+                exactly one scan record,
+                <code>&lt;dir&gt;/&lt;utc-timestamp&gt;-&lt;reference-token&gt;-&lt;random&gt;.json</code>,
+                unless <code>--no-artifacts</code> is given. <code>&lt;dir&gt;</code> is
+                <code>--output-dir</code>, otherwise <code>LAYERLEAK_FINDINGS_DIR</code> (a relative
+                value resolves against the working directory), otherwise <code>./findings</code>
+                under the working directory; the CLI does not look for a surrounding
+                <code>go.mod</code>. The full path is printed quoted on stderr
+                (<code>Scan record: "…"</code>). The record (<code>record_schema_version</code> 2,
+                described by
+                <a href="schemas/scan-record-v2.schema.json">schemas/scan-record-v2.schema.json</a>)
+                holds the same redacted <code>result</code> as <code>--format json</code>, every
+                finding with its <code>source_location</code> (actionable first, then suppressed), the
+                <code>persistence</code> outcome (<code>disabled</code>, <code>saved</code> with
+                <code>scan_run_id</code>, or <code>failed</code> with
+                <code>storage_unavailable</code>), and <code>created_at</code>. There is no separate
+                findings file.
               </p>
               <p>
-                Each usable scan result produces two JSON artifacts with the same generated
-                basename under <code>LAYERLEAK_FINDINGS_DIR</code>. The compatible findings array remains at
-                <code>findings/&lt;basename&gt;.json</code>. A versioned, always-redacted record at
-                <code>findings/scans/&lt;basename&gt;.json</code> adds image identity, status, coverage,
-                diagnostics, counts, creation time, and the PostgreSQL persistence outcome. If the
-                directory is unset, it defaults to <code>findings/</code> beside the nearest
-                <code>go.mod</code>, falling back to the current working directory.
+                A missing directory is created with mode <code>0700</code>; an existing directory is
+                never <code>chmod</code>-ed, a symbolic link in its place is refused, and the CLI warns
+                once when an existing directory is readable by other users. Records are written
+                <code>0600</code> and never overwrite an existing file. If the record cannot be
+                written, the scan still prints its result and exits <code>1</code>.
+                <code>--no-db</code> ignores <code>LAYERLEAK_DATABASE_URL</code> for one run; a
+                database-save failure exits <code>1</code>, records <code>storage_unavailable</code>,
+                and still prints the result.
               </p>
-              <p>
-                Every result reports <code>status</code> as <code>completed</code>,
-                <code>partial</code>, or <code>failed</code>, plus concrete coverage counters and
-                diagnostics. Incomplete work fails by default; <code>--allow-partial</code> accepts a
-                usable partial result without hiding the missing coverage.
-              </p>
-              <h3 class="schema-heading">Per-occurrence fields</h3>
-              <div class="result-schema" role="list">
+
+              <h3 class="schema-heading">Finding fields</h3>
+              <div class="result-schema" role="list" aria-label="Fields of a finding in the CLI result and scan record">
                 <span role="listitem">detector_name</span>
                 <span role="listitem">confidence</span>
                 <span role="listitem">disposition</span>
                 <span role="listitem">disposition_reason</span>
                 <span role="listitem">source_type</span>
+                <span role="listitem">manifest_digest</span>
                 <span role="listitem">platform</span>
                 <span role="listitem">file_path</span>
                 <span role="listitem">layer_digest</span>
+                <span role="listitem">key</span>
                 <span role="listitem">line_number</span>
-                <span role="listitem">source_location</span>
+                <span role="listitem">redacted_value</span>
+                <span role="listitem">fingerprint</span>
                 <span role="listitem">context_snippet</span>
+                <span role="listitem">match_start</span>
+                <span role="listitem">match_end</span>
                 <span role="listitem">present_in_final_image</span>
               </div>
-              <h3 class="schema-heading">Per-finding fields</h3>
-              <div class="result-schema" role="list">
-                <span role="listitem">manifest_digest</span>
-                <span role="listitem">fingerprint</span>
-                <span role="listitem">redacted_value</span>
-                <span role="listitem">occurrence_count</span>
-                <span role="listitem">actionable_occurrence_count</span>
-                <span role="listitem">suppressed_occurrence_count</span>
-                <span role="listitem">first_seen_at</span>
-                <span role="listitem">last_seen_at</span>
-              </div>
               <p>
-                Saved files and Postgres writes default to redacted values and redacted context
-                snippets. Raw secret values and raw snippets are written only when
-                <code>LAYERLEAK_PERSIST_RAW_SECRETS=1</code>. API responses stay redacted even if a
-                writer persisted raw values; the companion scan record is always redacted. The two
-                local files are published independently, so a write failure retains any artifact
-                already published and returns an operational error.
+                Actionable findings are listed under <code>findings</code> and counted in
+                <code>total_findings</code> and <code>unique_fingerprints</code>; suppressed ones are
+                listed under <code>suppressed_findings</code> and counted in
+                <code>suppressed_findings_count</code>. The scan record adds
+                <code>source_location</code> to each finding. <code>fingerprint</code> is the
+                SHA-256 of the raw value, stable across installs; for a path-only
+                <code>sensitive_file_*</code> finding it is derived from the layer digest and path.
+                The occurrence counters and first/last-seen times belong to the
+                <a href="#api">HTTP API</a>, which aggregates stored history.
               </p>
+
+              <h3 class="schema-heading">Redaction</h3>
+              <p>
+                Raw secret values and raw context snippets are never written locally: stdout, the
+                scan record, JSON, and SARIF are always redacted, even with
+                <code>LAYERLEAK_PERSIST_RAW_SECRETS=1</code>. A <code>redacted_value</code> under 12
+                characters is masked completely (<code>********</code>); a longer value shows its
+                first three characters followed by the same fixed eight-character mask
+                (<code>ghp********</code>), so neither the length nor the tail is disclosed, and a
+                multi-line value becomes <code>[REDACTED MULTILINE]</code>. In
+                <code>context_snippet</code> every copy of the matched value is replaced with
+                <code>[REDACTED]</code>. Raw persistence exists only in PostgreSQL with
+                <code>LAYERLEAK_PERSIST_RAW_SECRETS=1</code>, and the API and scan history stay
+                redacted even then.
+              </p>
+
+              <h3 class="schema-heading">Baselines</h3>
+              <p>
+                A baseline file accepts reviewed findings by fingerprint so a rotated secret left in
+                an old layer does not fail every run. Nothing is read implicitly; pass the file with
+                <code>--baseline</code>.
+              </p>
+              <pre><code>layerleak scan ghcr.io/org/app:1.2 --format json --output result.json --fail-on none
+layerleak baseline create --from result.json --reason "rotated 2026-09-01; old layer only"
+layerleak scan ghcr.io/org/app:1.2 --baseline layerleak-baseline.json</code></pre>
+              <p>
+                <code>baseline create</code> reads a result or a scan record and writes one entry
+                (<code>fingerprint</code>, <code>detector</code>, <code>reason</code>) per actionable
+                finding to <code>layerleak-baseline.json</code> with mode <code>0600</code>, never
+                overwriting without <code>--force</code> and never writing values, paths, or
+                snippets. Entries may carry an RFC 3339 <code>expires</code>. A matched finding is
+                reported with <code>disposition: baselined</code> among
+                <code>suppressed_findings</code> and never produces exit code <code>2</code>. This is
+                a per-caller view applied by the CLI: stdout, the scan record, SARIF, and the exit
+                code see it, while the database and therefore the HTTP API keep the scanner's
+                disposition. A malformed baseline exits <code>1</code> before the scan starts.
+              </p>
+
+              <h3 class="schema-heading">SARIF</h3>
+              <p>
+                <code>--format sarif</code> writes one SARIF 2.1.0 run per scan: every default
+                detector under <code>tool.driver.rules</code>, a result per finding with
+                <code>level</code> from its confidence, a <code>layerleak/fingerprint/v1</code>
+                partial fingerprint, the image reference as the <code>IMAGE</code> URI base, and a
+                <code>suppressions</code> entry on suppressed and baselined findings. Only redacted
+                values are written.
+              </p>
+              <pre><code>layerleak scan ghcr.io/org/app:1.2 --format sarif --output layerleak.sarif --fail-on none --no-artifacts</code></pre>
             </section>
 
             <section class="doc-block" id="postgres">
@@ -336,34 +675,82 @@ layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
                 <h2>Postgres persistence</h2>
               </div>
               <p>
-                Migrations are explicit. The API does not create or upgrade schema at runtime: it
-                refuses to start until schema version <code>0004</code> is installed, and
-                <code>/readyz</code> re-checks the database and schema afterwards. Use PostgreSQL
-                server <code>&gt;= 16.13</code>.
+                The API and persistent CLI mode need PostgreSQL 16.13 or newer. Migrations are
+                explicit: the API never creates or upgrades schema, refuses to start unless the
+                installed schema is exactly version <code>0004</code>, and <code>/readyz</code>
+                re-checks the database and schema afterwards. From a checkout, against a local
+                database:
               </p>
-              <pre><code>export LAYERLEAK_MIGRATIONS_DIR="$PWD/migrations"
-go run ./cmd/migrate
+              <pre><code>export LAYERLEAK_DATABASE_URL='postgres://layerleak@127.0.0.1:5432/layerleak?sslmode=disable'
+export PGPASSWORD='&lt;password&gt;'
+export LAYERLEAK_MIGRATIONS_DIR="$PWD/migrations"
+go run ./cmd/migrate --status
 go run ./cmd/migrate</code></pre>
               <p>
-                The native command is rerunnable, holds a PostgreSQL advisory lock, records
-                checksums in a migration ledger, and refuses drift, gaps, or partial legacy state.
-                The published image contains the same command:
+                Without flags the command applies every pending migration and a rerun is a no-op.
+                <code>--status</code> prints the ledger (each shipped migration with its state,
+                applied time, and SHA-256, then <code>current</code> and <code>expected</code>) and
+                exits <code>0</code> when the database is current, <code>2</code> when migrations are
+                pending or a legacy schema is waiting to be adopted, and <code>1</code> on any error
+                such as checksum drift. <code>--dry-run</code> lists what a run would adopt and apply
+                and changes nothing; <code>--version</code> prints the build version. The command
+                holds an advisory lock with bounded waits, records checksums in a migration ledger,
+                runs one transaction per migration, and refuses drift, gaps, dirty state, or a
+                partial legacy schema. There is no <code>down</code> command.
               </p>
-              <pre><code>docker run --rm \
-  -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
-  --entrypoint /usr/local/bin/layerleak-migrate-up \
-  ghcr.io/brumbelow/layerleak:latest</code></pre>
+              <div class="table-shell" role="region" aria-label="Migration command variables" tabindex="0">
+                <table>
+                  <caption>Read by <code>layerleak-migrate-up</code></caption>
+                  <thead>
+                    <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>LAYERLEAK_MIGRATIONS_DIR</code></td><td><code>/app/migrations</code></td><td>Directory holding the shipped <code>migrations/*.sql</code>; from a checkout use <code>$PWD/migrations</code>.</td></tr>
+                    <tr><td><code>LAYERLEAK_MIGRATION_TIMEOUT</code></td><td><code>30m</code></td><td>Overall deadline for one run of the command; <code>0</code> disables it.</td></tr>
+                    <tr><td><code>LAYERLEAK_MIGRATION_LOCK_TIMEOUT</code></td><td><code>15s</code></td><td>How long each of three attempts waits for the migration advisory lock.</td></tr>
+                  </tbody>
+                </table>
+              </div>
               <p>
-                Current state is deduplicated by <code>(manifest_digest, fingerprint)</code>.
-                Append-only scan history lives in <code>scan_runs</code> as a redacted snapshot of
-                the public result JSON, regardless of <code>LAYERLEAK_PERSIST_RAW_SECRETS</code>.
+                The published image contains the same command. For a database that is not on the
+                same host, mount the CA that signed the server certificate and use
+                <code>sslmode=verify-full</code>, the only mode that both encrypts the connection
+                and verifies the server's identity:
+              </p>
+              <pre><code>export LAYERLEAK_DATABASE_URL='postgres://&lt;user&gt;@&lt;host&gt;:5432/layerleak?sslmode=verify-full&amp;sslrootcert=/etc/layerleak/postgres-ca.pem'
+docker run --rm \
+  -v /path/to/postgres-ca.pem:/etc/layerleak/postgres-ca.pem:ro \
+  -e LAYERLEAK_DATABASE_URL -e PGPASSWORD \
+  --entrypoint /usr/local/bin/layerleak-migrate-up \
+  ghcr.io/brumbelow/layerleak:v3.0.0 --status</code></pre>
+              <p>
+                Current state is deduplicated by <code>(manifest_digest, fingerprint)</code> in
+                <code>findings</code>, with one row per place a value was seen in
+                <code>finding_occurrences</code>. Append-only scan history lives in
+                <code>scan_runs</code> as a redacted snapshot of the public result, regardless of
+                <code>LAYERLEAK_PERSIST_RAW_SECRETS</code>.
               </p>
               <div class="callout" role="note">
-                <strong>Safe purge</strong>
-                Disable <code>LAYERLEAK_PERSIST_RAW_SECRETS</code> on every database writer and
-                restart or stop those processes first. The
-                <code>layerleak-purge-raw-secrets --confirm</code> command then clears only opted-in
-                raw values and snippets while preserving redacted findings and scan history.
+                <strong>Purging raw values</strong>
+                First set <code>LAYERLEAK_PERSIST_RAW_SECRETS=0</code> on every API and CLI database
+                writer and restart or stop them. <code>layerleak-purge-raw-secrets --dry-run</code>
+                reports how many raw values and snippets would be cleared; <code>--confirm</code>
+                clears only <code>findings.value</code> and <code>finding_occurrences.raw_snippet</code>
+                in id-range batches of <code>--batch-size</code> rows (default 5000), one transaction
+                per batch, and keeps redacted findings and history. Committed batches stay purged if
+                a later one fails, so a failed run can be rerun. Raw material lingers in dead tuples
+                until vacuum and in WAL archives, replicas, and backups taken before the purge.
+              </div>
+              <div class="table-shell" role="region" aria-label="Purge command variables" tabindex="0">
+                <table>
+                  <caption>Read by <code>layerleak-purge-raw-secrets</code></caption>
+                  <thead>
+                    <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>LAYERLEAK_PURGE_TIMEOUT</code></td><td><code>30m</code></td><td>Overall deadline for one run of <code>layerleak-purge-raw-secrets</code>; <code>0</code> disables it. Each batch is separately bounded by <code>LAYERLEAK_DATABASE_WRITE_TIMEOUT</code>.</td></tr>
+                  </tbody>
+                </table>
               </div>
             </section>
 
@@ -373,11 +760,12 @@ go run ./cmd/migrate</code></pre>
                 <h2>HTTP API</h2>
               </div>
               <p>
-                The API binary under <code>cmd/api</code> is JSON-only and Postgres-backed. It
-                requires <code>LAYERLEAK_DATABASE_URL</code>; it does not serve from local findings
-                files.
+                The API binary (<code>layerleak-api</code> in the image, <code>cmd/api</code> in the
+                source) is JSON-only and PostgreSQL-backed: it requires
+                <code>LAYERLEAK_DATABASE_URL</code> and never reads scan records. It listens on plain
+                HTTP; deploy it on a private network behind TLS termination and an authenticating
+                gateway that also rate-limits.
               </p>
-              <pre><code>go run ./cmd/api</code></pre>
               <ul class="api-list">
                 <li><span class="verb verb-get">GET</span><code>/health</code></li>
                 <li><span class="verb verb-get">GET</span><code>/livez</code></li>
@@ -390,33 +778,128 @@ go run ./cmd/migrate</code></pre>
                 <li><span class="verb verb-get">GET</span><code>/api/v1/findings/{id}</code></li>
               </ul>
               <p>
-                <code>POST /api/v1/scans</code> is synchronous and accepts a JSON body with
-                <code>reference</code>, optional <code>platform</code>, and optional
-                <code>all_tags</code>. A bare reference means <code>latest</code> unless
-                <code>all_tags</code> is true. The response includes <code>scan_run_id</code> plus the
-                same redacted result schema produced by the CLI. Incomplete or limit-bounded work
-                returns HTTP 422 with <code>scan_incomplete</code> or
-                <code>scan_limit_exceeded</code> and includes a usable persisted result when one
-                exists.
+                <code>/health</code> and <code>/livez</code> report process liveness and the build
+                <code>version</code> without querying PostgreSQL. <code>/readyz</code> requires a
+                database ping and schema version <code>0004</code>, reuses its answer for
+                <code>LAYERLEAK_API_READINESS_CACHE_TTL</code>, and answers 503
+                <code>not_ready</code> while the process drains.
               </p>
               <p>
-                If a usable redacted result exists but PostgreSQL persistence fails, the endpoint
-                returns HTTP 503 with <code>storage_unavailable</code>, neutral public wording, and
-                the actual result status and coverage. It omits <code>scan_run_id</code> unless
-                persistence succeeded.
+                <code>POST /api/v1/scans</code> is synchronous and accepts <code>reference</code>,
+                optional <code>platform</code>, and optional <code>all_tags</code>; unknown fields
+                are rejected. A bare reference means <code>latest</code> unless
+                <code>all_tags</code> is true. Local sources (<code>oci:</code>,
+                <code>oci-archive:</code>, <code>docker-archive:</code>) are rejected with 400
+                <code>invalid_request</code>. The response carries <code>scan_run_id</code> and the
+                redacted <code>result</code>; unlike the CLI, its <code>error</code> fields read
+                <code>scan step failed</code> and diagnostic messages are fixed text chosen by
+                diagnostic <code>code</code>. Incomplete work returns 422 <code>scan_incomplete</code>
+                or <code>scan_limit_exceeded</code>, and a scan that finished but could not be
+                persisted returns 503 <code>storage_unavailable</code> with the result and without a
+                <code>scan_run_id</code>. Scans beyond
+                <code>LAYERLEAK_API_MAX_CONCURRENT_SCANS</code> get 429
+                <code>scan_capacity_exceeded</code>.
               </p>
+              <pre><code>curl --fail-with-body \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -d '{"reference":"alpine:3.20","platform":"linux/amd64"}' \
+  http://127.0.0.1:8080/api/v1/scans</code></pre>
               <p>
-                Repository scan and finding list endpoints accept an optional
-                <code>?registry=</code> query parameter (defaults to <code>docker.io</code>),
-                plus <code>?limit=</code> and <code>?offset=</code> pagination
-                (<code>limit</code> defaults to 50 and is capped at 200). Findings list also
-                accepts <code>?disposition=actionable|suppressed|all</code>; omitted
-                <code>disposition</code> returns actionable findings only.
+                List endpoints accept <code>limit</code> (default 50, clamped to 200) and
+                <code>offset</code>, and every list response returns <code>next_cursor</code>: an
+                opaque keyset position when the page was full, or <code>""</code> when the listing is
+                exhausted. Pass it back as <code>cursor</code> so deep pages cost the same as the
+                first; a cursor is tied to one endpoint and cannot be combined with a non-zero
+                <code>offset</code>. Repository endpoints accept <code>registry</code> as
+                <code>host</code> or <code>host:port</code> (default <code>docker.io</code>), the
+                <code>{repository}</code> segment accepts a literal <code>/</code> or
+                <code>%2F</code>, and the finding list accepts
+                <code>disposition=actionable|suppressed|all</code> (default actionable).
+              </p>
+              <h3 class="schema-heading">Stored finding fields</h3>
+              <div class="result-schema" role="list" aria-label="Aggregated fields of a stored finding in API responses">
+                <span role="listitem">id</span>
+                <span role="listitem">manifest_digest</span>
+                <span role="listitem">fingerprint</span>
+                <span role="listitem">redacted_value</span>
+                <span role="listitem">detectors</span>
+                <span role="listitem">occurrence_count</span>
+                <span role="listitem">actionable_occurrence_count</span>
+                <span role="listitem">suppressed_occurrence_count</span>
+                <span role="listitem">first_seen_at</span>
+                <span role="listitem">last_seen_at</span>
+              </div>
+              <p>
+                <code>GET /api/v1/findings/{id}</code> adds the redacted <code>occurrences</code>
+                history. These aggregates come from the database and are not part of the CLI result.
               </p>
               <div class="callout callout-warn" role="note">
-                <strong>No built-in auth</strong>
-                The API does not include an authentication layer. Deploy it on a private network
-                and front it with your own authn/authz gateway or reverse proxy policy.
+                <strong>Bearer tokens are opt-in</strong>
+                Authentication is off by default. Setting <code>LAYERLEAK_API_BEARER_TOKENS</code>
+                (comma-separated) or <code>LAYERLEAK_API_BEARER_TOKENS_FILE</code> (one per line)
+                requires <code>Authorization: Bearer &lt;token&gt;</code> on every
+                <code>/api/</code> path; a missing or unknown token answers 401
+                <code>unauthorized</code> with <code>WWW-Authenticate</code>.
+                <code>/health</code>, <code>/livez</code>, and <code>/readyz</code> stay open.
+                Tokens are at least 32 characters, held only as SHA-256 digests, compared in
+                constant time, and never logged, and the API warns at startup when it listens on a
+                non-loopback address without tokens. This is defence in depth, not authorization:
+                there are no users, roles, or tenants, so keep TLS termination and your gateway.
+              </div>
+              <p>
+                <code>LAYERLEAK_API_METRICS_ADDR</code> adds a second listener that serves Prometheus
+                text-format metrics at <code>GET /metrics</code>: requests by route pattern and
+                status class, request durations, scans by outcome and error code, in-flight scans,
+                process start time, and build info. Labels never carry paths, references, or request
+                bodies. It must differ from <code>LAYERLEAK_API_ADDR</code> and is unauthenticated,
+                so bind it to a private interface. The API logs one JSON record per request (method,
+                route pattern, status, bytes, duration, request id, remote address) and never the
+                path, query, or body.
+              </p>
+              <p>
+                On <code>SIGTERM</code> or <code>SIGINT</code> the API drains: for
+                <code>LAYERLEAK_API_PRESTOP_DELAY</code> <code>/readyz</code> answers 503 and new
+                scans are refused with 503 <code>server_shutting_down</code> while in-flight requests
+                continue; then in-flight scans are cancelled with 503
+                <code>server_shutting_down</code> and the server stops within
+                <code>LAYERLEAK_API_SHUTDOWN_TIMEOUT</code>, exiting <code>0</code>.
+              </p>
+              <h3 class="schema-heading">Status codes</h3>
+              <p>
+                Errors use <code>{"error": {"code", "message", "request_id"}}</code> with fixed,
+                neutral messages; every response carries <code>X-Request-ID</code>,
+                <code>Cache-Control: no-store</code>, and
+                <code>X-Content-Type-Options: nosniff</code>, and the API never redirects.
+              </p>
+              <div class="table-shell" role="region" aria-label="API status codes and error codes" tabindex="0">
+                <table>
+                  <thead>
+                    <tr><th scope="col">Status</th><th scope="col"><code>code</code></th><th scope="col">Where</th><th scope="col">Body</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td>200</td><td></td><td>every endpoint</td><td>the documented response</td></tr>
+                    <tr><td>400</td><td><code>invalid_request</code></td><td>every endpoint</td><td>error envelope</td></tr>
+                    <tr><td>401</td><td><code>unauthorized</code></td><td>every <code>/api/</code> path when <code>LAYERLEAK_API_BEARER_TOKENS</code> is set; <code>WWW-Authenticate: Bearer realm="layerleak"</code></td><td>error envelope</td></tr>
+                    <tr><td>404</td><td><code>not_found</code></td><td>reads, unknown paths</td><td>error envelope</td></tr>
+                    <tr><td>404</td><td><code>image_not_found</code></td><td><code>POST /api/v1/scans</code></td><td>envelope, plus <code>result</code> when available</td></tr>
+                    <tr><td>405</td><td><code>method_not_allowed</code></td><td>every endpoint; <code>Allow</code> names the accepted method</td><td>error envelope</td></tr>
+                    <tr><td>408</td><td><code>scan_canceled</code></td><td><code>POST /api/v1/scans</code>; the client closed the connection before the scan finished</td><td>error envelope</td></tr>
+                    <tr><td>413</td><td><code>request_too_large</code></td><td><code>POST /api/v1/scans</code></td><td>error envelope</td></tr>
+                    <tr><td>415</td><td><code>unsupported_media_type</code></td><td><code>POST /api/v1/scans</code></td><td>error envelope</td></tr>
+                    <tr><td>422</td><td><code>scan_incomplete</code></td><td><code>POST /api/v1/scans</code></td><td>envelope, plus <code>result</code> and <code>scan_run_id</code> when persisted</td></tr>
+                    <tr><td>422</td><td><code>scan_limit_exceeded</code></td><td><code>POST /api/v1/scans</code>; the error object adds <code>limit_kind</code> and <code>limit</code></td><td>envelope, plus <code>result</code> and <code>scan_run_id</code> when persisted</td></tr>
+                    <tr><td>429</td><td><code>scan_capacity_exceeded</code></td><td><code>POST /api/v1/scans</code>; <code>Retry-After: 5</code></td><td>error envelope</td></tr>
+                    <tr><td>500</td><td><code>internal_error</code></td><td>every endpoint</td><td>error envelope</td></tr>
+                    <tr><td>502</td><td><code>scan_failed</code></td><td><code>POST /api/v1/scans</code>; transport errors, registry 5xx and timeouts inside the scan</td><td>envelope, plus <code>result</code> when available</td></tr>
+                    <tr><td>502</td><td><code>registry_unauthorized</code></td><td><code>POST /api/v1/scans</code>; the registry or its token endpoint answered 401/403</td><td>envelope, plus <code>result</code> when available</td></tr>
+                    <tr><td>503</td><td><code>storage_unavailable</code></td><td>reads: a database query failed; <code>POST /api/v1/scans</code>: the scan finished but could not be persisted</td><td>reads: envelope; scans: envelope plus <code>result</code></td></tr>
+                    <tr><td>503</td><td><code>registry_rate_limited</code></td><td><code>POST /api/v1/scans</code>; the registry answered 429 after bounded retries; <code>Retry-After: 60</code></td><td>envelope, plus <code>result</code> when available</td></tr>
+                    <tr><td>503</td><td><code>server_shutting_down</code></td><td><code>POST /api/v1/scans</code> while draining, and any request the drain cancelled</td><td>error envelope</td></tr>
+                    <tr><td>503</td><td><code>not_ready</code></td><td><code>GET /readyz</code></td><td>error envelope</td></tr>
+                    <tr><td>504</td><td><code>scan_timeout</code></td><td><code>POST /api/v1/scans</code>; <code>LAYERLEAK_API_SCAN_TIMEOUT</code> expired</td><td>envelope, plus <code>result</code> when available</td></tr>
+                  </tbody>
+                </table>
               </div>
               <p><a href="openapi.yaml">Open the versioned OpenAPI 3.1 specification.</a></p>
             </section>
@@ -427,34 +910,68 @@ go run ./cmd/migrate</code></pre>
                 <h2>Container &amp; Compose</h2>
               </div>
               <p>
-                The published image runs the API by default. It binds
-                <code>0.0.0.0:8080</code> and expects <code>LAYERLEAK_DATABASE_URL</code>.
+                The published image supports <code>linux/amd64</code> and <code>linux/arm64</code>. It
+                is shell-free, runs as UID/GID <code>10001</code>, works with a read-only root
+                filesystem, and contains CA roots, the migrations, and four static binaries:
+                <code>layerleak-api</code> (the default entrypoint, listening on
+                <code>0.0.0.0:8080</code>), <code>layerleak-migrate-up</code>,
+                <code>layerleak-purge-raw-secrets</code>, and <code>layerleak-healthcheck</code>,
+                which probes <code>/readyz</code> with a two-second deadline. It does not contain the
+                <code>layerleak</code> CLI. Pin it by release tag or, better, by the
+                <code>image.index_digest</code> in the release's <code>release-manifest.json</code>
+                (<code>ghcr.io/brumbelow/layerleak@sha256:&lt;digest&gt;</code>) instead of
+                <code>:latest</code>.
               </p>
-              <pre><code>docker pull ghcr.io/brumbelow/layerleak:latest
+              <pre><code>docker pull ghcr.io/brumbelow/layerleak:v3.0.0
 docker run --rm \
   -p 8080:8080 \
-  -e LAYERLEAK_DATABASE_URL='postgres://&lt;user&gt;:&lt;pass&gt;@&lt;host&gt;:5432/layerleak?sslmode=disable' \
-  ghcr.io/brumbelow/layerleak:latest</code></pre>
+  -v /path/to/postgres-ca.pem:/etc/layerleak/postgres-ca.pem:ro \
+  -e LAYERLEAK_DATABASE_URL='postgres://&lt;user&gt;:&lt;password&gt;@&lt;host&gt;:5432/layerleak?sslmode=verify-full&amp;sslrootcert=/etc/layerleak/postgres-ca.pem' \
+  --read-only --tmpfs /tmp:mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges \
+  ghcr.io/brumbelow/layerleak:v3.0.0</code></pre>
               <p>
-                The repository ships a Compose stack in <code>docker-compose.yml</code> with
-                <code>db</code>, <code>migrate</code>, <code>purge-raw-secrets</code>, and
-                <code>api</code> services. The
-                <code>db</code> service baseline is pinned to
-                <code>postgres:16.15-alpine</code>.
+                Keep <code>sslmode=verify-full</code> with the mounted CA for any database that is
+                not on the same host. Omitting <code>sslmode</code> is not a safe shortcut: the
+                driver's implicit <code>require</code> encrypts without verifying the server
+                certificate. Use <code>sslmode=disable</code> only for a database reachable solely
+                over a private network, as the Compose file does for its <code>db</code> service.
+                A password embedded in a URL must be percent-encoded; <code>PGPASSWORD</code> may
+                hold any characters.
+              </p>
+              <p>
+                <code>docker-compose.yml</code> runs <code>db</code> (PostgreSQL 16.15 pinned by
+                multi-platform digest), <code>migrate</code>, and <code>api</code>;
+                <code>purge-raw-secrets</code> is in the <code>tools</code> profile. One command
+                starts the stack: <code>api</code> waits for the database to be healthy and for
+                <code>migrate</code> to finish, so a fresh volume becomes ready without a manual
+                migration step. Set the required password and pin the image in <code>.env</code>
+                first; the example ships the password empty and <code>LAYERLEAK_IMAGE</code> at
+                <code>:latest</code>.
               </p>
               <pre><code>cp .env.example .env
-# Set LAYERLEAK_DB_PASSWORD in .env.
+# In .env: set LAYERLEAK_DB_PASSWORD and pin
+# LAYERLEAK_IMAGE=ghcr.io/brumbelow/layerleak:v3.0.0
 docker compose config
-
-docker compose --profile tools run --rm migrate
-docker compose up -d api
+docker compose up -d
+docker compose ps
 curl --fail http://127.0.0.1:8080/readyz</code></pre>
               <p>
-                In Dockge or Komodo, import the same Compose file and run the <code>migrate</code>
-                service once before enabling the long-running <code>api</code> service. Compose binds
-                the host port to <code>127.0.0.1</code> by default; change
+                The API runs read-only with every capability dropped, a 256 MiB <code>/tmp</code>
+                tmpfs, a 2 GiB memory limit, and a 256-process limit (<code>mem_limit</code> and
+                <code>pids_limit</code>; mirror them under <code>deploy.resources.limits</code> for a
+                Swarm stack, and raise the memory limit with any <code>MAX_*_BYTES</code>
+                bound you lift). The database keeps only the five capabilities its entrypoint needs,
+                and the one-shot migrate and purge commands run read-only on a 64 MiB tmpfs. The
+                host port binds to <code>127.0.0.1</code> by default; change
                 <code>LAYERLEAK_API_HOST</code> only when an authenticated network edge is ready.
+                The <code>api</code> service has a 35-second <code>stop_grace_period</code>
+                (<code>LAYERLEAK_API_STOP_GRACE_PERIOD</code>); whatever runs the container must
+                allow more than <code>LAYERLEAK_API_SHUTDOWN_TIMEOUT</code>, otherwise an in-flight
+                scan is killed before it is persisted. Dockge and Komodo deploy the same file.
               </p>
+              <pre><code>docker compose --profile tools run --rm purge-raw-secrets --dry-run
+docker compose --profile tools run --rm purge-raw-secrets --confirm</code></pre>
             </section>
 
             <section class="doc-block" id="demo">
@@ -463,14 +980,17 @@ curl --fail http://127.0.0.1:8080/readyz</code></pre>
                 <h2>Browser demo</h2>
               </div>
               <p>
-                The Pages demo is fully static. It replays a fixed transcript and renders a
-                synthetic Postgres-style snapshot from versioned fixture data in the repository.
-                Raw-value columns are empty to match default storage, and the transcript shows the
-                current result status, coverage, findings-array path, and companion scan-record
-                path. Nothing is sent to any registry or database.
+                The demo replays a real <code>layerleak scan</code> of a synthetic OCI image layout:
+                a multi-platform index whose <code>linux/amd64</code> image hides fabricated secrets
+                in its environment, a label, the build history, a final file, a deleted file, a
+                nested jar, an unreadable SSH key, and a test fixture. A repository test builds the
+                layout, runs the CLI, and regenerates the fixture from its progress lines, summary,
+                and scan record, and fails if the committed copy drifts. The tables are the
+                Postgres rows that result would produce, with raw-value columns empty. Nothing runs
+                in your browser and nothing is sent anywhere.
               </p>
-              <pre><code>layerleak scan vulnerableHost:latest --platform linux/amd64</code></pre>
-              <p><a class="button-primary" href="demo/">Open the simulated demo</a></p>
+              <pre><code>layerleak scan oci:payments-api:1.4.2 --progress plain --no-db</code></pre>
+              <p><a class="button-primary" href="demo/">Open the demo replay</a></p>
             </section>
           </div>
         </div>

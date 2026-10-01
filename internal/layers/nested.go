@@ -30,7 +30,10 @@ const (
 	NestedSkipOversize NestedSkipReason = "oversize"
 	// NestedSkipBytesLimit: decompressed bytes reached the nested byte limit.
 	NestedSkipBytesLimit NestedSkipReason = "bytes_limit"
-	// NestedSkipEntriesLimit: the archive has more entries than the nested entry limit.
+	// NestedSkipEntriesLimit: the archive has more entries than the nested
+	// entry limit. A gzip or tar stream stops at the limit and keeps the
+	// entries before it; a zip, whose directory would be parsed in full
+	// first, is refused whole and Observed is the count its directory holds.
 	NestedSkipEntriesLimit NestedSkipReason = "entries_limit"
 	// NestedSkipLayerBudget: the layer or image byte/entry budget left no room.
 	NestedSkipLayerBudget NestedSkipReason = "layer_budget"
@@ -185,11 +188,15 @@ type archiveWalk struct {
 	files          []nestedEntry
 	stopped        NestedSkipReason
 	stopLimit      int64
-	malformed      int64
-	encrypted      int64
-	unsupported    int64
-	unsafe         int64
-	oversize       int64
+	// refused is set when the archive was turned away whole, before any of
+	// it was parsed, because its directory declares more entries than the
+	// allowance; entriesSeen then holds the declared count.
+	refused     bool
+	malformed   int64
+	encrypted   int64
+	unsupported int64
+	unsafe      int64
+	oversize    int64
 }
 
 func (e *nestedExpander) newWalk(outerPath string) *archiveWalk {
@@ -213,6 +220,18 @@ func (w *archiveWalk) admitEntry() bool {
 	}
 	w.entries++
 	return true
+}
+
+// refuseEntries turns the whole archive away before it is parsed: its
+// directory holds observed entries, more than the entry allowance admits.
+func (w *archiveWalk) refuseEntries(observed int64) {
+	w.refused = true
+	w.entriesSeen = observed
+	if w.entryOwnLimit {
+		w.stopped, w.stopLimit = NestedSkipEntriesLimit, w.entryAllowance
+	} else {
+		w.stopped, w.stopLimit = NestedSkipLayerBudget, w.entryAllowance
+	}
 }
 
 // readEntry reads one entry's content without trusting any declared size:
@@ -294,6 +313,14 @@ func (e *nestedExpander) expand(outerPath string, content []byte) []Artifact {
 }
 
 func (w *archiveWalk) readZip(content []byte) {
+	// archive/zip materialises every central directory header before the
+	// first entry can be examined, so the entry bound is applied to the
+	// directory's own account of itself first: an archive with more entries
+	// than the allowance is refused whole rather than parsed and then cut.
+	if entries, ok := zipDirectoryEntries(content); ok && entries > w.entryAllowance {
+		w.refuseEntries(entries)
+		return
+	}
 	reader, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
 	if err != nil {
 		w.malformed++
@@ -494,8 +521,8 @@ func (e *nestedExpander) finish(walk *archiveWalk) []Artifact {
 			e.skip(walk.outerPath, record.reason, record.count, limit)
 		}
 	}
-	if walk.malformed > 0 && len(walk.files) == 0 && walk.entriesSeen == 0 {
-		// Nothing could be read: the archive is reported but not counted as
+	if walk.refused || (walk.malformed > 0 && len(walk.files) == 0 && walk.entriesSeen == 0) {
+		// Nothing was read: the archive is reported but not counted as
 		// expanded.
 		return nil
 	}

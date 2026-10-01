@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strings"
@@ -261,12 +262,33 @@ func TestReplayNestedArchiveBoundsAreBoundedSkips(t *testing.T) {
 	}
 	archive := zipArchive(t, entries)
 
-	t.Run("entries limit", func(t *testing.T) {
+	t.Run("entries limit refuses a zip before its directory is parsed", func(t *testing.T) {
+		// A zip's central directory is materialised in full by the reader,
+		// so an archive with more entries than the allowance is refused as
+		// a whole from its end-of-central-directory record.
 		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(archive)}}), nestedOptions(64<<20, 4))
+		if got := nestedPaths(result.FinalFiles[0]); len(got) != 0 {
+			t.Fatalf("nested = %v", got)
+		}
+		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.zip:entries_limit:6" {
+			t.Fatalf("skips = %v", skips)
+		}
+		if result.NestedSkips[0].Limit != 4 || result.Coverage.NestedArchivesExpanded != 0 || result.Coverage.NestedEntriesScanned != 0 {
+			t.Fatalf("skip = %+v coverage = %+v", result.NestedSkips[0], result.Coverage)
+		}
+	})
+
+	t.Run("entries limit stops a tar stream", func(t *testing.T) {
+		tarEntries := make([]tarEntry, 0, 6)
+		for index := range 6 {
+			tarEntries = append(tarEntries, tarEntry{name: fmt.Sprintf("f%d.txt", index), body: strings.Repeat("a", 1000)})
+		}
+		inner := tarArchive(t, tarEntries)
+		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.tar", body: string(inner)}}), nestedOptions(64<<20, 4))
 		if got := nestedPaths(result.FinalFiles[0]); len(got) != 4 {
 			t.Fatalf("nested = %v", got)
 		}
-		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.zip:entries_limit:5" {
+		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.tar:entries_limit:5" {
 			t.Fatalf("skips = %v", skips)
 		}
 		if result.NestedSkips[0].Limit != 4 || result.Coverage.NestedArchivesExpanded != 1 {
@@ -360,6 +382,142 @@ func TestReplayNestedArchiveBoundsAreBoundedSkips(t *testing.T) {
 		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(archive)}}), nestedOptions(0, 0))
 		if len(result.FinalFiles[0].Nested) != 0 || len(result.NestedSkips) != 0 || result.Coverage.NestedArchivesExpanded != 0 {
 			t.Fatalf("result = %+v", result)
+		}
+	})
+}
+
+// zipDirectoryEnd returns the offset of the end-of-central-directory record of
+// a zip written by archive/zip (no comment, no zip64 records).
+func zipDirectoryEnd(t testing.TB, archive []byte) int {
+	t.Helper()
+	offset := bytes.LastIndex(archive, []byte("PK\x05\x06"))
+	if offset < 0 || offset+22 != len(archive) {
+		t.Fatalf("no end-of-central-directory record at the end of the archive (offset %d, len %d)", offset, len(archive))
+	}
+	return offset
+}
+
+// declareZipEntries rewrites the entry count the end-of-central-directory
+// record declares, leaving the directory itself untouched.
+func declareZipEntries(t testing.TB, archive []byte, records uint16) []byte {
+	t.Helper()
+	patched := bytes.Clone(archive)
+	binary.LittleEndian.PutUint16(patched[zipDirectoryEnd(t, patched)+10:], records)
+	return patched
+}
+
+// zip64Archive rewrites a plain zip as a zip64 one: the end record defers to
+// a zip64 end-of-central-directory record (and its locator) that declares
+// `records` entries while the central directory keeps its real contents.
+func zip64Archive(t testing.TB, archive []byte, records uint64) []byte {
+	t.Helper()
+	end := zipDirectoryEnd(t, archive)
+	directorySize := uint64(binary.LittleEndian.Uint32(archive[end+12:]))
+	directoryOffset := uint64(binary.LittleEndian.Uint32(archive[end+16:]))
+
+	var out bytes.Buffer
+	out.Write(archive[:end])
+	zip64End := make([]byte, 56)
+	copy(zip64End, "PK\x06\x06")
+	binary.LittleEndian.PutUint64(zip64End[4:], 44)
+	binary.LittleEndian.PutUint16(zip64End[12:], 45)
+	binary.LittleEndian.PutUint16(zip64End[14:], 45)
+	binary.LittleEndian.PutUint64(zip64End[24:], records)
+	binary.LittleEndian.PutUint64(zip64End[32:], records)
+	binary.LittleEndian.PutUint64(zip64End[40:], directorySize)
+	binary.LittleEndian.PutUint64(zip64End[48:], directoryOffset)
+	out.Write(zip64End)
+	locator := make([]byte, 20)
+	copy(locator, "PK\x06\x07")
+	binary.LittleEndian.PutUint64(locator[8:], uint64(end))
+	binary.LittleEndian.PutUint32(locator[16:], 1)
+	out.Write(locator)
+	plainEnd := bytes.Clone(archive[end:])
+	binary.LittleEndian.PutUint16(plainEnd[8:], 0xffff)
+	binary.LittleEndian.PutUint16(plainEnd[10:], 0xffff)
+	binary.LittleEndian.PutUint32(plainEnd[12:], 0xffffffff)
+	binary.LittleEndian.PutUint32(plainEnd[16:], 0xffffffff)
+	out.Write(plainEnd)
+	return out.Bytes()
+}
+
+// TestReplayZipDirectoryIsBoundedBeforeParsing feeds zips whose directory
+// records lie about or exceed the entry allowance: each is refused from its
+// end record, so the reader never materialises the headers, and the skip
+// reports the entry count the directory declares or actually holds.
+func TestReplayZipDirectoryIsBoundedBeforeParsing(t *testing.T) {
+	entries := make([]zipEntry, 0, 6)
+	for index := range 6 {
+		entries = append(entries, zipEntry{name: fmt.Sprintf("f%d.txt", index), body: "x"})
+	}
+	archive := zipArchive(t, entries)
+
+	t.Run("declared count above the allowance", func(t *testing.T) {
+		// archive/zip would reject the mismatch as malformed only after
+		// parsing the directory; the refusal happens first and reports the
+		// declared count.
+		lying := declareZipEntries(t, archive, 60000)
+		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(lying)}}), nestedOptions(64<<20, 10000))
+		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.zip:entries_limit:60000" {
+			t.Fatalf("skips = %v", skips)
+		}
+		if result.NestedSkips[0].Limit != 10000 || len(result.FinalFiles[0].Nested) != 0 || result.Coverage.NestedArchivesExpanded != 0 {
+			t.Fatalf("skip = %+v nested = %v coverage = %+v", result.NestedSkips[0], nestedPaths(result.FinalFiles[0]), result.Coverage)
+		}
+	})
+
+	t.Run("directory holds more headers than declared", func(t *testing.T) {
+		// The declared count fits the allowance (the reader compares only its
+		// low 16 bits) but the directory itself does not.
+		lying := declareZipEntries(t, archive, 2)
+		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(lying)}}), nestedOptions(64<<20, 4))
+		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.zip:entries_limit:6" {
+			t.Fatalf("skips = %v", skips)
+		}
+		if len(result.FinalFiles[0].Nested) != 0 || result.Coverage.NestedArchivesExpanded != 0 {
+			t.Fatalf("nested = %v coverage = %+v", nestedPaths(result.FinalFiles[0]), result.Coverage)
+		}
+	})
+
+	t.Run("zip64 record declares the count", func(t *testing.T) {
+		honest := zip64Archive(t, archive, 6)
+		if reader, err := zip.NewReader(bytes.NewReader(honest), int64(len(honest))); err != nil || len(reader.File) != 6 {
+			t.Fatalf("zip64 fixture is not a valid archive: files = %d, err = %v", len(reader.File), err)
+		}
+		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(honest)}}), nestedOptions(64<<20, 10000))
+		if got := nestedPaths(result.FinalFiles[0]); len(got) != 6 || len(result.NestedSkips) != 0 {
+			t.Fatalf("nested = %v skips = %v", got, result.NestedSkips)
+		}
+
+		lying := zip64Archive(t, archive, 70000)
+		result = replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(lying)}}), nestedOptions(64<<20, 10000))
+		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.zip:entries_limit:70000" {
+			t.Fatalf("skips = %v", skips)
+		}
+		if len(result.FinalFiles[0].Nested) != 0 || result.Coverage.NestedArchivesExpanded != 0 {
+			t.Fatalf("nested = %v coverage = %+v", nestedPaths(result.FinalFiles[0]), result.Coverage)
+		}
+	})
+
+	t.Run("layer entry budget refuses the archive as layer_budget", func(t *testing.T) {
+		options := nestedOptions(64<<20, 0)
+		options.MaxLayerEntries = 5
+		result, err := replayTestLayers(t, []testLayer{{digest: "sha256:nested", body: gzipLayer(t, []tarEntry{{name: "a.zip", body: string(archive)}})}}, options)
+		if err != nil {
+			t.Fatalf("Replay() error = %v", err)
+		}
+		if skips := skipReasons(result.NestedSkips); strings.Join(skips, ",") != "a.zip:layer_budget:6" {
+			t.Fatalf("skips = %v", skips)
+		}
+		if len(result.FinalFiles[0].Nested) != 0 || result.Coverage.LayersCompleted != 1 || result.Coverage.NestedArchivesExpanded != 0 {
+			t.Fatalf("nested = %v coverage = %+v", nestedPaths(result.FinalFiles[0]), result.Coverage)
+		}
+	})
+
+	t.Run("honest archive within the allowance is expanded", func(t *testing.T) {
+		result := replayOne(t, gzipLayer(t, []tarEntry{{name: "a.zip", body: string(archive)}}), nestedOptions(64<<20, 6))
+		if got := nestedPaths(result.FinalFiles[0]); len(got) != 6 || len(result.NestedSkips) != 0 || result.Coverage.NestedArchivesExpanded != 1 {
+			t.Fatalf("nested = %v skips = %v coverage = %+v", got, result.NestedSkips, result.Coverage)
 		}
 	})
 }

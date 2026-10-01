@@ -33,7 +33,7 @@ paths:
     get:
       tags: [Health]
       summary: Check process liveness
-      description: Returns success while the API process is running, without checking PostgreSQL readiness.
+      description: Returns success and the build version while the API process is running, without checking PostgreSQL readiness.
       operationId: getHealth
       responses:
         "200":
@@ -529,11 +529,17 @@ components:
     Health:
       type: object
       additionalProperties: false
-      required: [status]
+      required: [status, version]
       properties:
         status:
           type: string
           enum: [ok, ready]
+        version:
+          type: string
+          description: >-
+            Build version of the serving binary (the release tag for container
+            images, the module version for `go install`, or `dev`).
+          examples: [v3.0.0, dev]
 
     ErrorEnvelope:
       type: object

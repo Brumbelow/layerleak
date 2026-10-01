@@ -28,6 +28,7 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/registry"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/version"
 )
 
 const (
@@ -74,6 +75,13 @@ const shuttingDownMessage = "the API is shutting down; retry against another ins
 
 type readinessChecker interface {
 	Ready(context.Context) error
+}
+
+// healthResponse is the body of /health, /livez and a ready /readyz. Version
+// is the build version so operators can tell which build answers.
+type healthResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
 }
 
 type errorResponse struct {
@@ -295,7 +303,7 @@ func (options HandlerOptions) withDefaults() HandlerOptions {
 }
 
 func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(writer, http.StatusOK, healthResponse{Status: "ok", Version: version.Effective()})
 }
 
 func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request) {
@@ -315,7 +323,7 @@ func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request)
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database is not ready")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
+	writeJSON(writer, http.StatusOK, healthResponse{Status: "ready", Version: version.Effective()})
 }
 
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {

@@ -35,6 +35,10 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var allTags bool
 	var allowPartial bool
 	var progressSetting string
+	var outputDir string
+	var outputPath string
+	var noArtifacts bool
+	var noDatabase bool
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
@@ -108,6 +112,9 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			// The explicit Finish call after publication reports errors; this is a safety net.
 			defer func() { _ = progress.Finish() }()
 
+			if noDatabase {
+				openStore = func(config.Config) (storage.Store, error) { return storage.NewNoopStore(), nil }
+			}
 			store, err := openStore(cfg)
 			if err != nil {
 				if updateErr := progress.Update(progressSnapshot{
@@ -217,12 +224,16 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				targetsTotal:     result.TargetCount,
 				findingsFound:    result.TotalFindings,
 				phase:            "Saving Results",
-				message:          "Writing findings file",
+				message:          "Writing scan record",
 			}); err != nil {
 				logger.Debug("progress update failed")
 			}
 
-			artifactPaths, publicationErr := writeResultArtifacts(cfg.FindingsDir, cfg.PersistRawSecrets, outcome, store.Name())
+			var artifact scanArtifact
+			var publicationErr error
+			if !noArtifacts {
+				artifact, publicationErr = writeResultArtifacts(artifactOptions{outputDir: outputDir, configuredDir: cfg.FindingsDir}, outcome, store.Name())
+			}
 			if publicationErr != nil {
 				if updateErr := progress.Update(progressSnapshot{
 					repository:       ref.Repository,
@@ -248,30 +259,33 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err := progress.Finish(); err != nil {
 				logger.Debug("progress update failed")
 			}
-			for _, artifact := range []struct{ label, path string }{
-				{"Findings", artifactPaths.Findings}, {"Scan record", artifactPaths.Scan},
-			} {
-				if artifact.path == "" {
-					continue
+			for _, warning := range artifact.Warnings {
+				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
+					logger.Debug("artifact warning reporting failed")
 				}
-				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", artifact.label, sanitizeProgressValue(artifact.path)); err != nil {
+			}
+			if artifact.Path != "" {
+				// The path is a trusted local value: %q keeps every byte
+				// copyable instead of collapsing whitespace.
+				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Scan record: %q\n", artifact.Path); err != nil {
 					logger.Debug("artifact path reporting failed")
 				}
 			}
 
-			switch outputFormat {
-			case "json":
-				encoder := json.NewEncoder(cmd.OutOrStdout())
-				encoder.SetIndent("", "  ")
-				if err := encoder.Encode(scanservice.PublicResult(result)); err != nil {
-					return errors.Join(operationErr, publicationErr, err)
+			render := func(out io.Writer) error {
+				switch outputFormat {
+				case "json":
+					encoder := json.NewEncoder(out)
+					encoder.SetIndent("", "  ")
+					return encoder.Encode(scanservice.PublicResult(result))
+				case "summary":
+					return renderSummary(out, result)
+				default:
+					return fmt.Errorf("unsupported output format: %s", outputFormat)
 				}
-			case "summary":
-				if err := renderSummary(cmd.OutOrStdout(), result); err != nil {
-					return errors.Join(operationErr, publicationErr, err)
-				}
-			default:
-				return fmt.Errorf("unsupported output format: %s", outputFormat)
+			}
+			if err := writeFormattedOutput(cmd.OutOrStdout(), outputPath, render); err != nil {
+				return errors.Join(operationErr, publicationErr, err)
 			}
 
 			if publicationErr != nil || saveErr != nil {
@@ -298,11 +312,25 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	cmd.Flags().BoolVar(&allTags, "all-tags", false, "Enumerate and scan every public tag in a bare repository reference")
 	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed")
 	cmd.Flags().StringVar(&progressSetting, "progress", string(progressModeAuto), "Progress mode: auto, tty, plain, or off")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory for the scan record. Overrides LAYERLEAK_FINDINGS_DIR; the default is ./findings under the working directory.")
+	cmd.Flags().StringVar(&outputPath, "output", "-", "Write the formatted result to this file instead of stdout; - means stdout.")
+	cmd.Flags().BoolVar(&noArtifacts, "no-artifacts", false, "Do not write a scan record file.")
+	cmd.Flags().BoolVar(&noDatabase, "no-db", false, "Do not open or write to PostgreSQL even when LAYERLEAK_DATABASE_URL is set.")
 	cmd.Flags().IntVar(&tagPageSize, "tag-page-size", 0, "Registry tag-list page size for repository sweeps. Overrides LAYERLEAK_TAG_PAGE_SIZE. Must be greater than zero when set.")
 	cmd.Flags().IntVar(&maxRepositoryTags, "max-repository-tags", 0, "Maximum tags enumerated per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TAGS. Set to 0 to disable the limit; negative values are rejected.")
 	cmd.Flags().IntVar(&maxRepositoryTargets, "max-repository-targets", 0, "Maximum distinct targets resolved per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TARGETS. Set to 0 to disable the limit; negative values are rejected.")
 
 	return cmd
+}
+
+// writeFormattedOutput renders to stdout, or to the --output file when one is
+// named ("-" and "" mean stdout).
+func writeFormattedOutput(stdout io.Writer, outputPath string, render func(io.Writer) error) error {
+	path := strings.TrimSpace(outputPath)
+	if path == "" || path == "-" {
+		return render(stdout)
+	}
+	return writeOutputFile(path, render)
 }
 
 func parseOutputFormat(value string) (string, error) {

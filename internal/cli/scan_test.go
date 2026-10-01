@@ -116,7 +116,7 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadDir() error = %v", readErr)
 	}
-	if len(entries) != 2 {
+	if len(entries) != 1 {
 		t.Fatalf("len(entries) = %d", len(entries))
 	}
 
@@ -272,7 +272,7 @@ func TestScanCommandWritesPartialResultsOnConfiguredLimitError(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadDir() error = %v", readErr)
 	}
-	if len(entries) != 2 {
+	if len(entries) != 1 {
 		t.Fatalf("len(entries) = %d", len(entries))
 	}
 

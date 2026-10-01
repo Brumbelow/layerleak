@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,5 +213,56 @@ func TestScanProgressCountsPartialTargetsAndResolvedTagsOnce(t *testing.T) {
 	}
 	if last.TargetsCompleted+last.TargetsPartial+last.TargetsFailed != last.TargetsTotal {
 		t.Fatalf("final update target counts do not add up: %+v", last)
+	}
+}
+
+// TestScannedAtIsTheScanStartTimeInBothModes pins scanned_at to the clock
+// reading taken before the first registry request: the schema documents it as
+// the time the scan started, so it must not drift to the end of a long
+// single-reference scan. Every registry round trip advances the test clock.
+func TestScannedAtIsTheScanStartTimeInBothModes(t *testing.T) {
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for _, mode := range []string{"reference", "repository"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := newSweepFixture(t)
+			request := sweepRequest(t, fixture)
+			if mode == "reference" {
+				request.AllTags = false
+				ref, err := manifest.ParseReference("library/app:1.0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Reference = ref
+			}
+			var mu sync.Mutex
+			clock := start
+			request.Now = func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				return clock
+			}
+			request.Registry = registry.MustNewClient(registry.Options{
+				BaseURL:           "https://registry.test",
+				AllowPrivateHosts: true,
+				RequestAttempts:   1,
+				HTTPClient: &http.Client{Transport: repoRoundTripFunc(func(httpRequest *http.Request) (*http.Response, error) {
+					mu.Lock()
+					clock = clock.Add(time.Minute)
+					mu.Unlock()
+					return fixture.transport(httpRequest)
+				})},
+			})
+
+			result, _ := Scan(context.Background(), request)
+			if result.Mode != mode {
+				t.Fatalf("mode = %q, want %q", result.Mode, mode)
+			}
+			if clock.Equal(start) {
+				t.Fatal("the scan made no registry request")
+			}
+			if !result.ScannedAt.Equal(start) {
+				t.Fatalf("scanned_at = %s, want the scan start %s (clock ended at %s)", result.ScannedAt, start, clock)
+			}
+		})
 	}
 }

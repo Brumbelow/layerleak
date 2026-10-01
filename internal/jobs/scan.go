@@ -255,6 +255,9 @@ func newResult(request Request, mode string) Result {
 }
 
 func scanSingleReference(ctx context.Context, request Request) (Result, error) {
+	// scanned_at is the scan start, so the result is created before the
+	// target is scanned, exactly as scanRepository does.
+	result := newResult(request, "reference")
 	tags := scannedTags(request.Reference)
 	scanResult, err := scanTarget(ctx, request, request.Reference, tags, progressState{
 		targetsTotal:   1,
@@ -262,7 +265,6 @@ func scanSingleReference(ctx context.Context, request Request) (Result, error) {
 		currentRef:     request.Reference.CanonicalString(""),
 		findingsBefore: 0,
 	})
-	result := newResult(request, "reference")
 	result.ResolvedReference = scanResult.ResolvedReference
 	result.RequestedDigest = scanResult.RequestedDigest
 	result.TargetCount = 1

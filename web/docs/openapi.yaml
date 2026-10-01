@@ -1225,10 +1225,11 @@ components:
             scanner's own message. `files_skipped_oversize`,
             `max_findings_exceeded`, `max_raw_finding_bytes_exceeded`,
             `raw_retention_truncated`, `platform_skipped`, `manifest_skipped`,
-            `manifest_unsupported`, `platform_not_found` and
-            `layer_trailing_data` map, in the order listed, to the enum values
-            before `scan step failed`; every other code maps to `scan step
-            failed`.
+            `manifest_unsupported`, `platform_not_found`,
+            `layer_trailing_data`, `unsafe_archive_entries_skipped` and
+            `nested_archive_skipped` map, in the order listed, to the enum
+            values before `scan step failed`; every other code maps to `scan
+            step failed`.
           enum:
             - one or more files exceeded the configured per-file scan limit
             - the scan exceeded the configured findings limit
@@ -1239,6 +1240,8 @@ components:
             - a selected manifest uses layers that cannot be scanned
             - the requested platform was not found in the image
             - a layer blob carried data after the end of its compressed stream
+            - layer entries with unsafe paths or links were skipped
+            - an archive stored in a layer was not expanded; its own file was still scanned
             - scan step failed
         limit:
           type: integer

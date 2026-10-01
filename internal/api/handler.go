@@ -1391,6 +1391,8 @@ var diagnosticMessages = map[string]string{
 	"manifest_unsupported":           "a selected manifest uses layers that cannot be scanned",
 	"platform_not_found":             "the requested platform was not found in the image",
 	"layer_trailing_data":            "a layer blob carried data after the end of its compressed stream",
+	"unsafe_archive_entries_skipped": "layer entries with unsafe paths or links were skipped",
+	"nested_archive_skipped":         "an archive stored in a layer was not expanded; its own file was still scanned",
 }
 
 func safeDiagnosticMessage(code string) string {

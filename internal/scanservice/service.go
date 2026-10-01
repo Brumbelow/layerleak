@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/config"
@@ -189,11 +190,36 @@ func (s *Service) registryClient(ref manifest.Reference) (*registry.Client, erro
 		AllowedPrivateAuthHosts:     s.config.AllowedPrivateAuthHosts,
 		RequestAttempts:             s.config.RegistryRequestAttempts,
 		MaxManifestBytes:            s.config.MaxManifestBytes,
+		Credentials:                 s.credentialSource(baseURL),
 	}
 	if s.newRegistryClient != nil {
 		return s.newRegistryClient(options)
 	}
 	return registry.NewClient(options)
+}
+
+// credentialSource builds the credential chain for one scan: the configured
+// username and password bound to the registry host the client will contact
+// (the scanned reference's registry, or the configured endpoint override),
+// then the Docker config.json when one is configured. It returns nil, and the
+// client stays anonymous, when neither is set. The same chain serves every
+// scan of the process, including API requests.
+func (s *Service) credentialSource(baseURL string) registry.CredentialSource {
+	sources := make([]registry.CredentialSource, 0, 2)
+	if s.config.RegistryUsername != "" || s.config.RegistryPassword != "" {
+		host := baseURL
+		if parsed, err := url.Parse(baseURL); err == nil && parsed.Host != "" {
+			host = parsed.Host
+		}
+		sources = append(sources, registry.StaticCredentials(host, s.config.RegistryUsername, string(s.config.RegistryPassword)))
+	}
+	if s.config.DockerConfigPath != "" {
+		sources = append(sources, registry.DockerConfigCredentials(s.config.DockerConfigPath))
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return registry.ChainCredentials(sources...)
 }
 
 func wrapScanError(err error) error {

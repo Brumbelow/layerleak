@@ -15,8 +15,13 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - The root import path `github.com/brumbelow/layerleak` is frozen at v1.0.0 and
   the historical v2.0.0-v2.5.0 tags are not Go modules; see the historical
   version note below.
-- The HTTP API path prefix (`/api/v1`) and the database schema version (`0004`)
-  do not change with the module major.
+- The HTTP API path prefix (`/api/v1`) does not change with the module major.
+  Database schema version `0004` is new in 3.0.0 (the v2.x tags shipped
+  0001-0003) and must be applied before the API starts; see Compatibility.
+- Building or installing from source requires Go 1.27.1 or newer (the v2.x
+  tags built with Go 1.25).
+- The module has no public Go API: every package lives under `internal/`, so
+  the internal type changes recorded below affect only this repository.
 
 ### Added
 
@@ -38,9 +43,27 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Native migration, raw-secret purge, and container healthcheck binaries.
 - Checksummed, advisory-locked migration ledger with legacy 0001-0003 adoption
   and schema version 0004 hardening.
-- Protected multi-platform release automation for linux/amd64 and linux/arm64,
-  including full source gates, PostgreSQL/container smoke, Grype policy, SPDX
-  SBOMs, SLSA provenance, GitHub attestations, and keyless Cosign signatures.
+- Protected release automation: a multi-platform API image for linux/amd64
+  and linux/arm64 with full source gates, PostgreSQL/container smoke, Grype
+  policy, SPDX SBOMs, SLSA provenance, GitHub attestations, and keyless Cosign
+  signatures.
+- Prebuilt CLI archives with every release: `layerleak_<version>_<os>_<arch>.tar.gz`
+  for linux and darwin on amd64 and arm64 and `layerleak_<version>_windows_amd64.zip`,
+  each with `LICENSE` and `THIRD_PARTY_NOTICES.md`; a sorted
+  `layerleak_<version>_checksums.txt` keyless-signed with Cosign
+  (`.sigstore.json` bundle); a SLSA build-provenance attestation whose subjects
+  are the five archives; and `release-manifest.json` `schema_version` 2 with a
+  `cli` object and `workflow_sha`. Builds are reproducible
+  (`CGO_ENABLED=0`, `-trimpath`, `SOURCE_DATE_EPOCH`), and a stable release
+  refuses to publish unless its rebuild reproduces the accepted release
+  candidate's binaries byte for byte.
+- A composite GitHub Action at the repository root
+  (`uses: brumbelow/layerleak@v3.0.0`) with inputs `image`, `version`,
+  `format`, `fail-on`, `allow-partial`, `platform`, `output-file` and
+  `extra-args` and outputs `exit-code`, `result-file`, `sarif-file` and
+  `version`. It downloads the release archive for the runner, verifies the
+  checksum, the Cosign bundle and the build-provenance attestation, and only
+  then runs the scan; it never prints findings.
 - Versioned OpenAPI 3.1 specification, release manifest, third-party notices,
   and release verification documentation.
 - A versioned, always-redacted scan record per scan containing the public
@@ -54,7 +77,8 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   `--format json`; `--version` stays an alias for the first line.
 - Registry HTTP failures are typed (`registry.StatusError` with helpers such as
   `IsNotFound`, `IsRateLimited`, `IsUnauthorized`) and transport failures are
-  `registry.RequestError`, so callers can tell a missing image from an outage.
+  `registry.RequestError`, so the CLI and the API can tell a missing image
+  from an outage.
 - Every registry and token request sends `User-Agent: layerleak/<version>`.
 - `LAYERLEAK_DATABASE_URL` accepts unix-socket URLs
   (`postgres:///db?host=/var/run/postgresql`) and libpq keyword strings in
@@ -93,8 +117,11 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   `LAYERLEAK_API_READINESS_CACHE_TTL` (default `5s`) for graceful drain and
   readiness caching.
 - Private-registry authentication. `LAYERLEAK_REGISTRY_USERNAME` and
-  `LAYERLEAK_REGISTRY_PASSWORD` supply a credential for the registry pinned by
-  `LAYERLEAK_REGISTRY_BASE_URL`; `LAYERLEAK_DOCKER_CONFIG` names a Docker
+  `LAYERLEAK_REGISTRY_PASSWORD` supply a static credential: the CLI applies it
+  to the registry of the scanned reference when `--username` is not given,
+  the API applies it only to the registry pinned by
+  `LAYERLEAK_REGISTRY_BASE_URL` and never to a registry a caller names, and
+  both refuse it for local image sources; `LAYERLEAK_DOCKER_CONFIG` names a Docker
   `config.json` whose `auths` entries (base64 `auth` or `username`/`password`,
   Docker Hub aliases resolved) are consulted per registry host; the CLI takes
   per-scan credentials with `--username` and `--password-stdin`. Credential
@@ -184,9 +211,10 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   `internal/scanner/testdata/corpus` fixtures (real positives and discarded
   placeholders, vendor shapes stored base64-encoded) drive the detector tests.
 - Local image inputs: `layerleak scan` reads images from the filesystem with
-  `oci:<dir>[:<tag>][@<digest>]` (OCI image layout), `oci-archive:<file.tar>`
-  (a layout inside a tar) and `docker-archive:<file.tar>[:<repo>[:<tag>]]`
-  (`docker save` output); `--all-tags` enumerates the tags the source holds.
+  `oci:<dir>[:<tag>][@<digest>]` (OCI image layout),
+  `oci-archive:<file.tar>[:<tag>][@<digest>]` (a layout inside a tar) and
+  `docker-archive:<file.tar>[:<repo>[:<tag>]][@<digest>]` (`docker save`
+  output); `--all-tags` enumerates the tags the source holds.
   The source string is the `repository` of the result, record and database
   row, `resolved_reference` carries the manifest digest, and platform policy,
   limits, coverage, diagnostics, exit codes and schema versions are unchanged.
@@ -291,8 +319,8 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   unquoted `rel`, any parameter order, multiple headers); a header that cannot
   be parsed makes the sweep partial instead of silently truncating it.
 - Retries back off exponentially with jitter (capped at 5s) or honour
-  `Retry-After` (capped at 30s); only `GET`/`HEAD` are retried, on 408/429/5xx
-  and transient transport failures. `LAYERLEAK_HTTP_TIMEOUT` applies per
+  `Retry-After` (capped at 30s); only `GET`/`HEAD` are retried, on 408, 429
+  and 5xx other than 501 and 505, and on transient transport failures. `LAYERLEAK_HTTP_TIMEOUT` applies per
   attempt and also bounds dial, TLS handshake, and the response headers of
   blob requests.
 - `WWW-Authenticate` parsing honours quoted commas and escaped quotes, reads
@@ -318,14 +346,26 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   volume becomes ready with one `docker compose up -d`; the database password
   reaches the containers as `PGPASSWORD` rather than inside three URLs; a 35s
   `stop_grace_period` lets the shutdown drain finish.
+- Compose bounds every service: the `api` service gets a 2 GiB `mem_limit`, a
+  256 `pids_limit` and a 256 MiB `/tmp` tmpfs; `migrate` and `purge` get a
+  64 MiB `/tmp`; `db` drops every capability except `CHOWN`, `DAC_OVERRIDE`,
+  `FOWNER`, `SETGID` and `SETUID`, mounts sized tmpfs for `/run/postgresql`
+  and `/tmp` and gets 256 MiB of shared memory. Raise `mem_limit` together
+  with any `LAYERLEAK_MAX_*_BYTES` bound you raise, and mirror the limits under
+  `deploy.resources.limits` for a Swarm stack.
+- The Compose `api` service forwards every variable the API reads, including
+  `LAYERLEAK_LOG_FORMAT`, the registry credential pair, `LAYERLEAK_DOCKER_CONFIG`
+  (a path inside the container), the nested-archive bounds and the layer cache
+  budget; a test fails if a variable is left out.
+- Configuration examples pin the API image to a release tag; production should
+  pin the digest recorded in `release-manifest.json`, because `latest` moves
+  with every stable release.
 - Dockerfile: the floating `# syntax=docker/dockerfile:1.7` frontend is
   gone (the digest-pinned BuildKit supplies its own), builds pass
   `-buildvcs=false` explicitly, and `.dockerignore` is an allowlist.
 - Release tooling pins move to Grype 0.119.0, cosign 3.1.3, Buildx 0.37.2,
   BuildKit 0.33.1 and GitHub CLI 2.102.0; the image scan job runs the
   checksum-pinned Grype directly instead of a third-party action.
-- Multi-platform selection and layer handling: see the detector, layer and
-  scanner entries added by the 3.0.0 fix waves below.
 - Default platform policy: without `--platform` only `linux` manifests of a
   multi-platform index are scanned; other operating systems are reported as
   `platform_skipped` and attestation, in-toto, nested-index and other
@@ -396,8 +436,10 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Progress output counts partial targets, reports resolved tags once, keeps
   per-manifest scanner events in the scanning phase and emits one
   `target_done` per target.
-- `--format json` prints the result for failed scans too (exit code still 1)
-  and the scan record is written for them; CLI stdout JSON and the local
+- `--format json` prints the result for failed scans that produced one (exit
+  code still 1) and the scan record is written for them; cancellation (a
+  signal or `LAYERLEAK_SCAN_TIMEOUT`) and failures before any result exists
+  still print only the error on stderr; CLI stdout JSON and the local
   record keep real, control-character-sanitised error and diagnostic messages
   with raw values redacted instead of the constant "scan step failed". Storage
   and the HTTP API keep the fully redacted result.
@@ -427,10 +469,13 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - `redacted_value` masks values shorter than 12 characters completely and
   shows the first three characters followed by a fixed eight-character mask
   otherwise; the suffix and the length are no longer disclosed.
-- Environment-variable and label findings cover the value alone, so their
-  `fingerprint`, `match_start`, `match_end` and `redacted_value` equal those of
-  the same secret found in a file and the two no longer produce separate
-  findings. These fingerprints change once; see [UPGRADING.md](./UPGRADING.md).
+- Environment-variable and label findings from the generic `keyword_entropy`
+  and assigned-value detectors cover the value alone, so their `fingerprint`,
+  `match_start`, `match_end` and `redacted_value` equal those of the same
+  secret found in a file and the two no longer produce separate findings.
+  Only those fingerprints change once; file findings and vendor-pattern
+  environment and label findings keep theirs. See
+  [UPGRADING.md](./UPGRADING.md).
 - Detector identifiers were renamed: `digitalocean_pat` ->
   `digitalocean_personal_access_token`, `stripe_key` -> `stripe_api_key`,
   `gitlab_token` -> `gitlab_personal_access_token`, `jwt` -> `json_web_token`,
@@ -532,8 +577,9 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   within the default entry limits.
 - Registry credentials travel only over https to the host they were looked up
   for; the token realm must still pass the allowlist and private-host checks;
-  the `Authorization` header is dropped on any cross-host redirect; the
-  configured environment pair is never bound to the registry of a submitted
+  the `Authorization` header is dropped on any cross-host redirect; in the
+  API the configured environment pair is bound only to the registry pinned by
+  `LAYERLEAK_REGISTRY_BASE_URL`, never to the registry of a submitted
   reference, so an API caller cannot make the server send the operator's
   credential to a registry or token realm the caller names. Passwords are
   held in `config.Secret` and every credential type redacts itself when
@@ -544,10 +590,13 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   missing directory is created `0700` and records are written `0600`. No raw
   secret value is ever written locally, even with
   `LAYERLEAK_PERSIST_RAW_SECRETS=1`.
-- CLI registry credentials are taken only through `--password-stdin` (no
-  `--password` flag), apply to the registry of the scanned reference over
-  https only, and never appear in logs, output, records or the database; a
-  401/403 exits 1 with "authentication to <registry host> failed".
+- The CLI accepts a password only through `--password-stdin` (there is no
+  `--password` flag). Its credential comes from `--username`/`--password-stdin`,
+  otherwise from the `LAYERLEAK_REGISTRY_USERNAME`/`PASSWORD` pair, otherwise
+  from `LAYERLEAK_DOCKER_CONFIG`; it is applied to the registry of the scanned
+  reference over https only and never appears in logs, output, records or the
+  database; a 401/403 exits 1 with "authentication to <registry host>
+  failed".
 - `context_snippet` redacts every copy of a matched secret inside the window,
   not only the first one.
 - A nested zip's central directory is bounded before `archive/zip` parses it:
@@ -605,18 +654,16 @@ container and PostgreSQL installs, and API consumers.
 - Exit code 3 is new. Scripts that treated exit 1 as retryable must add 3 as
   "incomplete coverage"; `--fail-on` defaults to `low`, which preserves the
   previous exit 2 behaviour.
-- `--format json` now prints a result on failure (exit 1) where it printed
-  nothing.
-- `redacted_value` has a new shape and the fingerprints of environment and
-  label findings changed once; detector identifiers listed under "Changed"
-  were renamed. Baselines keyed on these values must be regenerated.
+- `--format json` now prints the result of a failed scan that produced one
+  (exit 1) where it printed nothing; cancellation, a scan timeout and failures
+  before any result exists still print nothing on stdout.
+- `redacted_value` has a new shape, the fingerprints of environment and label
+  findings from the generic keyword and assigned-value detectors changed once,
+  and the detector identifiers listed under "Changed" were renamed. Baselines keyed on these values must be regenerated.
 - `sensitive_file_*` findings carry an empty `redacted_value`, an empty
   `context_snippet`, `line_number` 0 and `match_start` = `match_end` = 0;
   consumers that assumed a non-empty value or a positive span must accept
   them.
-- Go API users: `registry.NewClient` returns `(*Client, error)` and reports
-  configuration errors eagerly (`registry.MustNewClient` panics instead);
-  transport failures are `*registry.RequestError` rather than `*url.Error`.
 - `LAYERLEAK_LOG_LEVEL` values other than the four names (for example
   `info+2` or `warning`) are rejected at startup.
 - `LAYERLEAK_HTTP_TIMEOUT` is a per-attempt deadline; the worst-case wall time

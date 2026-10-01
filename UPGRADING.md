@@ -57,7 +57,6 @@ Changed:
   `manifest_unsupported` (partial, acceptable with `--allow-partial`).
 - `LAYERLEAK_LOG_LEVEL` accepts exactly `debug`, `info`, `warn`, `error`; the
   `slog` offset forms such as `INFO+2` that v2.x accepted are rejected.
-- Go API: `registry.NewClient` returns `(*Client, error)`.
 
 ## Track 1: pre-3.0.0 CLI users (v1.0.0 and source builds of the v2.x tags)
 
@@ -175,10 +174,13 @@ v2.x checkout with `go build`.
    redact every copy of a matched secret inside the window, not only the
    first.
 
-8. `--format json` now prints the result for failed scans too (exit code
-   stays `1`, and the scan record is written), so automation can read
-   `status: failed` and the diagnostics. Every pre-3.0.0 build returned the
-   error before printing anything.
+8. `--format json` now prints the result for failed scans that produced one
+   (exit code stays `1`, and the scan record is written), so automation can
+   read `status: failed` and the diagnostics. Cancellation (a signal or
+   `LAYERLEAK_SCAN_TIMEOUT`) and failures before any result exists (invalid
+   input, an unreadable local source, an error opening the store) still print
+   only the error on stderr. Every pre-3.0.0 build returned the error before
+   printing anything.
 
 9. Accept the `sensitive_file_*` family, new in 3.0.0: a sensitive file that
    cannot be read as text (binary or over `LAYERLEAK_MAX_FILE_BYTES`) is

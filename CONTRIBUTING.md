@@ -152,8 +152,10 @@ persistence responses must never expose stored raw values.
 ## Database changes
 
 - Add paired `NNNN_name.up.sql` and `NNNN_name.down.sql` files.
-- Never edit a migration after it has shipped; checksums make drift a hard
-  error.
+- Never edit a migration after it has shipped; the ledger checksums make drift
+  a hard error and `TestShippedMigrationChecksumsAreFrozen` pins the SHA-256 of
+  every shipped file. Add a new numbered pair and record its digests in
+  `internal/storage/migration_checksums_test.go` instead.
 - Prefer additive schema changes and explicit indexes/constraints.
 - Update `CurrentSchemaVersion`, migration tests, Compose smoke coverage, and
   readiness expectations in the same change.

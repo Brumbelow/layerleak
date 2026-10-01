@@ -208,10 +208,10 @@ variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 | `LAYERLEAK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` (case-insensitive); any other spelling is rejected. |
 | `LAYERLEAK_FINDINGS_DIR` | auto | CLI only. Directory for saved scan records. |
 | `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Boolean. Unsafe opt-in for raw values and snippets. |
-| `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Manifest, config, tag, and auth request deadline. |
+| `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Per-attempt deadline for manifest, config, tag, and auth requests and for the response headers of blob requests; also bounds dial and TLS handshake. |
 | `LAYERLEAK_BLOB_TIMEOUT` | `10m` | Layer blob transfer deadline. |
 | `LAYERLEAK_SCAN_TIMEOUT` | `30m` | End-to-end CLI scan deadline. |
-| `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` | `2` | Attempts including the first request; must be positive. |
+| `LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS` | `2` | Attempts including the first request; retries back off exponentially (jittered, at most 5s) or honour `Retry-After` (at most 30s); must be positive. |
 | `LAYERLEAK_REGISTRY_MAX_REDIRECTS` | `3` | Redirect cap; each destination is revalidated; must be positive. |
 | `LAYERLEAK_MAX_AUTH_RESPONSE_BYTES` | `1048576` | Maximum registry token response size; must be positive. |
 | `LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS` | empty | Comma-separated exact private registry `host[:port]` allowlist. |
@@ -231,6 +231,12 @@ to it (for example `LAYERLEAK_REGISTRY_BASE_URL=http://registry.internal:5000`
 together with `LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS=registry.internal:5000`);
 every other destination requires TLS 1.2+ with a verifiable certificate. Allow
 only infrastructure you control.
+
+Layerleak honours `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`. When a proxy is
+selected for a request, the registry hostname is sent as the `CONNECT` target
+and local DNS resolution and IP pinning are skipped, because the proxy is the
+egress control; the https-only rule and the private-host allowlists still
+apply. Hosts matched by `NO_PROXY` are connected directly with address pinning.
 
 ### Resource bounds
 
@@ -304,15 +310,20 @@ go run ./cmd/migrate
 go run ./cmd/migrate
 ```
 
-The second run is intentionally a no-op. The migration command reads one
-variable of its own:
+The second run is intentionally a no-op. The migration command reads three
+variables of its own:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LAYERLEAK_MIGRATIONS_DIR` | `/app/migrations` | Directory holding the shipped `migrations/*.sql`; from a checkout use `$PWD/migrations`. | The migration command uses an advisory
-lock, a checksummed migration ledger, and one transaction per migration. It can
-adopt a complete legacy 0001-0003 schema and refuses drift, gaps, dirty state,
-or a partial legacy schema.
+| `LAYERLEAK_MIGRATIONS_DIR` | `/app/migrations` | Directory holding the shipped `migrations/*.sql`; from a checkout use `$PWD/migrations`. |
+| `LAYERLEAK_MIGRATION_TIMEOUT` | `30m` | Overall deadline for one run of the command; `0` disables it. |
+| `LAYERLEAK_MIGRATION_LOCK_TIMEOUT` | `15s` | How long each of three attempts waits for the migration advisory lock. |
+
+The migration command uses an advisory lock with bounded waits, a checksummed
+migration ledger, and one transaction per migration. It can adopt a complete
+legacy 0001-0003 schema and refuses drift, gaps, dirty state, or a partial
+legacy schema. On a populated database, stop API replicas and long-running
+transactions before applying `0004`, whose data updates hold row locks.
 
 The container bundles the same native command:
 

@@ -107,6 +107,8 @@ services:
       LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
       PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_MIGRATIONS_DIR: ${LAYERLEAK_MIGRATIONS_DIR:-/app/migrations}
+      LAYERLEAK_MIGRATION_TIMEOUT: ${LAYERLEAK_MIGRATION_TIMEOUT:-30m}
+      LAYERLEAK_MIGRATION_LOCK_TIMEOUT: ${LAYERLEAK_MIGRATION_LOCK_TIMEOUT:-15s}
     depends_on:
       db:
         condition: service_healthy

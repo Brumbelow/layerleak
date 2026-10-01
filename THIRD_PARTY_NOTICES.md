@@ -7,13 +7,14 @@ license terms.
 | Module | Version | License |
 | --- | --- | --- |
 | `github.com/distribution/reference` | v0.6.0 | Apache-2.0 |
-| `github.com/klauspost/compress` | v1.19.2 | Apache-2.0, BSD-3-Clause, and MIT components |
+| `github.com/inconshreveable/mousetrap` | v1.1.0 | Apache-2.0 |
+| `github.com/klauspost/compress` | v1.20.1 | Apache-2.0, BSD-3-Clause, and MIT components |
 | `github.com/lib/pq` | v1.12.3 | MIT |
 | `github.com/opencontainers/go-digest` | v1.0.0 | Apache-2.0 |
 | `github.com/spf13/cobra` | v1.10.2 | Apache-2.0 |
-| `github.com/spf13/pflag` | v1.0.9 | BSD-3-Clause |
-| `golang.org/x/sys` | v0.47.0 | BSD-3-Clause |
-| `golang.org/x/term` | v0.45.0 | BSD-3-Clause |
+| `github.com/spf13/pflag` | v1.0.10 | BSD-3-Clause |
+| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause |
+| `golang.org/x/term` | v0.46.0 | BSD-3-Clause |
 
 The corresponding license texts are present in each module's source archive.
 Links to those versioned sources and the classified license for every linked

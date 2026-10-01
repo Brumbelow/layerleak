@@ -28,6 +28,11 @@ go.work.sum
 # env file
 .env
 
+# Python bytecode and the documentation-validator virtualenv
+__pycache__/
+*.pyc
+.venv-docs/
+
 # Editor/IDE
 # .idea/
 # .vscode/

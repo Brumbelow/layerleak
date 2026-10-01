@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/brumbelow/layerleak/actions/workflows/test.yml/badge.svg)](https://github.com/brumbelow/layerleak/actions/workflows/test.yml)
 [![CodeQL](https://github.com/brumbelow/layerleak/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/brumbelow/layerleak/actions/workflows/codeql-analysis.yml)
-[![Go](https://img.shields.io/badge/Go-1.25.13%2B-00ADD8?logo=go)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.27.1%2B-00ADD8?logo=go)](https://go.dev/)
 
 Layerleak is a read-only OCI image secret scanner. It resolves public image
 references without a Docker daemon, verifies downloaded content against OCI
@@ -48,7 +48,7 @@ or behind an authenticated gateway.
 
 ## Install the CLI
 
-Layerleak requires Go 1.25.13 or newer.
+Layerleak requires Go 1.27.1 or newer.
 
 ```bash
 go install github.com/brumbelow/layerleak@latest
@@ -416,7 +416,7 @@ docker compose ps
 curl --fail http://127.0.0.1:8080/readyz
 ```
 
-The Compose services use a digest-pinned PostgreSQL 16.13 image, wait for
+The Compose services use a digest-pinned PostgreSQL 16.15 image, wait for
 PostgreSQL health, run the API read-only with all capabilities dropped, and use
 the native readiness probe. The host port binds to `127.0.0.1` by default; set
 `LAYERLEAK_API_HOST` only when an authenticated network edge is ready. The

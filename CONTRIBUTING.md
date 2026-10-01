@@ -6,7 +6,7 @@ operation before adding convenience.
 
 ## Before you start
 
-- Use Go 1.25.13 or newer.
+- Use Go 1.27.1 or newer.
 - Read [README.md](./README.md) and [SECURITY.md](./SECURITY.md).
 - Check existing issues and pull requests before duplicating work.
 - Keep changes focused and match existing package boundaries and test style.
@@ -64,7 +64,7 @@ go test -short ./... -count=1
 go test -short -race ./... -count=1
 go test ./... -count=1 # with LAYERLEAK_TEST_DATABASE_URL
 python3 -m venv .venv-docs
-.venv-docs/bin/python -m pip install --require-hashes -r requirements-docs.lock
+.venv-docs/bin/python -m pip install --require-hashes -r requirements-docs.txt
 .venv-docs/bin/python -m unittest scripts/test_validate_docs.py
 .venv-docs/bin/python scripts/validate_docs.py
 LAYERLEAK_DB_PASSWORD=test docker compose config --quiet

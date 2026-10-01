@@ -1,6 +1,6 @@
 # Locked documentation dependencies; install with pip --require-hashes.
 # Update in Python 3.13 with:
-# pip-compile --generate-hashes --strip-extras --output-file=requirements-docs.lock requirements-docs.in
+# pip-compile --generate-hashes --strip-extras --output-file=requirements-docs.txt requirements-docs.in
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0

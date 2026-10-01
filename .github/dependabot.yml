@@ -31,3 +31,33 @@ updates:
       container-images:
         patterns:
           - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/scripts/tests"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      browser-tests:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      documentation-validators:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      compose-images:
+        patterns:
+          - "*"

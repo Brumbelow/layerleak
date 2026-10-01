@@ -65,6 +65,9 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	parsed, err := parseOptions(args, stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -139,6 +142,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 		counts.FindingValues,
 		counts.OccurrenceSnippets,
 	)
+	// A writer that is still opted in can refill rows the batches already
+	// walked; recount so a "successful" purge never hides residue.
+	residue, err := store.CountRawSecrets(ctx)
+	if err != nil {
+		return fmt.Errorf("recount stored raw secrets after purge: %w", err)
+	}
+	if residue.Total() > 0 {
+		return fmt.Errorf("purge completed but %d raw finding value(s) and %d raw occurrence snippet(s) remain: a writer with LAYERLEAK_PERSIST_RAW_SECRETS=1 is still running; disable it on every API and CLI instance, restart them, then rerun the purge",
+			residue.FindingValues, residue.OccurrenceSnippets)
+	}
 	return nil
 }
 

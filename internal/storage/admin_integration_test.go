@@ -7,9 +7,10 @@ import (
 	"time"
 )
 
-// TestPostgresStorePurgeRawSecretsInSmallBatches purges nine findings and
-// eighteen occurrences with a batch size of four and checks the batch walk,
-// the running totals and that redacted rows survive.
+// TestPostgresStorePurgeRawSecretsInSmallBatches purges eighteen findings
+// (nine scans with two unique fingerprints each) and eighteen occurrences with
+// a batch size of four and checks the batch walk, the running totals and that
+// redacted rows survive.
 func TestPostgresStorePurgeRawSecretsInSmallBatches(t *testing.T) {
 	db := openIntegrationDB(t)
 	defer func() { _ = db.Close() }()
@@ -33,7 +34,7 @@ func TestPostgresStorePurgeRawSecretsInSmallBatches(t *testing.T) {
 		}
 	}
 	before, err := store.CountRawSecrets(context.Background())
-	if err != nil || before.FindingValues != 9 || before.OccurrenceSnippets != 18 {
+	if err != nil || before.FindingValues != 18 || before.OccurrenceSnippets != 18 {
 		t.Fatalf("CountRawSecrets() = %#v, %v", before, err)
 	}
 
@@ -48,8 +49,8 @@ func TestPostgresStorePurgeRawSecretsInSmallBatches(t *testing.T) {
 	if purged != before {
 		t.Fatalf("purged = %#v, before = %#v", purged, before)
 	}
-	// 9 values in batches of 4 -> 4, 4, 1; 18 snippets -> 4, 4, 4, 4, 2.
-	wantRows := []int64{4, 4, 1, 4, 4, 4, 4, 2}
+	// 18 values in batches of 4 -> 4, 4, 4, 4, 2; 18 snippets -> the same.
+	wantRows := []int64{4, 4, 4, 4, 2, 4, 4, 4, 4, 2}
 	if len(reports) != len(wantRows) {
 		t.Fatalf("progress reports = %+v", reports)
 	}
@@ -58,7 +59,7 @@ func TestPostgresStorePurgeRawSecretsInSmallBatches(t *testing.T) {
 		if report.Rows != wantRows[index] {
 			t.Fatalf("report %d rows = %d, want %d (%+v)", index, report.Rows, wantRows[index], reports)
 		}
-		if index < 3 {
+		if index < 5 {
 			running.FindingValues += report.Rows
 			if report.Table != "findings" {
 				t.Fatalf("report %d table = %q", index, report.Table)
@@ -78,9 +79,9 @@ func TestPostgresStorePurgeRawSecretsInSmallBatches(t *testing.T) {
 	if err != nil || after.Total() != 0 {
 		t.Fatalf("CountRawSecrets(after) = %#v, %v", after, err)
 	}
-	assertCount(t, db, "SELECT COUNT(*) FROM findings", 9)
+	assertCount(t, db, "SELECT COUNT(*) FROM findings", 18)
 	assertCount(t, db, "SELECT COUNT(*) FROM finding_occurrences", 18)
-	assertCount(t, db, "SELECT COUNT(*) FROM findings WHERE redacted_value <> ''", 9)
+	assertCount(t, db, "SELECT COUNT(*) FROM findings WHERE redacted_value <> ''", 18)
 
 	// A second run finds nothing and reports nothing.
 	reports = nil

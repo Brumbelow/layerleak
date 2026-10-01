@@ -105,6 +105,29 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   Tokens are cached per registry host, challenge and credential identity with
   their advertised lifetime (60s default, 24h cap, 10s safety margin) and
   refreshed on 401; anonymous and authenticated tokens never share an entry.
+- Opt-in API bearer-token authentication: `LAYERLEAK_API_BEARER_TOKENS`
+  (comma-separated, at least 32 printable ASCII characters each) or
+  `LAYERLEAK_API_BEARER_TOKENS_FILE` (one per line) require
+  `Authorization: Bearer <token>` on every `/api/` request; a missing or
+  unknown token answers `401 unauthorized` with `WWW-Authenticate`. Health
+  probes stay open, tokens are held only as SHA-256 digests and compared in
+  constant time, and the API warns at startup when it listens on a
+  non-loopback address without tokens.
+- Prometheus metrics on a separate `LAYERLEAK_API_METRICS_ADDR` listener
+  (`/metrics`, text exposition, no new dependency): requests by route and
+  status class, request duration histogram, scans by outcome and error code,
+  in-flight scans, process start time and build info. Labels never carry
+  paths, references or secrets.
+- Keyset pagination: the three list endpoints return an additive
+  `next_cursor` and accept it as `cursor` to continue strictly after the last
+  row; `limit` and `offset` keep working.
+- `layerleak-purge-raw-secrets --dry-run` and `--batch-size`; the purge now
+  clears rows in id-range batches holding the exclusive lock per batch, prints
+  running totals, is bounded by `LAYERLEAK_PURGE_TIMEOUT` (default `30m`),
+  keeps committed batches when a later one fails, and recounts afterwards so a
+  writer still opted in cannot hide residue behind a successful exit.
+- `layerleak-migrate-up --status` (exit 0 current, 2 pending, 1 error),
+  `--dry-run` and `--version`; `-h` exits 0 in both admin binaries.
 
 ### Changed
 

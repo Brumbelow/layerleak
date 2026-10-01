@@ -90,9 +90,11 @@ Expected protections include:
 
 The following are deployment responsibilities, not built-in controls:
 
-- The API has no authentication, authorization, tenant isolation, TLS
-  termination, or rate limiting across replicas. Keep it private and front it
-  with appropriate controls.
+- The API has no authorization, tenant isolation, TLS termination, or rate
+  limiting across replicas, and no authentication unless
+  `LAYERLEAK_API_BEARER_TOKENS` is configured. Keep it private and front it
+  with appropriate controls; the metrics listener, when enabled, is
+  unauthenticated and must stay on a private interface.
 - `LAYERLEAK_PERSIST_RAW_SECRETS=1` stores sensitive material. Restrict database
   access, encryption, backups, logs, and retention accordingly. Disabling the
   setting prevents new raw writes but does not delete historical values. Before

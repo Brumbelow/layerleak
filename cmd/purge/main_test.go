@@ -105,3 +105,15 @@ func TestPurgeContextAppliesDeadlineOnlyWhenPositive(t *testing.T) {
 		t.Fatalf("deadline = %v (ok=%t)", deadline, ok)
 	}
 }
+
+func TestRunHelpExitsCleanly(t *testing.T) {
+	for _, flagName := range []string{"-h", "-help", "--help"} {
+		var stderr bytes.Buffer
+		if err := run([]string{flagName}, &bytes.Buffer{}, &stderr); err != nil {
+			t.Fatalf("run(%s) error = %v", flagName, err)
+		}
+		if !strings.Contains(stderr.String(), "-confirm") {
+			t.Fatalf("run(%s) did not print usage: %q", flagName, stderr.String())
+		}
+	}
+}

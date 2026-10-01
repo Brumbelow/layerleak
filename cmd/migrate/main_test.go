@@ -255,3 +255,16 @@ func TestTimeoutHint(t *testing.T) {
 		t.Fatalf("disabled timeout changed the error: %v", got)
 	}
 }
+
+func TestRunHelpExitsCleanly(t *testing.T) {
+	for _, flagName := range []string{"-h", "-help", "--help"} {
+		var stderr bytes.Buffer
+		code, err := run([]string{flagName}, &bytes.Buffer{}, &stderr)
+		if err != nil || code != exitOK {
+			t.Fatalf("run(%s) = %d, %v", flagName, code, err)
+		}
+		if !strings.Contains(stderr.String(), "-status") {
+			t.Fatalf("run(%s) did not print usage: %q", flagName, stderr.String())
+		}
+	}
+}

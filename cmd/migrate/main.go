@@ -89,6 +89,9 @@ func parseMode(args []string, stderr io.Writer) (mode, error) {
 
 func run(args []string, stdout, stderr io.Writer) (int, error) {
 	selected, err := parseMode(args, stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return exitOK, nil
+	}
 	if err != nil {
 		return exitError, err
 	}

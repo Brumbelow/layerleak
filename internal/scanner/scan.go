@@ -1105,7 +1105,39 @@ func manifestStatusMessage(prefix string, descriptor manifest.Descriptor) string
 	return prefix + " " + target
 }
 
+// verifyRootDocument checks the root manifest body against the digest the
+// caller expects (the reference digest, or the registry's Docker-Content-Digest
+// for tag references) before a single byte of untrusted JSON is decoded. Only
+// then is the document parsed, validated and checked for media-type
+// consistency with the response.
 func verifyRootDocument(reference manifest.Reference, response registry.ManifestResponse) (manifest.Document, string, error) {
+	requestedDigest := strings.TrimSpace(reference.Digest)
+	responseDigest := strings.TrimSpace(response.Digest)
+	if requestedDigest != "" && responseDigest != "" && requestedDigest != responseDigest {
+		return manifest.Document{}, "", &manifest.IntegrityError{
+			Kind:     manifest.IntegrityDigestMismatch,
+			Subject:  reference.Original,
+			Expected: requestedDigest,
+			Actual:   responseDigest,
+		}
+	}
+	expectedDigest := requestedDigest
+	if expectedDigest == "" {
+		expectedDigest = responseDigest
+	}
+	if expectedDigest == "" {
+		// Neither the reference nor the registry named a digest; the body can
+		// only be identified by its own hash.
+		computed, err := manifest.DigestBytes("sha256", response.Body)
+		if err != nil {
+			return manifest.Document{}, "", err
+		}
+		expectedDigest = computed
+	}
+	if err := verifyRootBytes(reference.Original, expectedDigest, response.Body); err != nil {
+		return manifest.Document{}, "", fmt.Errorf("verify root manifest: %w", err)
+	}
+
 	document, err := manifest.ParseDocument(response.MediaType, response.Body)
 	if err != nil {
 		return manifest.Document{}, "", &manifest.IntegrityError{
@@ -1128,42 +1160,29 @@ func verifyRootDocument(reference manifest.Reference, response registry.Manifest
 		return manifest.Document{}, "", err
 	}
 
-	requestedDigest := strings.TrimSpace(reference.Digest)
-	responseDigest := strings.TrimSpace(response.Digest)
-	if requestedDigest != "" && responseDigest != "" && requestedDigest != responseDigest {
-		return manifest.Document{}, "", &manifest.IntegrityError{
-			Kind:     manifest.IntegrityDigestMismatch,
-			Subject:  reference.Original,
-			Expected: requestedDigest,
-			Actual:   responseDigest,
-		}
-	}
-	if requestedDigest == "" {
-		requestedDigest = responseDigest
-	}
-	if requestedDigest == "" {
-		requestedDigest, err = manifest.DigestBytes("sha256", response.Body)
-		if err != nil {
-			return manifest.Document{}, "", err
-		}
-	}
-	rootDescriptor := manifest.Descriptor{
-		MediaType: expectedMediaType,
-		Digest:    requestedDigest,
-		Size:      int64(len(response.Body)),
-	}
-	if err := manifest.VerifyDescriptorBytes(rootDescriptor, response.Body, response.MediaType, false); err != nil {
-		return manifest.Document{}, "", fmt.Errorf("verify root manifest: %w", err)
-	}
-	if responseDigest != "" && responseDigest != requestedDigest {
-		responseDescriptor := rootDescriptor
-		responseDescriptor.Digest = responseDigest
-		if err := manifest.VerifyDescriptorBytes(responseDescriptor, response.Body, response.MediaType, false); err != nil {
-			return manifest.Document{}, "", fmt.Errorf("verify registry manifest digest: %w", err)
-		}
-	}
+	return document, expectedDigest, nil
+}
 
-	return document, requestedDigest, nil
+// verifyRootBytes compares body with expectedDigest without consulting any
+// media type, so it can run before the document is parsed.
+func verifyRootBytes(subject, expectedDigest string, body []byte) error {
+	if err := manifest.ValidateDigest(expectedDigest); err != nil {
+		return err
+	}
+	algorithm, _, _ := strings.Cut(expectedDigest, ":")
+	actual, err := manifest.DigestBytes(algorithm, body)
+	if err != nil {
+		return err
+	}
+	if actual != expectedDigest {
+		return &manifest.IntegrityError{
+			Kind:     manifest.IntegrityDigestMismatch,
+			Subject:  subject,
+			Expected: expectedDigest,
+			Actual:   actual,
+		}
+	}
+	return nil
 }
 
 func verifyManifestResponseDescriptor(descriptor manifest.Descriptor, response registry.ManifestResponse) error {

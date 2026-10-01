@@ -1354,6 +1354,86 @@ func TestScanAcceptsOSOnlyAndVariantNormalisedSelectors(t *testing.T) {
 	}
 }
 
+func TestScanVerifiesRootDigestBeforeParsing(t *testing.T) {
+	// Syntactically broken JSON: if the body were decoded first the failure
+	// would be invalid_manifest_document; the digest check must win.
+	malformed := []byte(`{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "layers": [}`)
+	const latest = "/v2/library/app/manifests/latest"
+
+	t.Run("digest reference", func(t *testing.T) {
+		f := newRegistryFixture()
+		expected := "sha256:" + strings.Repeat("a", 64)
+		f.routes["/v2/library/app/manifests/"+expected] = malformed
+		f.types["/v2/library/app/manifests/"+expected] = manifest.MediaTypeOCIImageManifest
+		ref, err := manifest.ParseReference("library/app@" + expected)
+		if err != nil {
+			t.Fatalf("ParseReference() error = %v", err)
+		}
+		request := f.request(t, "")
+		request.Reference = ref
+		_, err = Scan(context.Background(), request)
+		integrityErr, ok := manifest.AsIntegrityError(err)
+		if !ok || integrityErr.Kind != manifest.IntegrityDigestMismatch {
+			t.Fatalf("Scan() error = %v, want %s", err, manifest.IntegrityDigestMismatch)
+		}
+	})
+
+	t.Run("tag reference with registry digest", func(t *testing.T) {
+		f := newRegistryFixture()
+		f.routes[latest] = malformed
+		f.types[latest] = manifest.MediaTypeOCIImageManifest
+		f.digests[latest] = "sha256:" + strings.Repeat("b", 64)
+		_, err := Scan(context.Background(), f.request(t, ""))
+		integrityErr, ok := manifest.AsIntegrityError(err)
+		if !ok || integrityErr.Kind != manifest.IntegrityDigestMismatch {
+			t.Fatalf("Scan() error = %v, want %s", err, manifest.IntegrityDigestMismatch)
+		}
+	})
+
+	t.Run("tag reference without registry digest", func(t *testing.T) {
+		f := newRegistryFixture()
+		f.routes[latest] = malformed
+		f.types[latest] = manifest.MediaTypeOCIImageManifest
+		_, err := Scan(context.Background(), f.request(t, ""))
+		integrityErr, ok := manifest.AsIntegrityError(err)
+		if !ok || integrityErr.Kind != manifest.IntegrityInvalidDocument {
+			t.Fatalf("Scan() error = %v, want %s", err, manifest.IntegrityInvalidDocument)
+		}
+	})
+
+	t.Run("digest reference with matching body", func(t *testing.T) {
+		f := newRegistryFixture()
+		layer := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{{name: "app/config", body: "clean"}}))
+		body := mustJSON(t, manifest.ImageManifest{SchemaVersion: 2, MediaType: manifest.MediaTypeOCIImageManifest, Config: configBlob(t, f, "linux", "amd64"), Layers: []manifest.Descriptor{layer}})
+		digest := digestFor(t, body)
+		f.routes["/v2/library/app/manifests/"+digest] = body
+		f.types["/v2/library/app/manifests/"+digest] = manifest.MediaTypeOCIImageManifest
+		ref, err := manifest.ParseReference("library/app@" + digest)
+		if err != nil {
+			t.Fatalf("ParseReference() error = %v", err)
+		}
+		request := f.request(t, "")
+		request.Reference = ref
+		result, err := Scan(context.Background(), request)
+		if err != nil || result.Status != ResultStatusCompleted || result.RequestedDigest != digest {
+			t.Fatalf("Scan() = %#v, %v", result, err)
+		}
+	})
+
+	t.Run("media type mismatch is still detected after parsing", func(t *testing.T) {
+		f := newRegistryFixture()
+		body := mustJSON(t, manifest.ImageManifest{SchemaVersion: 2, MediaType: manifest.MediaTypeOCIImageManifest, Config: configBlob(t, f, "linux", "amd64"), Layers: []manifest.Descriptor{}})
+		f.routes[latest] = body
+		f.types[latest] = manifest.MediaTypeOCIImageIndex
+		f.digests[latest] = digestFor(t, body)
+		_, err := Scan(context.Background(), f.request(t, ""))
+		integrityErr, ok := manifest.AsIntegrityError(err)
+		if !ok || integrityErr.Kind != manifest.IntegrityMediaTypeMismatch {
+			t.Fatalf("Scan() error = %v, want %s", err, manifest.IntegrityMediaTypeMismatch)
+		}
+	})
+}
+
 type tarEntry struct {
 	name string
 	body string

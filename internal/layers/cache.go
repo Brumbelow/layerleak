@@ -155,8 +155,12 @@ type cachedEntry struct {
 }
 
 const (
-	cachedLayerBaseBytes  = 128
-	cachedEntryBaseBytes  = 96
+	cachedLayerBaseBytes = 128
+	// cachedEntryBaseBytes approximates the heap cost of one cachedEntry:
+	// four string headers (name, linkname, content class, encoding), four
+	// int64s and the small fields with padding, plus slack for slice growth
+	// by doubling. It deliberately errs high so the budget is not exceeded.
+	cachedEntryBaseBytes  = 160
 	cachedEntryStringCost = 1
 )
 

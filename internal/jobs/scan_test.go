@@ -772,9 +772,13 @@ func tagResolutionResponse(request *http.Request, goodDigest string) *http.Respo
 type tarEntry struct {
 	name string
 	body string
+	// typeflag and linkname are zero for a regular file; a symlink or hardlink
+	// sets them and carries no body.
+	typeflag byte
+	linkname string
 }
 
-func gzipLayer(t *testing.T, entries []tarEntry) []byte {
+func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 	t.Helper()
 
 	var buffer bytes.Buffer
@@ -782,9 +786,11 @@ func gzipLayer(t *testing.T, entries []tarEntry) []byte {
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, entry := range entries {
 		header := &tar.Header{
-			Name: entry.name,
-			Mode: 0600,
-			Size: int64(len(entry.body)),
+			Name:     entry.name,
+			Mode:     0600,
+			Size:     int64(len(entry.body)),
+			Typeflag: entry.typeflag,
+			Linkname: entry.linkname,
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader() error = %v", err)
@@ -824,7 +830,7 @@ func repoResponse(statusCode int, contentType string, body []byte, headers map[s
 	}
 }
 
-func testDescriptor(t *testing.T, mediaType string, body []byte) manifest.Descriptor {
+func testDescriptor(t testing.TB, mediaType string, body []byte) manifest.Descriptor {
 	t.Helper()
 	digest, err := manifest.DigestBytes("sha256", body)
 	if err != nil {
@@ -833,7 +839,7 @@ func testDescriptor(t *testing.T, mediaType string, body []byte) manifest.Descri
 	return manifest.Descriptor{MediaType: mediaType, Digest: digest, Size: int64(len(body))}
 }
 
-func testManifestBody(t *testing.T, config manifest.Descriptor, layers []manifest.Descriptor) []byte {
+func testManifestBody(t testing.TB, config manifest.Descriptor, layers []manifest.Descriptor) []byte {
 	t.Helper()
 	if layers == nil {
 		layers = []manifest.Descriptor{}

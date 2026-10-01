@@ -11,6 +11,7 @@ import (
 
 	"github.com/brumbelow/layerleak/v3/internal/detectors"
 	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
@@ -50,16 +51,19 @@ type Request struct {
 	// expansion of archives stored in layers.
 	MaxNestedArchiveBytes   int64
 	MaxNestedArchiveEntries int
-	MaxFindings             int
-	RetainRawSecrets        bool
-	MaxRawFindingBytes      int64
-	ConfigTimeout           time.Duration
-	BlobTimeout             time.Duration
-	TagPageSize             int
-	MaxRepositoryTags       int
-	MaxRepositoryTargets    int
-	AllTags                 bool
-	Progress                ProgressFunc
+	// MaxLayerCacheBytes bounds the per-sweep layer cache of --all-tags; 0
+	// disables it. Single-reference scans never use it.
+	MaxLayerCacheBytes   int64
+	MaxFindings          int
+	RetainRawSecrets     bool
+	MaxRawFindingBytes   int64
+	ConfigTimeout        time.Duration
+	BlobTimeout          time.Duration
+	TagPageSize          int
+	MaxRepositoryTags    int
+	MaxRepositoryTargets int
+	AllTags              bool
+	Progress             ProgressFunc
 }
 
 type ResultStatus string
@@ -438,6 +442,11 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
+	// The layer cache lives exactly as long as this sweep: adjacent tags of a
+	// repository share most layers, and a layer whose files held no findings
+	// is replayed from its metadata instead of being fetched again. It is nil
+	// (off) unless LAYERLEAK_MAX_LAYER_CACHE_BYTES is set.
+	layerCache := layers.NewLayerCache(request.MaxLayerCacheBytes)
 	// stopEarly records every target the sweep did not reach so the per-target
 	// accounting and tag_results describe the whole repository, then finalizes.
 	stopEarly := func(from int, cause error) {
@@ -468,6 +477,7 @@ func scanRepository(ctx context.Context, request Request) (Result, error) {
 			findingsBefore:   len(allDetailedFindings),
 			findingsRetained: findingsRetained,
 			rawBytesRetained: rawBytesRetained,
+			layerCache:       layerCache,
 		})
 		targetResult := targetResultFromScanResult(scanReference, scanResult, group.tags)
 		result.ManifestCount += scanResult.ManifestCount
@@ -605,6 +615,7 @@ type progressState struct {
 	findingsBefore   int
 	findingsRetained int
 	rawBytesRetained int64
+	layerCache       *layers.LayerCache
 }
 
 func scanTarget(ctx context.Context, request Request, reference manifest.Reference, tags []string, state progressState) (scanner.Result, error) {
@@ -626,6 +637,7 @@ func scanTarget(ctx context.Context, request Request, reference manifest.Referen
 
 		MaxNestedArchiveBytes:   request.MaxNestedArchiveBytes,
 		MaxNestedArchiveEntries: request.MaxNestedArchiveEntries,
+		LayerCache:              state.layerCache,
 
 		MaxFindings:        request.MaxFindings,
 		ExistingFindings:   state.findingsRetained,

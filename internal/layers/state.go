@@ -75,6 +75,14 @@ type Artifact struct {
 	// `Path!inner/path`, its own content and classification, and shares the
 	// outer artifact's fate: it is deleted or overwritten with it.
 	Nested []Artifact
+	// ContentLength is len(Content) for a file replayed from its stream and
+	// the stored length for a file replayed from the sweep cache, whose
+	// Content is not held.
+	ContentLength int64
+	// KnownClean marks a scannable file replayed from the sweep cache: its
+	// content is not held because an earlier scan of the same layer found
+	// nothing in it, and detection accounts for it without re-running.
+	KnownClean bool
 }
 
 type ReplayResult struct {
@@ -85,6 +93,10 @@ type ReplayResult struct {
 	// nested archives (capped at maxNestedSkipRecords; the rest are counted in
 	// Coverage.NestedSkipsDropped).
 	NestedSkips []NestedSkip
+	// LayerRecords holds, when a Cache was configured, the records of the
+	// committed layers that may be cached once detection confirms their files
+	// hold no findings (LayerCache.Store).
+	LayerRecords []*LayerRecord
 }
 
 type ReplayOptions struct {
@@ -105,6 +117,12 @@ type ReplayOptions struct {
 	// (binary, oversize or itself an archive) is kept as a path-only artifact.
 	// Nil keeps none; the scanner passes its path-only detectors.
 	NestedKeepPath func(path string) bool
+	// Cache, when set, serves layers it holds without opening their blobs and
+	// records the layers it does not hold so the caller can store them.
+	Cache *LayerCache
+	// SkipCacheLookup records layers for the cache without replaying from it;
+	// the caller sets it after ErrCacheUnusable.
+	SkipCacheLookup bool
 }
 
 type Coverage struct {
@@ -200,6 +218,8 @@ type State struct {
 	nestedSkips       []NestedSkip
 	// journal records the mutations of the layer being applied, nil between layers.
 	journal *layerJournal
+	// records holds the cache records of committed, cacheable layers.
+	records []*LayerRecord
 }
 
 func NewState() *State {
@@ -230,6 +250,18 @@ func Replay(ctx context.Context, descriptors []manifest.Descriptor, options Repl
 		}
 		state.coverage.LayersSeen++
 
+		if !options.SkipCacheLookup {
+			if record := options.Cache.lookup(descriptor); record != nil {
+				// The layer's entry list is known and its files are known to
+				// hold no findings: replay it without touching the registry.
+				if err := state.applyCachedLayer(ctx, descriptor, record, options); err != nil {
+					return state.Result(), fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
+				}
+				state.coverage.LayersCompleted++
+				continue
+			}
+		}
+
 		stream, err := opener.OpenLayer(ctx, descriptor)
 		if err != nil {
 			return state.Result(), fmt.Errorf("open layer %s: %w", descriptor.Digest, err)
@@ -254,6 +286,7 @@ func (s *State) Result() ReplayResult {
 		DeletedArtifacts: s.DeletedArtifacts(),
 		Coverage:         s.coverage,
 		NestedSkips:      append([]NestedSkip(nil), s.nestedSkips...),
+		LayerRecords:     append([]*LayerRecord(nil), s.records...),
 	}
 }
 
@@ -274,7 +307,7 @@ func (s *State) DeletedArtifacts() []Artifact {
 	return artifacts
 }
 
-func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, blob io.Reader, options ReplayOptions) (returnErr error) {
+func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, blob io.Reader, options ReplayOptions) error {
 	reader, cleanup, err := decompressLayer(descriptor.MediaType, blob)
 	if err != nil {
 		return err
@@ -288,15 +321,58 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		s.coverage.ExpandedBytes,
 		options.MaxTotalBytes,
 	)
+	source := &tarEntrySource{
+		ctx:        ctx,
+		descriptor: descriptor,
+		blob:       blob,
+		limited:    limitedReader,
+		tarReader:  tar.NewReader(limitedReader),
+		options:    options,
+	}
+	if options.Cache != nil {
+		source.layer = newLayerRecord(descriptor)
+	}
+	nested := newNestedExpander(descriptor.Digest, options, s.coverage)
+	if err := s.applyEntries(ctx, descriptor, source, nested, options); err != nil {
+		return err
+	}
+	if source.layer != nil {
+		if nested != nil && (nested.archivesExpanded > 0 || len(nested.skips) > 0 || nested.skipsDropped > 0) {
+			// Nested expansion is bounded by budgets that depend on the layer
+			// stack, so its outcome cannot be replayed from metadata.
+			source.layer.markUncacheable()
+		}
+		if source.layer.cacheable {
+			s.records = append(s.records, source.layer)
+		}
+	}
+	return nil
+}
+
+// applyCachedLayer replays a layer from its cache record through the same
+// state machine as the tar stream, with the byte accounting advanced to the
+// recorded positions so every limit fires exactly where it would have.
+func (s *State) applyCachedLayer(ctx context.Context, descriptor manifest.Descriptor, record *LayerRecord, options ReplayOptions) error {
+	source := &cachedEntrySource{
+		descriptor: descriptor,
+		layer:      record,
+		limited:    newLayerLimitReader(nil, descriptor.Digest, options.MaxLayerBytes, s.coverage.ExpandedBytes, options.MaxTotalBytes),
+		options:    options,
+	}
+	return s.applyEntries(ctx, descriptor, source, nil, options)
+}
+
+// applyEntries is the transactional layer state machine. It consumes entries
+// from source (the tar stream or a cache record), applies them to s under a
+// journal and commits at the end; any error rolls the layer back.
+func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor, source entrySource, nested *nestedExpander, options ReplayOptions) (returnErr error) {
 	logicalBudget := newLogicalLayerBudget(
 		descriptor.Digest,
 		options.MaxLayerBytes,
 		s.coverage.ExpandedBytes,
 		options.MaxTotalBytes,
 	)
-	tarReader := tar.NewReader(limitedReader)
 	retention := retentionBudget{maxBytes: options.MaxRetainedBytes}
-	nested := newNestedExpander(descriptor.Digest, options, s.coverage)
 	journal := s.beginLayer()
 	committed := false
 	defer func() {
@@ -309,7 +385,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		// observations of the failed layer and are kept.
 		nested.flush(s)
 		s.rollback(journal)
-		s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
+		s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, source.physical(), logicalBudget.bytes)
 	}()
 	currentPaths := journal.currentPaths
 	whiteouts := make([]string, 0)
@@ -319,26 +395,23 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		if err := contextError(ctx); err != nil {
 			return err
 		}
-		header, err := tarReader.Next()
+		header, err := source.next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
 		}
-		// Sparse holes are synthesised by archive/tar without touching the
-		// compressed stream, so the per-entry reader must observe ctx itself.
-		entryReader := newContextReader(ctx, tarReader)
-		if header.Typeflag == tar.TypeXGlobalHeader {
+		if header.typeflag == tar.TypeXGlobalHeader {
 			// PAX global headers (git archive, tar --pax-option) describe the
 			// entries that follow; they are never content and runtimes skip them.
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			continue
 		}
 		entryCount++
-		if err := logicalBudget.add(header.Size); err != nil {
+		if err := logicalBudget.add(header.size); err != nil {
 			return err
 		}
 		if options.MaxTotalEntries > 0 && s.entries+entryCount > options.MaxTotalEntries {
@@ -348,21 +421,21 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			return limits.NewExceeded(limits.KindLayerEntries, int64(options.MaxLayerEntries), "layer "+descriptor.Digest)
 		}
 
-		entryPath, err := normalizePath(header.Name)
+		entryPath, err := normalizePath(header.name)
 		if err != nil {
 			if !errors.Is(err, errRootEntry) {
 				// A `./` or `.` entry names the layer root itself (tar -C rootfs -c .
 				// always emits one); it carries nothing to record and is not unsafe.
 				s.coverage.EntriesSkippedUnsafe++
 			}
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := validateLinkname(header.Linkname); err != nil {
+		if err := validateLinkname(header.linkname); err != nil {
 			s.coverage.EntriesSkippedUnsafe++
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			continue
@@ -374,7 +447,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				return err
 			}
 			opaqueDirectories = append(opaqueDirectories, directory)
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			continue
@@ -389,15 +462,15 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				}
 				whiteouts = append(whiteouts, target)
 			}
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			continue
 		}
 
-		switch header.Typeflag {
+		switch header.typeflag {
 		case tar.TypeDir:
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			if err := s.preparePath(entryPath, true, descriptor.Digest, &retention); err != nil {
@@ -410,7 +483,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				return err
 			}
 		case tar.TypeSymlink:
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
@@ -420,7 +493,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				Path:         entryPath,
 				LayerDigest:  descriptor.Digest,
 				Type:         ArtifactTypeSymlink,
-				Linkname:     header.Linkname,
+				Linkname:     header.linkname,
 				ContentClass: "",
 				Scannable:    false,
 			}, &retention); err != nil {
@@ -430,10 +503,10 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				return err
 			}
 		case tar.TypeLink:
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
-			linkTarget, err := normalizePath(header.Linkname)
+			linkTarget, err := normalizePath(header.linkname)
 			if err != nil {
 				if !errors.Is(err, errRootEntry) {
 					s.coverage.EntriesSkippedUnsafe++
@@ -449,6 +522,17 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 					s.coverage.EntriesSkippedUnsafe++
 				}
 				continue
+			}
+			if target.KnownClean && !source.fromCache() {
+				// Detectors judge content by path, so the hardlink's own path
+				// must be scanned with the target's content, which a cached
+				// layer does not hold: this manifest needs the real stream.
+				return ErrCacheUnusable
+			}
+			if target.LayerDigest != descriptor.Digest {
+				// The content behind the hardlink depends on the layers below,
+				// so this layer's scan outcome is not a property of the layer.
+				source.record().markUncacheable()
 			}
 			// A hardlink is another name for its target. Links to regular files
 			// become hardlink artifacts sharing the target's content and class;
@@ -490,13 +574,13 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			// the old-GNU sparse ('S') and GNU contiguous ('7') flags on regular
 			// files; the entry reader already presents their logical content.
 			s.coverage.FilesSeen++
-			if header.Size <= options.MaxFileBytes {
-				prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.Size
+			if header.size <= options.MaxFileBytes {
+				prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.size
 				if err := retention.ensure(s, prospective); err != nil {
 					return err
 				}
 			}
-			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, entryReader, header.Size, options, nested)
+			artifact, err := source.regular(header, entryPath, nested)
 			if err != nil {
 				return err
 			}
@@ -528,7 +612,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 				s.coverage.FilesExcludedBinary++
 			}
 		default:
-			if err := drainEntry(entryReader); err != nil {
+			if err := source.drain(header); err != nil {
 				return err
 			}
 			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
@@ -548,16 +632,8 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			}
 		}
 	}
-	if _, err := io.Copy(io.Discard, limitedReader); err != nil {
-		return classifyDrainError(descriptor, err)
-	}
-	if _, err := io.Copy(io.Discard, newContextReader(ctx, blob)); err != nil {
-		return fmt.Errorf("drain layer blob: %w", err)
-	}
-	if verifier, ok := blob.(interface{ Verify() error }); ok {
-		if err := verifier.Verify(); err != nil {
-			return fmt.Errorf("verify layer blob: %w", err)
-		}
+	if err := source.finish(); err != nil {
+		return err
 	}
 
 	for _, directory := range opaqueDirectories {
@@ -566,7 +642,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 	for _, target := range whiteouts {
 		s.deleteLowerPath(target, descriptor.Digest, journal)
 	}
-	s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
+	s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, source.physical(), logicalBudget.bytes)
 	nested.flush(s)
 	s.entries += entryCount
 	s.endLayer()
@@ -724,11 +800,20 @@ func retainedFinalArtifactBaseBytes(artifactPath, linkname string) int64 {
 }
 
 func retainedFinalArtifactBytes(artifact Artifact) int64 {
-	return retainedFinalArtifactBaseBytes(artifact.Path, artifact.Linkname) + int64(len(artifact.Content)) + nestedRetainedBytes(artifact.Nested)
+	return retainedFinalArtifactBaseBytes(artifact.Path, artifact.Linkname) + artifactContentLength(artifact) + nestedRetainedBytes(artifact.Nested)
+}
+
+// artifactContentLength is the retained content length: the bytes held, or
+// for a cache-replayed file the recorded length of the bytes it would hold.
+func artifactContentLength(artifact Artifact) int64 {
+	if len(artifact.Content) > 0 {
+		return int64(len(artifact.Content))
+	}
+	return artifact.ContentLength
 }
 
 func retainedDeletedArtifactBytes(artifact Artifact) int64 {
-	return retainedArtifactMetadataBytes + int64(len(artifact.Path)) + int64(len(artifact.Linkname)) + int64(len(artifact.Content)) + nestedRetainedBytes(artifact.Nested)
+	return retainedArtifactMetadataBytes + int64(len(artifact.Path)) + int64(len(artifact.Linkname)) + artifactContentLength(artifact) + nestedRetainedBytes(artifact.Nested)
 }
 
 func retainedMapStringBytes(value string) int64 {
@@ -1018,6 +1103,7 @@ func classifyRegularContent(entryPath, layerDigest string, content []byte, size,
 		ContentClass:   contentClass,
 		Scannable:      scannable,
 		SourceEncoding: encoding,
+		ContentLength:  int64(len(content)),
 	}
 }
 

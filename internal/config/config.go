@@ -77,6 +77,9 @@ type Config struct {
 	// MaxNestedArchiveEntries bounds the entries examined per nested archive;
 	// 0 disables this bound (the layer and image entry budgets still apply).
 	MaxNestedArchiveEntries int
+	// MaxLayerCacheBytes bounds the per-sweep layer cache that lets --all-tags
+	// skip re-fetching layers shared between tags. 0 (the default) disables it.
+	MaxLayerCacheBytes      int64
 	MaxManifestBytes        int64
 	MaxConfigBytes          int64
 	MaxTagResponseBytes     int64
@@ -243,6 +246,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxLayerCacheBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", 0)
+	if err != nil {
+		return Config{}, err
+	}
 	maxManifestBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_MANIFEST_BYTES", 8*(1<<20))
 	if err != nil {
 		return Config{}, err
@@ -351,6 +358,7 @@ func Load() (Config, error) {
 		MaxRetainedBytes:            maxRetainedBytes,
 		MaxNestedArchiveBytes:       maxNestedArchiveBytes,
 		MaxNestedArchiveEntries:     maxNestedArchiveEntries,
+		MaxLayerCacheBytes:          maxLayerCacheBytes,
 		MaxManifestBytes:            maxManifestBytes,
 		MaxConfigBytes:              maxConfigBytes,
 		MaxTagResponseBytes:         maxTagResponseBytes,

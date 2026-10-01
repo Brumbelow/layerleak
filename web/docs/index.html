@@ -214,6 +214,7 @@ layerleak scan quay.io/prometheus/busybox --all-tags</code></pre>
                     <tr><td><code>LAYERLEAK_MAX_LAYER_BYTES</code></td><td><code>536870912</code></td><td>Decompressed bytes allowed per layer.</td></tr>
                     <tr><td><code>LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES</code></td><td><code>67108864</code></td><td>Largest archive inside a layer (zip/jar/whl, gzip, tar) expanded one level deep, and the most bytes decompressed out of it; <code>0</code> disables nested expansion.</td></tr>
                     <tr><td><code>LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES</code></td><td><code>10000</code></td><td>Entries examined per nested archive; <code>0</code> lifts this bound.</td></tr>
+                    <tr><td><code>LAYERLEAK_MAX_LAYER_CACHE_BYTES</code></td><td><code>0</code></td><td>Memory for the <code>--all-tags</code> layer cache (metadata of layers without findings, so shared layers are fetched once per sweep); <code>0</code> disables it. Results are identical either way.</td></tr>
                     <tr><td><code>LAYERLEAK_MAX_FINDINGS_PER_SCAN</code></td><td><code>10000</code></td><td>Findings retained for one scan.</td></tr>
                     <tr><td><code>LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS</code></td><td>empty</td><td>Exact <code>host[:port]</code> allowlist for private registries.</td></tr>
                     <tr><td><code>LAYERLEAK_API_ADDR</code></td><td><code>127.0.0.1:8080</code></td><td>API listen address; the image defaults to <code>0.0.0.0:8080</code>.</td></tr>

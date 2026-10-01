@@ -126,6 +126,7 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 
 		MaxNestedArchiveBytes:   s.config.MaxNestedArchiveBytes,
 		MaxNestedArchiveEntries: s.config.MaxNestedArchiveEntries,
+		MaxLayerCacheBytes:      s.config.MaxLayerCacheBytes,
 
 		MaxFindings:          s.config.MaxFindingsPerScan,
 		RetainRawSecrets:     s.config.PersistRawSecrets,

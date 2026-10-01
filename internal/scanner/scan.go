@@ -37,14 +37,19 @@ type Request struct {
 	// expansion of archives stored in layers (layers.ReplayOptions).
 	MaxNestedArchiveBytes   int64
 	MaxNestedArchiveEntries int
-	MaxFindings             int
-	ExistingFindings        int
-	RetainRawSecrets        bool
-	MaxRawFindingBytes      int64
-	ExistingRawBytes        int64
-	ConfigTimeout           time.Duration
-	BlobTimeout             time.Duration
-	Progress                ProgressFunc
+	// LayerCache, when set, is the sweep-scoped cache of layers whose files
+	// held no findings: such layers are replayed from it without a blob fetch
+	// and newly scanned clean layers are stored into it. Results are identical
+	// with and without it.
+	LayerCache         *layers.LayerCache
+	MaxFindings        int
+	ExistingFindings   int
+	RetainRawSecrets   bool
+	MaxRawFindingBytes int64
+	ExistingRawBytes   int64
+	ConfigTimeout      time.Duration
+	BlobTimeout        time.Duration
+	Progress           ProgressFunc
 }
 
 const (
@@ -496,7 +501,7 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 		budget.markExceeded(descriptor.Digest)
 	}
 	if !budget.stopped() && err == nil {
-		layerResult, err = layers.Replay(ctx, imageManifest.Layers, layers.ReplayOptions{
+		replayOptions := layers.ReplayOptions{
 			MaxFileBytes:     request.MaxFileBytes,
 			MaxLayerBytes:    request.MaxLayerBytes,
 			MaxLayerEntries:  request.MaxLayerEntries,
@@ -512,7 +517,9 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 			NestedKeepPath: func(path string) bool {
 				return len(request.Detectors.ScanPath(path)) > 0
 			},
-		}, layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
+			Cache: request.LayerCache,
+		}
+		opener := layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
 			blobCtx := ctx
 			cancel := func() {}
 			if request.BlobTimeout > 0 {
@@ -535,7 +542,15 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 				return nil, err
 			}
 			return &verifiedReadCloser{VerifyingReader: verifier, closer: response.Body, cancel: cancel}, nil
-		}))
+		})
+		layerResult, err = layers.Replay(ctx, imageManifest.Layers, replayOptions, opener)
+		if errors.Is(err, layers.ErrCacheUnusable) {
+			// A later layer hardlinks into a cached layer's text, which the
+			// cache does not hold: replay this manifest from the registry.
+			// Layers scanned on the way are still recorded for the cache.
+			replayOptions.SkipCacheLookup = true
+			layerResult, err = layers.Replay(ctx, imageManifest.Layers, replayOptions, opener)
+		}
 		if layers.IsUnsupportedLayer(err) {
 			err = &UnsupportedManifestError{Digest: descriptor.Digest, Platform: platform, Cause: err}
 		}
@@ -548,6 +563,12 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 	}
 
 	allFindings := append(metadataFindings, fileFindings...)
+	if request.LayerCache != nil && err == nil && !budget.stopped() && ctx.Err() == nil {
+		// Every regular file of a completed layer was scanned (as final or as
+		// deleted content); a layer none of whose files produced a finding is
+		// safe to replay from metadata for the rest of the sweep.
+		storeCleanLayers(request.LayerCache, layerResult.LayerRecords, allFindings)
+	}
 	actionableFindings, suppressedFindings := splitDetailedFindings(allFindings)
 	platformResult.FindingsCount = len(actionableFindings)
 	platformResult.Coverage = coverageFromLayerResult(layerResult.Coverage, budget.delta(budgetStart))
@@ -937,8 +958,15 @@ func scanArtifactWithBudget(budget *detectionBudget, detectorSet detectors.Set, 
 		PresentInFinalImage: presentInFinalImage,
 	}
 	if artifact.Scannable {
-		if len(artifact.Content) == 0 {
+		if artifact.ContentLength == 0 && len(artifact.Content) == 0 {
 			// An empty text file holds nothing, whatever its name.
+			return nil
+		}
+		if artifact.KnownClean && artifact.Content == nil {
+			// Replayed from the sweep cache: an earlier scan of this layer
+			// found nothing in this file. Account for it exactly as a scan
+			// would, without the content.
+			budget.scanKnownClean(input, artifact.ContentLength)
 			return nil
 		}
 		input.Content = string(artifact.Content)
@@ -951,6 +979,49 @@ func scanArtifactWithBudget(budget *detectionBudget, detectorSet detectors.Set, 
 	// artifact by its path when the name alone says it is sensitive
 	// (LAY-12). A readable file is judged by its content only.
 	return budget.scanPath(detectorSet, input)
+}
+
+// scanKnownClean applies the gates and accounting of scan for a file whose
+// detector result (no matches) is already known, so coverage counters are
+// identical to a scan that ran the detectors.
+func (b *detectionBudget) scanKnownClean(input findings.Input, contentLength int64) {
+	if b == nil || b.stopped() || b.err != nil {
+		return
+	}
+	if b.exhausted() {
+		b.markExceeded(input.ManifestDigest)
+		return
+	}
+	if b.ctx != nil {
+		if err := b.ctx.Err(); err != nil {
+			b.err = err
+			return
+		}
+	}
+	b.coverage.detectorInputBytesScanned += contentLength
+	b.coverage.filesScanned++
+}
+
+// storeCleanLayers caches the records of layers none of whose files (or
+// nested entries) produced a finding, actionable or suppressed. A finding on a
+// hardlink is attributed to the hardlink's layer, which is what keeps that
+// layer out of the cache.
+func storeCleanLayers(cache *layers.LayerCache, records []*layers.LayerRecord, allFindings []findings.DetailedFinding) {
+	if cache == nil || len(records) == 0 {
+		return
+	}
+	dirty := make(map[string]struct{})
+	for _, finding := range allFindings {
+		if finding.LayerDigest != "" {
+			dirty[finding.LayerDigest] = struct{}{}
+		}
+	}
+	for _, record := range records {
+		if _, ok := dirty[record.Digest]; ok {
+			continue
+		}
+		cache.Store(record)
+	}
 }
 
 // nestedSkipDiagnostics reports every bounded skip of a nested archive as a

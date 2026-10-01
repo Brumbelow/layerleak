@@ -213,7 +213,7 @@ func storedScanStatus(value, errorMessage string) string {
 }
 
 func digestFromTargetReference(value string) string {
-	reference, err := manifest.ParseReference(value)
+	reference, err := manifest.ParseImageReference(value)
 	if err != nil {
 		return ""
 	}

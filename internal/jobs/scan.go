@@ -674,11 +674,18 @@ func targetResultFromScanResult(reference manifest.Reference, scanResult scanner
 	}
 }
 
+// scannedTags is the tag a reference scan reports in tag_results: none for a
+// digest reference, and none for a local source selected without a tag (its
+// only image has no tag to report).
 func scannedTags(reference manifest.Reference) []string {
 	if strings.TrimSpace(reference.Digest) != "" {
 		return nil
 	}
-	return []string{reference.Identifier()}
+	identifier := reference.Identifier()
+	if identifier == "" {
+		return nil
+	}
+	return []string{identifier}
 }
 
 func firstTag(tags []string) string {

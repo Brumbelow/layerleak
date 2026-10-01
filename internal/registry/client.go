@@ -22,11 +22,7 @@ import (
 	distributionreference "github.com/distribution/reference"
 )
 
-const (
-	maxTokenCacheEntries           = 128
-	maxTokenCacheBytes             = 1 << 20
-	maxRegistryResponseHeaderBytes = 1 << 20
-)
+const maxRegistryResponseHeaderBytes = 1 << 20
 
 type Options struct {
 	BaseURL                     string
@@ -44,6 +40,12 @@ type Options struct {
 	LookupIP                    func(context.Context, string) ([]net.IPAddr, error)
 	// UserAgent overrides the default `layerleak/<version>` User-Agent header.
 	UserAgent string
+	// Credentials resolves the username and password for the registry host
+	// after a 401 challenge; nil keeps every request anonymous. A credential
+	// is sent only over https, as Basic authentication to the token realm of
+	// a Bearer challenge or directly to the registry when it offers only
+	// Basic, and never follows a redirect to another host.
+	Credentials CredentialSource
 }
 
 type Client struct {
@@ -61,9 +63,10 @@ type Client struct {
 	allowPrivateHosts           bool
 	lookupIP                    func(context.Context, string) ([]net.IPAddr, error)
 	userAgent                   string
+	credentials                 CredentialSource
 	now                         func() time.Time
 	sleep                       func(context.Context, time.Duration) error
-	tokenCache                  map[string]string
+	tokenCache                  map[string]tokenCacheEntry
 	tokenCacheBytes             int
 	tokenCacheMu                sync.Mutex
 }
@@ -161,9 +164,10 @@ func NewClient(options Options) (*Client, error) {
 		allowPrivateHosts:           options.AllowPrivateHosts,
 		lookupIP:                    lookupIP,
 		userAgent:                   defaultString(strings.TrimSpace(options.UserAgent), DefaultUserAgent()),
+		credentials:                 options.Credentials,
 		now:                         time.Now,
 		sleep:                       sleepContext,
-		tokenCache:                  make(map[string]string),
+		tokenCache:                  make(map[string]tokenCacheEntry),
 	}
 	if err := client.validateConfiguredEndpointSchemes(); err != nil {
 		return nil, err
@@ -190,6 +194,21 @@ func (c *Client) BaseURL() string {
 	}
 
 	return c.baseURL.String()
+}
+
+// String describes the client by its endpoints only. The token cache and the
+// credential source are deliberately left out so a formatted client never
+// reveals a token or a password.
+func (c *Client) String() string {
+	if c == nil {
+		return "registry.Client(nil)"
+	}
+	return fmt.Sprintf("registry.Client{base:%s auth:%s}", c.BaseURL(), c.AuthURL())
+}
+
+// GoString redacts the client for %#v.
+func (c *Client) GoString() string {
+	return c.String()
 }
 
 func (c *Client) AuthURL() string {
@@ -396,9 +415,19 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 		return checkResponse(response, method, targetURL)
 	}
 
-	challenge, err := parseBearerChallenges(response.Header.Values("Www-Authenticate"))
+	challengeHeaders := response.Header.Values("Www-Authenticate")
 	_ = response.Body.Close()
+	challenge, err := parseBearerChallenges(challengeHeaders)
 	if err != nil {
+		if offersBasicChallenge(challengeHeaders) {
+			credential, ok, lookupErr := c.lookupCredential(ctx, targetURL)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if ok {
+				return c.doBasicRequest(ctx, method, targetURL, accept, credential)
+			}
+		}
 		return nil, err
 	}
 	if challenge.Scope == "" && repository != "" {
@@ -410,32 +439,71 @@ func (c *Client) doRequest(ctx context.Context, method, targetURL, accept, repos
 	if err := c.validateAuthRealm(challenge.Realm); err != nil {
 		return nil, fmt.Errorf("reject auth realm: %w", err)
 	}
-
-	token, err := c.fetchToken(ctx, challenge, true)
+	credential, _, err := c.lookupCredential(ctx, targetURL)
 	if err != nil {
 		return nil, err
 	}
 
-	retryResponse, err := c.executeRequest(ctx, method, targetURL, accept, token)
+	token, err := c.fetchToken(ctx, challenge, credential, true)
+	if err != nil {
+		return nil, err
+	}
+
+	retryResponse, err := c.executeRequest(ctx, method, targetURL, accept, "Bearer "+token)
 	if err != nil {
 		return nil, fmt.Errorf("perform authorized registry request: %w", err)
 	}
 	if retryResponse.StatusCode == http.StatusUnauthorized {
 		_ = retryResponse.Body.Close()
-		c.invalidateToken(challenge)
+		c.invalidateToken(c.tokenCacheKey(challenge, credential))
 
-		token, err = c.fetchToken(ctx, challenge, false)
+		token, err = c.fetchToken(ctx, challenge, credential, false)
 		if err != nil {
 			return nil, err
 		}
 
-		retryResponse, err = c.executeRequest(ctx, method, targetURL, accept, token)
+		retryResponse, err = c.executeRequest(ctx, method, targetURL, accept, "Bearer "+token)
 		if err != nil {
 			return nil, fmt.Errorf("perform refreshed authorized registry request: %w", err)
 		}
 	}
 
 	return checkResponse(retryResponse, method, targetURL)
+}
+
+// doBasicRequest answers a Basic-only challenge by repeating the request with
+// the credential on the registry request itself. A second 401 is the
+// registry's verdict on the credential and surfaces as a StatusError.
+func (c *Client) doBasicRequest(ctx context.Context, method, targetURL, accept string, credential Credential) (*http.Response, error) {
+	response, err := c.executeRequest(ctx, method, targetURL, accept, credential.basicAuthorization())
+	if err != nil {
+		return nil, fmt.Errorf("perform authorized registry request: %w", err)
+	}
+	return checkResponse(response, method, targetURL)
+}
+
+// lookupCredential resolves the credential for the host of targetURL. It
+// refuses to hand out a credential for a plain-http destination: even an
+// allowlisted private registry does not receive a password in clear.
+func (c *Client) lookupCredential(ctx context.Context, targetURL string) (Credential, bool, error) {
+	if c.credentials == nil {
+		return Credential{}, false, nil
+	}
+	parsed, err := url.Parse(targetURL)
+	if err != nil || parsed.Host == "" {
+		return Credential{}, false, fmt.Errorf("resolve registry credentials: target url is invalid")
+	}
+	credential, ok, err := c.credentials.Lookup(ctx, canonicalURLHost(parsed))
+	if err != nil {
+		return Credential{}, false, fmt.Errorf("resolve registry credentials for %s: %w", canonicalURLHost(parsed), err)
+	}
+	if !ok || credential.IsZero() {
+		return Credential{}, false, nil
+	}
+	if parsed.Scheme != "https" {
+		return Credential{}, false, fmt.Errorf("registry %s: %w", canonicalURLHost(parsed), ErrCredentialsRequireHTTPS)
+	}
+	return credential, true, nil
 }
 
 func checkResponse(response *http.Response, method, targetURL string) (*http.Response, error) {
@@ -454,8 +522,10 @@ func checkResponse(response *http.Response, method, targetURL string) (*http.Res
 // transport failures and retryable statuses, after a bounded backoff that
 // honours Retry-After. The returned response body carries the attempt deadline
 // until it is closed, except for streaming (blob) bodies, which detach from it
-// once headers have arrived.
-func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, token string) (*http.Response, error) {
+// once headers have arrived. authorization is the complete Authorization header
+// value (`Bearer <token>` or `Basic <credentials>`) or empty for an anonymous
+// request; it is dropped on any redirect to another host.
+func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, authorization string) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -479,8 +549,8 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 		if accept != "" {
 			request.Header.Set("Accept", accept)
 		}
-		if strings.TrimSpace(token) != "" {
-			request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+		if strings.TrimSpace(authorization) != "" {
+			request.Header.Set("Authorization", strings.TrimSpace(authorization))
 		}
 
 		response, err := c.doHTTP(request)
@@ -510,15 +580,16 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 	return nil, lastErr
 }
 
-func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allowCache bool) (string, error) {
-	cacheKey := challenge.cacheKey()
+// fetchToken obtains a bearer token for the challenge, from the cache when
+// allowCache is set and the entry has not expired, otherwise from the realm.
+// When credential is set the token request carries it as Basic authentication,
+// which requires an https realm; the anonymous flow is unchanged otherwise.
+func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, credential Credential, allowCache bool) (string, error) {
+	cacheKey := c.tokenCacheKey(challenge, credential)
 	if allowCache {
-		c.tokenCacheMu.Lock()
-		if token, ok := c.tokenCache[cacheKey]; ok && token != "" {
-			c.tokenCacheMu.Unlock()
+		if token, ok := c.cachedToken(cacheKey); ok {
 			return token, nil
 		}
-		c.tokenCacheMu.Unlock()
 	}
 	if err := c.checkTokenCacheAdmission(cacheKey); err != nil {
 		return "", err
@@ -548,8 +619,15 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 		return "", fmt.Errorf("reject auth realm: %w", err)
 	}
 	requestCtx := context.WithValue(ctx, requestKindContextKey{}, requestKindAuth)
+	authorization := ""
+	if !credential.IsZero() {
+		if parsedRealm.Scheme != "https" {
+			return "", fmt.Errorf("auth realm %s: %w", canonicalURLHost(parsedRealm), ErrCredentialsRequireHTTPS)
+		}
+		authorization = credential.basicAuthorization()
+	}
 
-	response, err := c.executeRequest(requestCtx, http.MethodGet, parsedRealm.String(), "", "")
+	response, err := c.executeRequest(requestCtx, http.MethodGet, parsedRealm.String(), "", authorization)
 	if err != nil {
 		return "", fmt.Errorf("perform auth request: %w", err)
 	}
@@ -573,6 +651,7 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 	var payload struct {
 		Token       string `json:"token"`
 		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return "", fmt.Errorf("decode auth token response: %w", err)
@@ -583,63 +662,11 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, allo
 		return "", fmt.Errorf("auth token response did not include a token")
 	}
 
-	if err := c.cacheToken(cacheKey, token); err != nil {
+	if err := c.cacheToken(cacheKey, token, c.tokenExpiry(payload.ExpiresIn)); err != nil {
 		return "", err
 	}
 
 	return token, nil
-}
-
-func (c *Client) invalidateToken(challenge bearerChallenge) {
-	cacheKey := challenge.cacheKey()
-	c.tokenCacheMu.Lock()
-	if token, ok := c.tokenCache[cacheKey]; ok {
-		c.tokenCacheBytes -= len(cacheKey) + len(token)
-	}
-	delete(c.tokenCache, cacheKey)
-	c.tokenCacheMu.Unlock()
-}
-
-func (c *Client) checkTokenCacheAdmission(cacheKey string) error {
-	c.tokenCacheMu.Lock()
-	defer c.tokenCacheMu.Unlock()
-
-	if _, ok := c.tokenCache[cacheKey]; ok {
-		return nil
-	}
-	if len(c.tokenCache) >= maxTokenCacheEntries {
-		return limits.NewExceeded(limits.Kind("auth_token_cache_entries"), maxTokenCacheEntries, "auth token cache")
-	}
-	if len(cacheKey) >= maxTokenCacheBytes-c.tokenCacheBytes {
-		return limits.NewExceeded(limits.Kind("auth_token_cache_bytes"), maxTokenCacheBytes, "auth token cache")
-	}
-	return nil
-}
-
-func (c *Client) cacheToken(cacheKey, token string) error {
-	c.tokenCacheMu.Lock()
-	defer c.tokenCacheMu.Unlock()
-
-	previous, exists := c.tokenCache[cacheKey]
-	if !exists && len(c.tokenCache) >= maxTokenCacheEntries {
-		return limits.NewExceeded(limits.Kind("auth_token_cache_entries"), maxTokenCacheEntries, "auth token cache")
-	}
-
-	entryBytes := len(cacheKey) + len(token)
-	retainedBytes := c.tokenCacheBytes
-	if exists {
-		retainedBytes -= len(cacheKey) + len(previous)
-	}
-	if entryBytes > maxTokenCacheBytes || retainedBytes > maxTokenCacheBytes-entryBytes {
-		return limits.NewExceeded(limits.Kind("auth_token_cache_bytes"), maxTokenCacheBytes, "auth token cache")
-	}
-
-	if c.tokenCache == nil {
-		c.tokenCache = make(map[string]string)
-	}
-	c.tokenCache[cacheKey] = token
-	c.tokenCacheBytes = retainedBytes + entryBytes
-	return nil
 }
 
 func (c *Client) join(parts ...string) string {
@@ -656,10 +683,6 @@ func (c *Client) join(parts ...string) string {
 	value.Path = "/" + path.Join(segments...)
 
 	return value.String()
-}
-
-func (b bearerChallenge) cacheKey() string {
-	return strings.Join([]string{b.Realm, b.Service, b.Scope}, "|")
 }
 
 func isValidTag(tag string) bool {

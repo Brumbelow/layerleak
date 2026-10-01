@@ -928,7 +928,7 @@ func TestClientFailsClosedWhenTokenCacheEntryLimitIsReached(t *testing.T) {
 		HTTPClient:        &http.Client{Transport: transport},
 	})
 	for index := 0; index < maxTokenCacheEntries; index++ {
-		if err := client.cacheToken(fmt.Sprintf("cache-key-%03d", index), "token"); err != nil {
+		if err := client.cacheToken(fmt.Sprintf("cache-key-%03d", index), "token", time.Time{}); err != nil {
 			t.Fatalf("cacheToken(%d) error = %v", index, err)
 		}
 	}
@@ -937,7 +937,7 @@ func TestClientFailsClosedWhenTokenCacheEntryLimitIsReached(t *testing.T) {
 	_, err := client.fetchToken(context.Background(), bearerChallenge{
 		Realm: "https://auth.test/token",
 		Scope: "repository:library/app:pull",
-	}, true)
+	}, Credential{}, true)
 	if err == nil || !strings.Contains(err.Error(), "configured limit of 128") {
 		t.Fatalf("fetchToken() error = %v", err)
 	}
@@ -956,12 +956,12 @@ func TestClientDoesNotCacheTokenBeyondTokenCacheByteLimit(t *testing.T) {
 	})
 	firstKey := "first-cache-key"
 	firstToken := strings.Repeat("a", maxTokenCacheBytes-len(firstKey)-8)
-	if err := client.cacheToken(firstKey, firstToken); err != nil {
+	if err := client.cacheToken(firstKey, firstToken, time.Time{}); err != nil {
 		t.Fatalf("cacheToken(first) error = %v", err)
 	}
 	retainedBytes := client.tokenCacheBytes
 
-	err := client.cacheToken("second-cache-key", "second-token")
+	err := client.cacheToken("second-cache-key", "second-token", time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "configured limit of 1048576") {
 		t.Fatalf("cacheToken(second) error = %v", err)
 	}
@@ -979,10 +979,11 @@ func TestClientAccountsForInvalidatedTokenCacheBytes(t *testing.T) {
 		AllowPrivateHosts: true,
 	})
 	challenge := bearerChallenge{Realm: "https://auth.test/token", Scope: "repository:library/app:pull"}
-	if err := client.cacheToken(challenge.cacheKey(), "token"); err != nil {
+	cacheKey := client.tokenCacheKey(challenge, Credential{})
+	if err := client.cacheToken(cacheKey, "token", time.Time{}); err != nil {
 		t.Fatalf("cacheToken() error = %v", err)
 	}
-	client.invalidateToken(challenge)
+	client.invalidateToken(cacheKey)
 
 	if len(client.tokenCache) != 0 || client.tokenCacheBytes != 0 {
 		t.Fatalf("token cache after invalidation: entries=%d bytes=%d", len(client.tokenCache), client.tokenCacheBytes)

@@ -92,6 +92,19 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - `LAYERLEAK_API_PRESTOP_DELAY` (default `0s`) and
   `LAYERLEAK_API_READINESS_CACHE_TTL` (default `5s`) for graceful drain and
   readiness caching.
+- Private-registry authentication. `LAYERLEAK_REGISTRY_USERNAME` and
+  `LAYERLEAK_REGISTRY_PASSWORD` supply a credential for the registry pinned by
+  `LAYERLEAK_REGISTRY_BASE_URL`; `LAYERLEAK_DOCKER_CONFIG` names a Docker
+  `config.json` whose `auths` entries (base64 `auth` or `username`/`password`,
+  Docker Hub aliases resolved) are consulted per registry host; the CLI takes
+  per-scan credentials with `--username` and `--password-stdin`. Credential
+  helpers (`credsStore`/`credHelpers`) and identity tokens are reported as
+  unsupported, and there is no implicit `~/.docker/config.json` lookup.
+- On a 401 with a Bearer challenge the token request carries the credential as
+  HTTP Basic; a Basic-only challenge is answered on the registry request.
+  Tokens are cached per registry host, challenge and credential identity with
+  their advertised lifetime (60s default, 24h cap, 10s safety margin) and
+  refreshed on 401; anonymous and authenticated tokens never share an entry.
 
 ### Changed
 
@@ -256,6 +269,14 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Layer replay cost per archive entry no longer grows with path depth,
   closing an algorithmic slowdown that hostile deep-path layers could exploit
   within the default entry limits.
+- Registry credentials travel only over https to the host they were looked up
+  for; the token realm must still pass the allowlist and private-host checks;
+  the `Authorization` header is dropped on any cross-host redirect; the
+  configured environment pair is never bound to the registry of a submitted
+  reference, so an API caller cannot make the server send the operator's
+  credential to a registry or token realm the caller names. Passwords are
+  held in `config.Secret` and every credential type redacts itself when
+  formatted.
 
 ### Removed
 

@@ -106,8 +106,15 @@ The following are deployment responsibilities, not built-in controls:
   mounted for any database that is not on the same host. Omitting `sslmode`
   is not safe: lib/pq's implicit default `require` encrypts the connection but
   does not verify the server certificate.
-- Registry credentials are not a supported user-facing feature. Do not embed
-  credentials in image references or endpoint overrides.
+- Registry credentials reach only the registry host they were configured for
+  (and its token realm), over https. The API process never applies the
+  `LAYERLEAK_REGISTRY_USERNAME`/`PASSWORD` pair to a registry a caller names;
+  it is bound to `LAYERLEAK_REGISTRY_BASE_URL`. Docker `config.json`
+  credentials are host-keyed, so in an API deployment they let any API caller
+  trigger authenticated scans of the operator's private images on those hosts
+  and read the redacted findings; the API is unauthenticated unless bearer
+  tokens are configured, so keep it private. Never embed credentials in image
+  references or endpoint overrides.
 
 ## Verify release integrity
 

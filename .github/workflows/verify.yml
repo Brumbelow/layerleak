@@ -174,6 +174,12 @@ jobs:
       - name: Validate SARIF fixtures against the OASIS 2.1.0 schema
         run: python scripts/validate_sarif.py internal/sarif/testdata/*.sarif.json
 
+      - name: Test JSON Schema validation failures
+        run: python -m unittest scripts/tests/test_validate_schemas.py
+
+      - name: Validate CLI and API fixtures against the published JSON Schemas
+        run: python scripts/validate_schemas.py
+
       - name: Test release and container validation
         run: python3 -m unittest discover -s scripts/tests -v
 

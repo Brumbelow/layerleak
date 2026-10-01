@@ -8,7 +8,10 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-import validate_schemas  # noqa: E402
+try:
+    import validate_schemas  # noqa: E402
+except ImportError as error:  # jsonschema and referencing come from requirements-docs.txt
+    raise unittest.SkipTest(f"documentation validators are not installed: {error}") from error
 
 ROOT = str(pathlib.Path(__file__).resolve().parents[2])
 

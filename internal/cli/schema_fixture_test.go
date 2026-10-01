@@ -23,7 +23,8 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden result and sca
 // TestGoldenResultAndScanRecordFixtures pins the exact JSON the CLI prints
 // (--format json) and writes (the scan record) for a representative scan.
 // scripts/validate_schemas.py validates these fixtures against
-// web/docs/schemas/*.schema.json in CI. Regenerate with
+// web/docs/schemas/*.schema.json in `make docs-verify` and the verify
+// workflow. Regenerate with
 // `go test ./internal/cli -run TestGoldenResultAndScanRecordFixtures -update`.
 func TestGoldenResultAndScanRecordFixtures(t *testing.T) {
 	outcome := goldenOutcome()

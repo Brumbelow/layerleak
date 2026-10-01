@@ -130,17 +130,24 @@ func TestDockerConfigCredentialsPlaceholderWithoutStoreIsAnonymous(t *testing.T)
 
 func TestDockerConfigCredentialsRejectMalformedEntries(t *testing.T) {
 	tests := map[string]struct {
-		body string
-		want string
+		body        string
+		want        string
+		unsupported bool
 	}{
 		"malformed base64":  {body: `{"auths": {"ghcr.io": {"auth": "!!not-base64!!"}}}`, want: "not valid base64"},
 		"missing separator": {body: `{"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("nocolon")) + `"}}}`, want: "username:password"},
 		"empty username":    {body: `{"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte(":"+testPassword)) + `"}}}`, want: "username:password"},
+		"empty password":    {body: `{"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("hub-user:")) + `"}}}`, want: "username:password"},
 		"half plain fields": {body: `{"auths": {"ghcr.io": {"username": "only-user"}}}`, want: "both be set"},
-		"identity token":    {body: `{"auths": {"ghcr.io": {"identitytoken": "synthetic-identity-0007"}}}`, want: "identity token"},
-		"invalid host key":  {body: `{"auths": {"https://": {"username": "u", "password": "p"}}}`, want: "invalid host"},
-		"not json":          {body: `{"auths": `, want: "not valid json"},
-		"wrong shape":       {body: `{"auths": []}`, want: "not valid json"},
+		"identity token":    {body: `{"auths": {"ghcr.io": {"identitytoken": "synthetic-identity-0007"}}}`, want: "identity token", unsupported: true},
+		// docker login with an OAuth or 2FA identity token writes the username
+		// with a blank password into auth next to the token; that is the shape
+		// a real config.json has and it must not become `Basic hub-user:`.
+		"identity token with auth":   {body: `{"auths": {"ghcr.io": {"auth": "` + base64.StdEncoding.EncodeToString([]byte("hub-user:")) + `", "identitytoken": "synthetic-identity-0007"}}}`, want: "identity token", unsupported: true},
+		"identity token with fields": {body: `{"auths": {"ghcr.io": {"username": "hub-user", "password": "stale-synthetic-0009", "identitytoken": "synthetic-identity-0007"}}}`, want: "identity token", unsupported: true},
+		"invalid host key":           {body: `{"auths": {"https://": {"username": "u", "password": "p"}}}`, want: "invalid host"},
+		"not json":                   {body: `{"auths": `, want: "not valid json"},
+		"wrong shape":                {body: `{"auths": []}`, want: "not valid json"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -149,13 +156,55 @@ func TestDockerConfigCredentialsRejectMalformedEntries(t *testing.T) {
 			if ok || err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Lookup() = (ok=%v, err=%v), want %q", ok, err, test.want)
 			}
+			var unsupported *UnsupportedCredentialError
+			if got := errors.As(err, &unsupported); got != test.unsupported {
+				t.Fatalf("Lookup() error is UnsupportedCredentialError = %v, want %v: %v", got, test.unsupported, err)
+			}
+			if test.unsupported && (unsupported.Host != "ghcr.io" || unsupported.Mechanism != "an identity token") {
+				t.Fatalf("UnsupportedCredentialError = %+v", unsupported)
+			}
 			assertNoSecret(t, "error", err.Error())
-			for _, marker := range []string{"!!not-base64!!", "synthetic-identity-0007", "nocolon"} {
+			for _, marker := range []string{"!!not-base64!!", "synthetic-identity-0007", "nocolon", "hub-user", "stale-synthetic-0009"} {
 				if strings.Contains(err.Error(), marker) {
 					t.Fatalf("error echoes the field value: %v", err)
 				}
 			}
 		})
+	}
+}
+
+// TestDockerConfigCredentialsIdentityTokenIsReportedPerHost pins the Docker
+// Hub shape `docker login` writes after a 2FA or OAuth login and checks that
+// the unsupported entry only affects its own host: a static login for another
+// registry in the same file keeps working.
+func TestDockerConfigCredentialsIdentityTokenIsReportedPerHost(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("hub-user:"))
+	source := DockerConfigCredentials(writeDockerConfig(t, `{
+  "auths": {
+    "https://index.docker.io/v1/": {"auth": "`+encoded+`", "identitytoken": "synthetic-identity-0007"},
+    "ghcr.io": {"username": "`+testUsername+`", "password": "`+testPassword+`"}
+  }
+}`))
+	ctx := context.Background()
+	for _, host := range []string{"registry-1.docker.io", "index.docker.io", "docker.io"} {
+		_, ok, err := source.Lookup(ctx, host)
+		var unsupported *UnsupportedCredentialError
+		if ok || !errors.As(err, &unsupported) {
+			t.Fatalf("Lookup(%q) = (ok=%v, err=%v), want UnsupportedCredentialError", host, ok, err)
+		}
+		if unsupported.Host != "index.docker.io" || unsupported.Mechanism != "an identity token" {
+			t.Fatalf("Lookup(%q) = %+v", host, unsupported)
+		}
+		if strings.Contains(err.Error(), "hub-user") || strings.Contains(err.Error(), "synthetic-identity-0007") {
+			t.Fatalf("Lookup(%q) error echoes the entry: %v", host, err)
+		}
+	}
+	credential, ok, err := source.Lookup(ctx, "ghcr.io")
+	if err != nil || !ok || credential.Username != testUsername || credential.Password != testPassword {
+		t.Fatalf("Lookup(ghcr.io) = (%v, %v, %v), want the static entry", credential, ok, err)
+	}
+	if _, ok, err := source.Lookup(ctx, "quay.io"); ok || err != nil {
+		t.Fatalf("Lookup(quay.io) = (ok=%v, err=%v), want anonymous", ok, err)
 	}
 }
 

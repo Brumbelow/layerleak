@@ -36,9 +36,11 @@ func (e *UnsupportedCredentialError) Error() string {
 // path. Entries may carry a base64 `auth` field (`username:password`) or
 // separate `username` and `password` fields; keys may be bare hosts, URLs or
 // the legacy `https://index.docker.io/v1/` Docker Hub key. Credential helpers
-// (`credsStore`, `credHelpers`) are not invoked: a host they cover is reported
-// through *UnsupportedCredentialError. The file is read once, on the first
-// lookup, and must be at most 1 MiB.
+// (`credsStore`, `credHelpers`) are not invoked and identity tokens
+// (`identitytoken`, written by `docker login` after an OAuth or 2FA login) are
+// not exchanged: a host they cover is reported through
+// *UnsupportedCredentialError. The file is read once, on the first lookup, and
+// must be at most 1 MiB.
 func DockerConfigCredentials(path string) CredentialSource {
 	return &dockerConfigSource{path: path}
 }
@@ -63,13 +65,15 @@ type dockerAuthEntry struct {
 	IdentityToken string `json:"identitytoken"`
 }
 
-// parsedDockerConfig holds the normalized view of a config file: credentials
-// and placeholder entries by normalized host, plus the helper configuration.
+// parsedDockerConfig holds the normalized view of a config file: credentials,
+// placeholder and identity-token entries by normalized host, plus the helper
+// configuration.
 type parsedDockerConfig struct {
-	credentials map[string]Credential
-	placeholder map[string]bool
-	credsStore  string
-	credHelpers map[string]string
+	credentials   map[string]Credential
+	placeholder   map[string]bool
+	identityToken map[string]bool
+	credsStore    string
+	credHelpers   map[string]string
 }
 
 func (s *dockerConfigSource) Lookup(_ context.Context, host string) (Credential, bool, error) {
@@ -105,6 +109,9 @@ func (p *parsedDockerConfig) lookup(host string) (Credential, bool, error) {
 	if helper, ok := p.credHelpers[host]; ok {
 		return Credential{}, false, &UnsupportedCredentialError{Host: host, Mechanism: "credential helper " + helper}
 	}
+	if p.identityToken[host] {
+		return Credential{}, false, &UnsupportedCredentialError{Host: host, Mechanism: "an identity token"}
+	}
 	if credential, ok := p.credentials[host]; ok {
 		return credential, true, nil
 	}
@@ -139,10 +146,11 @@ func parseDockerConfig(body []byte) (*parsedDockerConfig, error) {
 		return nil, errors.New("parse docker config: file is not valid json")
 	}
 	parsed := &parsedDockerConfig{
-		credentials: make(map[string]Credential, len(file.Auths)),
-		placeholder: make(map[string]bool),
-		credsStore:  strings.TrimSpace(file.CredsStore),
-		credHelpers: make(map[string]string, len(file.CredHelpers)),
+		credentials:   make(map[string]Credential, len(file.Auths)),
+		placeholder:   make(map[string]bool),
+		identityToken: make(map[string]bool),
+		credsStore:    strings.TrimSpace(file.CredsStore),
+		credHelpers:   make(map[string]string, len(file.CredHelpers)),
 	}
 	for key, helper := range file.CredHelpers {
 		host := normalizeCredentialHost(key)
@@ -164,16 +172,22 @@ func parseDockerConfig(body []byte) (*parsedDockerConfig, error) {
 			continue
 		}
 		entry := file.Auths[key]
+		// `docker login` with an OAuth or 2FA identity token stores the token
+		// next to an `auth` field holding the username and a blank password.
+		// The token decides the entry's mechanism before `auth` is decoded, so
+		// the blank-password pair is never used as a Basic credential. The
+		// entry is reported for its own host only; other hosts in the file stay
+		// usable.
+		if strings.TrimSpace(entry.IdentityToken) != "" {
+			parsed.identityToken[host] = true
+			continue
+		}
 		credential, err := entry.credential()
 		if err != nil {
 			problems = errors.Join(problems, fmt.Errorf("docker config entry for %s: %w", host, err))
 			continue
 		}
 		if credential.IsZero() {
-			if strings.TrimSpace(entry.IdentityToken) != "" {
-				problems = errors.Join(problems, &UnsupportedCredentialError{Host: host, Mechanism: "an identity token"})
-				continue
-			}
 			parsed.placeholder[host] = true
 			continue
 		}
@@ -188,7 +202,9 @@ func parseDockerConfig(body []byte) (*parsedDockerConfig, error) {
 }
 
 // credential decodes one auths entry. The base64 `auth` field wins over the
-// plain fields when both are present, matching the Docker CLI.
+// plain fields when both are present, matching the Docker CLI. Both halves
+// must be non-empty: a blank password cannot form a usable Basic credential
+// and only appears in identity-token entries, which are handled before this.
 func (e dockerAuthEntry) credential() (Credential, error) {
 	if auth := strings.TrimSpace(e.Auth); auth != "" {
 		decoded, err := base64.StdEncoding.DecodeString(auth)
@@ -199,7 +215,7 @@ func (e dockerAuthEntry) credential() (Credential, error) {
 			return Credential{}, errors.New("auth field is not valid base64")
 		}
 		username, password, ok := strings.Cut(string(decoded), ":")
-		if !ok || username == "" {
+		if !ok || username == "" || password == "" {
 			return Credential{}, errors.New("auth field does not decode to username:password")
 		}
 		return Credential{Username: username, Password: password}, nil

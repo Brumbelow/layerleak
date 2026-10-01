@@ -420,6 +420,32 @@ jobs:
           curl --fail --silent http://127.0.0.1:18080/health
           test "$(docker exec "${database}" psql -U layerleak -d layerleak -tAc "SELECT to_regclass('public.scan_runs') IS NOT NULL")" = "t"
 
+          # API contract smoke: every response is a JSON envelope, including
+          # 400/404/405, and the read endpoints answer against the real schema.
+          api_check() {
+            local method="$1" path="$2" expected_status="$3" jq_filter="$4"
+            shift 4
+            local response status body
+            response="$(curl --silent --show-error --output - --write-out '\n%{http_code}' \
+              -X "${method}" "$@" "http://127.0.0.1:18080${path}")"
+            status="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            if [[ "${status}" != "${expected_status}" ]] || ! jq -e "${jq_filter}" <<<"${body}" >/dev/null; then
+              echo "unexpected response for ${method} ${path}: status=${status} body=${body}" >&2
+              exit 1
+            fi
+          }
+          api_check POST /api/v1/scans 400 '.error.code == "invalid_request"' \
+            -H 'Content-Type: application/json' --data '{"reference":"https://not-a-reference"}'
+          api_check GET /api/v1/repositories 200 '(.repositories | type) == "array" and (.repositories | length) == 0'
+          api_check GET /api/v1/scans/00000000-0000-0000-0000-000000000000 404 '.error.code == "not_found"'
+          api_check GET /definitely-not-a-route 404 '.error.code == "not_found"'
+          api_check PUT /api/v1/scans 405 '.error.code == "method_not_allowed"'
+          curl --silent --output /dev/null --dump-header - -X PUT http://127.0.0.1:18080/api/v1/scans \
+            | grep -qi '^Allow: POST'
+          curl --silent --output /dev/null --dump-header - http://127.0.0.1:18080/health \
+            | grep -qi '^X-Content-Type-Options: nosniff'
+
   vulnerability:
     name: Reachable Go vulnerabilities
     runs-on: ubuntu-24.04

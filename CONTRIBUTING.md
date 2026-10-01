@@ -22,9 +22,8 @@ go test -short ./...
 go run . scan alpine:latest --progress plain
 ```
 
-The module root is the public CLI. `go run ./cmd/scanner` remains a development
-entrypoint. Administrative binaries live under `cmd/api`, `cmd/migrate`,
-`cmd/purge`, and `cmd/healthcheck`.
+The module root is the public CLI (`go run .`). Administrative binaries live
+under `cmd/api`, `cmd/migrate`, `cmd/purge`, and `cmd/healthcheck`.
 
 To run PostgreSQL integration tests:
 

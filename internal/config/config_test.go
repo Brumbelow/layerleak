@@ -26,6 +26,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_IDLE_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_SHUTDOWN_TIMEOUT", "")
+	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "")
 	t.Setenv("LAYERLEAK_API_READINESS_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS", "")
 	t.Setenv("LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS", "")
@@ -75,6 +76,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.APIScanTimeout != 30*time.Minute || cfg.APIReadHeaderTimeout != 5*time.Second || cfg.APIReadTimeout != 15*time.Second || cfg.APIResponseWriteTimeout != 30*time.Second || cfg.APIIdleTimeout != time.Minute || cfg.APIShutdownTimeout != 30*time.Second || cfg.APIReadinessTimeout != 2*time.Second {
 		t.Fatalf("api timeouts = %#v", cfg)
+	}
+	if cfg.APIPreStopDelay != 0 {
+		t.Fatalf("cfg.APIPreStopDelay = %s", cfg.APIPreStopDelay)
 	}
 
 	if cfg.RegistryBaseURL != "" {
@@ -159,6 +163,27 @@ func TestLoadRejectsNonPositiveTimeout(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil")
+	}
+}
+
+func TestLoadPreStopDelayAllowsZeroRejectsNegative(t *testing.T) {
+	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "0s")
+	cfg, err := Load()
+	if err != nil || cfg.APIPreStopDelay != 0 {
+		t.Fatalf("Load() with 0s = (%s, %v)", cfg.APIPreStopDelay, err)
+	}
+
+	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "7s")
+	cfg, err = Load()
+	if err != nil || cfg.APIPreStopDelay != 7*time.Second {
+		t.Fatalf("Load() with 7s = (%s, %v)", cfg.APIPreStopDelay, err)
+	}
+
+	for _, value := range []string{"-1s", "soon"} {
+		t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", value)
+		if _, err := Load(); err == nil {
+			t.Fatalf("Load() with %q error = nil", value)
+		}
 	}
 }
 

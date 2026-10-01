@@ -51,7 +51,11 @@ paths:
     get:
       tags: [Health]
       summary: Check database and schema readiness
-      description: Returns success only when PostgreSQL responds and the installed schema is exactly version 0004.
+      description: |
+        Returns success only when PostgreSQL responds and the installed schema
+        is exactly version 0004. Reports 503 `not_ready` while the process
+        drains before shutdown (`LAYERLEAK_API_PRESTOP_DELAY`), so load
+        balancers stop routing to it before in-flight requests are cancelled.
       operationId: getReadiness
       responses:
         "200":
@@ -423,7 +427,11 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     ServiceUnavailable:
-      description: Database/schema readiness or another required service is unavailable.
+      description: |
+        A dependency is unavailable. `not_ready`: PostgreSQL or the schema is
+        not ready, or the process is draining before shutdown.
+        `storage_unavailable`: a database read failed. `server_shutting_down`:
+        the drain cancelled this request before it completed.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -449,7 +457,9 @@ components:
         a redacted `result`, but it could not be persisted; no `scan_run_id` is
         invented. `registry_rate_limited`: the registry or its token endpoint
         answered 429 after the client's bounded retries; `Retry-After` carries
-        a suggested back-off in seconds.
+        a suggested back-off in seconds. `server_shutting_down`: the process is
+        draining; new scans are refused and an in-flight scan was cancelled when
+        the drain window elapsed. Retry against another instance.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"

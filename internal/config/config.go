@@ -21,6 +21,7 @@ type Config struct {
 	APIResponseWriteTimeout     time.Duration
 	APIIdleTimeout              time.Duration
 	APIShutdownTimeout          time.Duration
+	APIPreStopDelay             time.Duration
 	APIReadinessTimeout         time.Duration
 	RegistryBaseURL             string
 	RegistryAuthURL             string
@@ -97,6 +98,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	apiShutdownTimeout, err := durationFromEnv("LAYERLEAK_API_SHUTDOWN_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	apiPreStopDelay, err := nonNegativeDurationFromEnv("LAYERLEAK_API_PRESTOP_DELAY", 0)
 	if err != nil {
 		return Config{}, err
 	}
@@ -243,6 +248,7 @@ func Load() (Config, error) {
 		APIResponseWriteTimeout:     apiResponseWriteTimeout,
 		APIIdleTimeout:              apiIdleTimeout,
 		APIShutdownTimeout:          apiShutdownTimeout,
+		APIPreStopDelay:             apiPreStopDelay,
 		APIReadinessTimeout:         apiReadinessTimeout,
 		RegistryBaseURL:             envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", ""),
 		RegistryAuthURL:             envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", ""),
@@ -336,6 +342,26 @@ func durationFromEnv(key string, fallback time.Duration) (time.Duration, error) 
 
 	if parsed <= 0 {
 		return 0, fmt.Errorf("%s must be greater than zero", key)
+	}
+
+	return parsed, nil
+}
+
+// nonNegativeDurationFromEnv parses a duration that may be zero to disable
+// the behaviour it configures.
+func nonNegativeDurationFromEnv(key string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s must not be negative", key)
 	}
 
 	return parsed, nil

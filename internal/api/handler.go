@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
@@ -40,12 +41,17 @@ type scanExecutor interface {
 	ScanAndSave(rctx context.Context, request scanservice.Request) (scanservice.Outcome, error)
 }
 
+// Handler is the JSON API. It implements http.Handler through the middleware
+// that wraps its mux, and tracks whether the server is draining.
 type Handler struct {
 	scanner   scanExecutor
 	store     storage.ReadStore
 	options   HandlerOptions
 	scanSlots chan struct{}
 	requestID func() string
+	logger    *slog.Logger
+	draining  atomic.Bool
+	serve     http.Handler
 }
 
 type HandlerOptions struct {
@@ -56,7 +62,11 @@ type HandlerOptions struct {
 	ReadinessTimeout   time.Duration
 	ResponseTimeout    time.Duration
 	RequestID          func() string
+	// Logger receives request and lifecycle logs. Nil uses slog.Default().
+	Logger *slog.Logger
 }
+
+const shuttingDownMessage = "the API is shutting down; retry against another instance"
 
 type readinessChecker interface {
 	Ready(context.Context) error
@@ -198,6 +208,10 @@ func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
 // NewHandlerWithOptions returns the JSON HTTP API with explicit resource and
 // deadline limits. Zero-valued options use the stable API defaults.
 func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) http.Handler {
+	return newHandler(scanner, store, options)
+}
+
+func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) *Handler {
 	options = options.withDefaults()
 	handler := &Handler{
 		scanner:   scanner,
@@ -205,6 +219,7 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 		options:   options,
 		scanSlots: make(chan struct{}, options.MaxConcurrentScans),
 		requestID: options.RequestID,
+		logger:    options.Logger,
 	}
 
 	mux := http.NewServeMux()
@@ -225,7 +240,24 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 	mux.HandleFunc("/api/v1/repositories/", handler.methodNotAllowed(http.MethodGet))
 	mux.HandleFunc("/api/v1/findings/{id}", handler.methodNotAllowed(http.MethodGet))
 	mux.HandleFunc("/", handler.handleNotFound)
-	return handler.middleware(mux)
+	handler.serve = handler.middleware(mux)
+	return handler
+}
+
+// ServeHTTP serves the API through its middleware and mux.
+func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	h.serve.ServeHTTP(writer, request)
+}
+
+// startDraining marks the server as shutting down: /readyz reports 503
+// not_ready, new scans are refused with 503 server_shutting_down, and
+// requests whose contexts the drain cancels report the same code.
+func (h *Handler) startDraining() {
+	h.draining.Store(true)
+}
+
+func (h *Handler) isDraining() bool {
+	return h.draining.Load()
 }
 
 func (options HandlerOptions) withDefaults() HandlerOptions {
@@ -250,6 +282,9 @@ func (options HandlerOptions) withDefaults() HandlerOptions {
 	if options.RequestID == nil {
 		options.RequestID = newRequestID
 	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
 	return options
 }
 
@@ -258,6 +293,10 @@ func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request) {
+	if h.isDraining() {
+		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "the API is draining before shutdown")
+		return
+	}
 	checker, ok := h.store.(readinessChecker)
 	if !ok || checker == nil {
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database readiness check is not configured")
@@ -276,6 +315,10 @@ func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request)
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {
 	if h.scanner == nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "scan service is not configured")
+		return
+	}
+	if h.isDraining() {
+		writeAPIError(writer, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
 		return
 	}
 	if !isJSONContentType(request.Header.Get("Content-Type"), request.ContentLength) {
@@ -345,7 +388,7 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	if err != nil {
-		failure := classifyScanError(scanCtx, request.Context(), err)
+		failure := classifyScanError(scanCtx, request.Context(), err, h.isDraining())
 		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", failure.code, "status", failure.status, "request_id", requestIDFromWriter(writer))
 		response := scanResponse{
 			ScanRunID: outcome.ScanRunID,
@@ -748,12 +791,15 @@ const registryRateLimitRetryAfter = "60"
 
 // classifyScanError maps a scan failure to a response. Only the API's own scan
 // deadline (scanCtx) produces 504 and only an ended request context produces
-// 408: a context error nested inside the scan (the registry client bounds each
-// request with its own timeout) is an upstream failure and reports 502.
-func classifyScanError(scanCtx, requestCtx context.Context, err error) scanFailure {
+// 408 (or 503 server_shutting_down when the drain cancelled it): a context
+// error nested inside the scan (the registry client bounds each request with
+// its own timeout) is an upstream failure and reports 502.
+func classifyScanError(scanCtx, requestCtx context.Context, err error, draining bool) scanFailure {
 	switch {
 	case scanservice.IsSaveError(err):
 		return scanFailure{status: http.StatusServiceUnavailable, code: "storage_unavailable", message: "the scan result could not be stored"}
+	case requestCtx.Err() != nil && draining:
+		return scanFailure{status: http.StatusServiceUnavailable, code: "server_shutting_down", message: shuttingDownMessage}
 	case requestCtx.Err() != nil:
 		return scanFailure{status: http.StatusRequestTimeout, code: "scan_canceled", message: "the request was canceled before the scan completed"}
 	case errors.Is(scanCtx.Err(), context.DeadlineExceeded):
@@ -872,6 +918,11 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 		wrapped.Header().Set("X-Request-ID", requestID)
 		wrapped.Header().Set("Cache-Control", "no-store")
 		wrapped.Header().Set("X-Content-Type-Options", "nosniff")
+		if h.isDraining() && request.Context().Err() != nil {
+			// The drain cancelled the base context before this request ran.
+			writeAPIError(wrapped, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
+			return
+		}
 
 		defer func() {
 			if recovered := recover(); recovered != nil {

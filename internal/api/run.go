@@ -5,17 +5,160 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/config"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
+const defaultShutdownTimeout = 30 * time.Second
+
+// ServerOptions configures the HTTP listener and the drain sequence that runs
+// when the serve context is cancelled.
+type ServerOptions struct {
+	// Addr is the host:port ListenAndServe binds.
+	Addr              string
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	IdleTimeout       time.Duration
+	// ShutdownTimeout bounds how long Shutdown waits for in-flight handlers
+	// after their contexts were cancelled. Zero uses 30 s.
+	ShutdownTimeout time.Duration
+	// PreStopDelay is the drain window: /readyz reports 503 not_ready and new
+	// scans are refused while in-flight requests keep running, so load
+	// balancers can deregister the instance before anything is cancelled.
+	PreStopDelay time.Duration
+	Handler      HandlerOptions
+	// Logger receives lifecycle events and net/http's internal errors. Nil
+	// uses slog.Default().
+	Logger *slog.Logger
+}
+
+func (options ServerOptions) withDefaults() ServerOptions {
+	if options.ShutdownTimeout <= 0 {
+		options.ShutdownTimeout = defaultShutdownTimeout
+	}
+	if options.PreStopDelay < 0 {
+		options.PreStopDelay = 0
+	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
+	if options.Handler.Logger == nil {
+		options.Handler.Logger = options.Logger
+	}
+	return options
+}
+
+// Server runs the JSON API with a graceful drain: readiness flips first, the
+// pre-stop delay elapses, in-flight request contexts are cancelled so scans
+// abort with 503 server_shutting_down, and http.Server.Shutdown waits for
+// handlers to finish.
+type Server struct {
+	handler    *Handler
+	httpServer *http.Server
+	options    ServerOptions
+	logger     *slog.Logger
+	cancelBase context.CancelFunc
+}
+
+// NewServer builds the API server from its dependencies. The scanner serves
+// POST /api/v1/scans and the store backs the read endpoints and readiness.
+func NewServer(scanner scanExecutor, store storage.ReadStore, options ServerOptions) *Server {
+	options = options.withDefaults()
+	handler := newHandler(scanner, store, options.Handler)
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	httpServer := &http.Server{
+		Addr:              options.Addr,
+		Handler:           handler,
+		ReadHeaderTimeout: options.ReadHeaderTimeout,
+		ReadTimeout:       options.ReadTimeout,
+		IdleTimeout:       options.IdleTimeout,
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+	}
+	return &Server{
+		handler:    handler,
+		httpServer: httpServer,
+		options:    options,
+		logger:     options.Logger,
+		cancelBase: cancelBase,
+	}
+}
+
+// ListenAndServe binds Addr and serves until ctx is cancelled, then drains.
+func (s *Server) ListenAndServe(ctx context.Context) error {
+	listener, err := net.Listen("tcp", s.options.Addr)
+	if err != nil {
+		return fmt.Errorf("listen on api address: %w", err)
+	}
+	return s.Serve(ctx, listener)
+}
+
+// Serve accepts connections on listener until ctx is cancelled and then runs
+// the drain sequence. It returns nil after a clean shutdown and the serve or
+// shutdown error otherwise. Shutdown closes the listener.
+func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+	served := make(chan error, 1)
+	go func() {
+		err := s.httpServer.Serve(listener)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		served <- err
+	}()
+
+	select {
+	case err := <-served:
+		s.cancelBase()
+		return serveError(err)
+	case <-ctx.Done():
+	}
+
+	s.handler.startDraining()
+	s.logger.Info("api draining",
+		"prestop_delay", s.options.PreStopDelay.String(),
+		"shutdown_timeout", s.options.ShutdownTimeout.String(),
+	)
+	if s.options.PreStopDelay > 0 {
+		timer := time.NewTimer(s.options.PreStopDelay)
+		select {
+		case <-timer.C:
+		case err := <-served:
+			timer.Stop()
+			s.cancelBase()
+			return serveError(err)
+		}
+	}
+
+	s.cancelBase()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.options.ShutdownTimeout)
+	defer cancel()
+	if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown api server: %w", err)
+	}
+	if err := serveError(<-served); err != nil {
+		return err
+	}
+	s.logger.Info("api stopped")
+	return nil
+}
+
+func serveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("serve api: %w", err)
+}
+
+// Run loads configuration, connects to PostgreSQL and serves the API until
+// SIGINT or SIGTERM, then drains and returns. main wraps it.
 func Run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -60,47 +203,28 @@ func Run() error {
 		}
 	}
 
-	server := &http.Server{
-		Addr: cfg.APIAddr,
-		Handler: NewHandlerWithOptions(scanservice.New(cfg, store), store, HandlerOptions{
+	server := NewServer(scanservice.New(cfg, store), store, ServerOptions{
+		Addr:              cfg.APIAddr,
+		ReadHeaderTimeout: cfg.APIReadHeaderTimeout,
+		ReadTimeout:       cfg.APIReadTimeout,
+		IdleTimeout:       cfg.APIIdleTimeout,
+		ShutdownTimeout:   cfg.APIShutdownTimeout,
+		PreStopDelay:      cfg.APIPreStopDelay,
+		Logger:            logger,
+		Handler: HandlerOptions{
 			MaxRequestBytes:    cfg.APIMaxRequestBytes,
 			ScanTimeout:        cfg.APIScanTimeout,
 			MaxConcurrentScans: cfg.APIMaxConcurrentScans,
 			QueryTimeout:       cfg.DatabaseQueryTimeout,
 			ReadinessTimeout:   cfg.APIReadinessTimeout,
 			ResponseTimeout:    cfg.APIResponseWriteTimeout,
-		}),
-		ReadHeaderTimeout: cfg.APIReadHeaderTimeout,
-		ReadTimeout:       cfg.APIReadTimeout,
-		IdleTimeout:       cfg.APIIdleTimeout,
-	}
+			Logger:             logger,
+		},
+	})
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	serverErr := make(chan error, 1)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-			return
-		}
-		serverErr <- nil
-	}()
-
-	select {
-	case err := <-serverErr:
-		return err
-	case <-signalCtx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.APIShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown api server: %w", err)
-		}
-		if err := <-serverErr; err != nil {
-			return err
-		}
-		return nil
-	}
+	return server.ListenAndServe(signalCtx)
 }
 
 func newDefaultLogger(levelName string) (*slog.Logger, error) {

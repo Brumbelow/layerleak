@@ -265,7 +265,8 @@ only infrastructure you control.
 | `LAYERLEAK_API_READ_TIMEOUT` | `15s` | HTTP request read deadline. |
 | `LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT` | `30s` | Non-scan response write deadline. |
 | `LAYERLEAK_API_IDLE_TIMEOUT` | `60s` | Keep-alive idle timeout. |
-| `LAYERLEAK_API_SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown deadline. |
+| `LAYERLEAK_API_SHUTDOWN_TIMEOUT` | `30s` | How long shutdown waits for in-flight handlers after the drain window; must be positive. |
+| `LAYERLEAK_API_PRESTOP_DELAY` | `0s` | Drain window after `SIGTERM`/`SIGINT`: `/readyz` answers 503 `not_ready` and new scans are refused with 503 `server_shutting_down` while in-flight requests keep running; when it elapses, in-flight scans are cancelled with 503 `server_shutting_down`. May be `0s`. Keep `LAYERLEAK_API_STOP_GRACE_PERIOD` above this plus `LAYERLEAK_API_SHUTDOWN_TIMEOUT`. |
 | `LAYERLEAK_API_READINESS_TIMEOUT` | `2s` | Database readiness query deadline. |
 | `LAYERLEAK_DATABASE_URL` | empty | PostgreSQL connection URL. The password may be left out of the URL and supplied through `PGPASSWORD` or `PGPASSFILE`; the driver fills any field the URL omits from the standard `PG*` variables. |
 | `LAYERLEAK_DATABASE_MAX_OPEN_CONNS` | `10` | Open connection cap; must be positive. |

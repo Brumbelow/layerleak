@@ -31,19 +31,19 @@ Stated as assumptions; each can be overturned before the RC branch is cut.
 1. **Module path** becomes `github.com/brumbelow/layerleak/v3`. The never-shipped v1.1.0 content becomes the `[v3.0.0]` changelog section. No `v1.0.1` deprecation-pointer release (MIG-20 over PRD-27): the workflow stays v3-only; README/web docs explain that `go install github.com/brumbelow/layerleak@latest` is frozen at v1.0.0 forever, and pkg.go.dev shows the "highest major is v3" banner automatically.
 2. **Release flow**: `v3.0.0-rc.1`, 72-hour soak, promote the same commit and image digest to `v3.0.0`. Release-notes baseline is v2.5.0 for rc.1 and stable, the previous RC for rc.N>1 (MIG-07/REL-04).
 3. **Go floor**: `go 1.27.1` in `go.mod` (matches the Dockerfile builder; keeps govulncheck clean; `GOTOOLCHAIN=auto` lets older local toolchains self-upgrade). Document "Go 1.27.1 or newer". Add a CI assertion that the Dockerfile `golang:` tag equals the `go` directive so they cannot drift (CFG-01/REL-08).
-4. **HTTP API** stays at `/api/v1` with no breaking wire changes; no migration 0005 in 3.0.0 (schema stays `0004`). Async jobs and bearer auth are 3.1 (API-12/13, PRD-16/18).
+4. **HTTP API** stays at `/api/v1` with no breaking wire changes; no migration 0005 in 3.0.0 (schema stays `0004`). Opt-in bearer-token authentication and a Prometheus metrics listener are added (additive, API-13/PRD-16/PRD-17). Asynchronous scan jobs (API-12/PRD-18) are not built: the API stays synchronous by design (see W10).
 5. **Result contract**: `result_schema_version` becomes **2** and `record_schema_version` **2**, with published JSON Schemas (PRD-04, CLI-09, DOC-07). Justification: 3.0.0 changes fingerprints/spans for env findings (DET-01/03), the redaction shape (DET-08), some detector ids (PRD-07), tag-status vocabulary, and the local output files (PRD-03). Keep the `detector_name` field name (no rename churn); add `scanned_at`, `scanner{name,version}`, typed `tag_results.status`, no `omitempty` on counters. OpenAPI already allows `result_schema_version >= 1`.
 6. **Fingerprints** stay `sha256(raw value)`, unsalted and stable across installs (needed by SARIF `partialFingerprints` and the future baseline file). Reject the per-database HMAC (DET-09, GAP-06). Mitigate the offline-oracle risk through the DET-08 redaction fix. Fingerprints of env/label findings change once (DET-03); document re-baselining in UPGRADING.
 7. **Platform policy** (LAY-01/REG-03/REG-12/GAP-01, one fix): accept foreign/non-distributable layer media types and non-image index entries in validation; default platform selection skips non-`linux` manifests and non-image entries with a `platform_skipped`/`manifest_skipped` diagnostic (like attestation manifests today); a manifest selected explicitly that still cannot be scanned is `unsupported` (partial, acceptable with `--allow-partial`), never an integrity error. Add an OS-only `--platform linux` selector.
 8. **Exit codes**: 0 clean; 1 operational/input/persistence failure/cancellation; 2 actionable findings at or above `--fail-on`; **3** incomplete coverage not accepted by `--allow-partial` (PRD-06). SIGINT stays 1.
 9. **Local output**: drop the nearest-`go.mod` heuristic; default `./findings` under cwd; relative `LAYERLEAK_FINDINGS_DIR` resolves against cwd; one scan-record file per scan (no legacy findings array); `--output-dir`, `--output <file>`, `--no-artifacts`, `--no-db`; never chmod a pre-existing directory (PRD-03, CLI-01/03/10, CLI-18). Raw-secret persistence becomes database-only.
-10. **Distribution** in 3.0.0 is `go install .../v3` plus the API image. Signed CLI binaries, a composite GitHub Action, Homebrew and a CLI image are 3.1 (PRD-11/24/25, REL-18). README states this explicitly.
-11. **Private-registry authentication** (PRD-08) is 3.1: high value, but security-sensitive and 3.0.0 is already large. SARIF output (PRD-09) is in 3.0.0 (pure encoder).
+10. **Distribution** in 3.0.0 is `go install .../v3`, the API image, and signed CLI binaries (linux/darwin amd64+arm64, windows amd64) with checksums, cosign signatures and attestations attached to the GitHub release, plus a composite GitHub Action that installs the matching binary (PRD-11/24, REL-18). A Homebrew tap and a separate CLI image are not built (they need a second repository and add nothing the binaries do not provide).
+11. **Private-registry authentication** (PRD-08) ships in 3.0.0: `--username`/`--password-stdin`, `LAYERLEAK_REGISTRY_USERNAME`/`LAYERLEAK_REGISTRY_PASSWORD`, Docker `config.json` `auths` lookup (no credential helpers), identity-scoped token cache and Basic fallback, with credentials never logged or persisted. SARIF output (PRD-09) is also in 3.0.0.
 12. **Rehearsal**: no fork-rehearsal mode (REL-07). The first real dispatch is the rehearsal: every job before `publish` runs without public effect (only a `candidate-<run>` GHCR tag), and the `release` environment approval is simply withheld until the pre-publish jobs are green. Fix the known post-publish traps (MIG-08/23/27, REL-12) beforehand and budget for an rc.2.
 
 ## Workstreams
 
-Tiers: **M** = must ship in 3.0.0 (release-blocking or defines the v3 contract); **S** = should ship in 3.0.0 (real defect or cheap win, cut only if the schedule slips); **L** = 3.1+ (listed in W9).
+Tiers: **M** = must ship in 3.0.0 (release-blocking or defines the v3 contract); **S** = should ship in 3.0.0 (real defect or cheap win). There is no later minor release planned: everything worth doing ships in 3.0.0 (W10) or is explicitly not built (W9).
 
 ### W0. Unblock the pipeline (first two PRs)
 
@@ -99,7 +99,7 @@ Detectors, policy, findings (`internal/detectors/*`, `internal/detectionpolicy/p
 - **M** DET-28 detect connection URLs with embedded passwords (`postgres://`, `mysql://`, `mongodb(+srv)://`, `redis://`, `amqp://`, `cloudinary://`, empty username allowed): the single largest coverage gap for container images.
 - **S** DET-14 performance (0.6 MB/s today; a 1 MiB file costs ~1.7 s): required-literal prefilter with post-match boundary checks instead of leading `\b`/`(?i)`; hoist the `regexp.MustCompile` in `structured.go:330`; add `BenchmarkDefaultSetScanCorpus`.
 - **S** Correctness sweep, each small: DET-10 context rules allow a closing quote (`"key": "value"`); DET-11 PEM/PGP blocks without END marker; DET-12 GitLab routable PAT tail; DET-13 `ghr_` length; DET-15 suppression heuristics (placeholder markers on whole lines/paths, strong `spec/e2e/mock/stubs` path markers, `EXAMPLE` substring on whole URLs; `.template` becomes weak); DET-16 report default-credential pairs as suppressed rather than discarded; DET-17 `netrc_password` only after `machine`/`login` context; DET-18 percent-encoded git credentials; DET-19 CRLF INI quotes; DET-20 capture boundaries (npmrc quotes, databricks/telegram/aws truncation); DET-22 `sensitivePath` substring matching; DET-23 deterministic `compareFindings`; DET-24 nested overlapping matches; DET-36 trailing `\b` after classes containing `-` (google_api_key, square_* miss tokens ending in `-`); DET-39 strip UTF-8 BOM before INI parsing; DET-25 table/negative/property tests and drop the brittle `Len()==80` assertion.
-- **S** Coverage additions grouped by value (verify each shape against vendor docs or gitleaks first): DET-29 registry/package-manager credentials (`dckr_pat_`/`dckr_oat_`, `.dockerconfigjson` base64 decode, `registrytoken`, Artifactory, RubyGems, NuGet, crates.io, Maven `settings.xml`, `.pgpass`, `.my.cnf`, npmrc `_password`); DET-31 `Authorization: Basic/Bearer`, `X-Api-Key`, `PRIVATE-TOKEN` headers; DET-33 freshen vendor prefixes (Slack `xapp-/xoxe`, GitLab `glptt-/gloas-/...`, OpenAI `sk-svcacct-`, Notion `ntn_`, SonarQube `squ_/sqp_/sqa_`, Grafana `glc_`, Sentry `sntrys_`, New Relic, PlanetScale `pscale_pw_`, CircleCI, Datadog app keys, Twilio SK). DET-30/32/34/35 (kubeconfig/gcloud/Azure caches, cloud-provider formats, OS/framework secrets, long-tail SaaS) → 3.1.
+- **S** Coverage additions grouped by value (verify each shape against vendor docs or gitleaks first): DET-29 registry/package-manager credentials (`dckr_pat_`/`dckr_oat_`, `.dockerconfigjson` base64 decode, `registrytoken`, Artifactory, RubyGems, NuGet, crates.io, Maven `settings.xml`, `.pgpass`, `.my.cnf`, npmrc `_password`); DET-31 `Authorization: Basic/Bearer`, `X-Api-Key`, `PRIVATE-TOKEN` headers; DET-33 freshen vendor prefixes (Slack `xapp-/xoxe`, GitLab `glptt-/gloas-/...`, OpenAI `sk-svcacct-`, Notion `ntn_`, SonarQube `squ_/sqp_/sqa_`, Grafana `glc_`, Sentry `sntrys_`, New Relic, PlanetScale `pscale_pw_`, CircleCI, Datadog app keys, Twilio SK). DET-30/32/34/35 (kubeconfig/gcloud/Azure caches, cloud-provider formats, OS/framework secrets, long-tail SaaS) follow in W10.
 
 CLI, jobs, scan service (`internal/cli/*`, `internal/jobs/scan.go`, `internal/scanservice/*`):
 - **M** CLI-01 never `os.Chmod` a pre-existing findings directory or a symlink target; `Lstat` first, `Mkdir 0700` only when absent, warn when an existing dir is group/world accessible; fix `assertPrivateArtifacts` (`results_test.go:280`).
@@ -171,15 +171,74 @@ RC and stable:
 2. RC acceptance: `go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1`, `layerleak version`, `go list -m .../v3@latest` equals the RC (first-RC rule), GHCR tags, signatures and attestations, migration twice on a fresh 16.x database, API refuses start before 0004, `/health` `/livez` `/readyz`, both architectures.
 3. 72-hour soak. Any code change → rc.2 (budgeted).
 4. Promote `v3.0.0` with `candidate_version: v3.0.0-rc.1`; verify `@latest` → v3.0.0, GHCR `v3.0.0` and `latest`, GitHub latest, Pages content.
-5. Post-release: monitor Actions, code scanning, dependency alerts and issues for 24 h; open the 3.1 tracking issues from W9.
+5. Post-release: monitor Actions, code scanning, dependency alerts and issues for 24 h.
 
-### W9. Deferred to 3.1/3.2 and explicitly out
+### W9. Not built in 3.0.0 (no later release is planned)
 
-3.1: private-registry authentication (`--username`/`--password-stdin`, env, `config.json` `auths`; identity-scoped token cache; Basic fallback) (PRD-08, REG-23); signed CLI binaries (linux/darwin amd64+arm64, windows amd64) with checksums, cosign and attestations recorded in `release-manifest.json` schema 2, then a composite `action.yml`, Homebrew tap and CLI image (PRD-11/24/25, REL-18, CFG-14); local inputs (OCI layout, `docker save`, oci-archive, stdin) behind a `BlobSource` interface (PRD-10); baseline/ignore file by fingerprint with a `baselined` disposition (reserve the enum value in schema v2 now) (PRD-13); `layerleak detectors list` (PRD-14); `--log-format text|json` (PRD-15); opt-in API bearer tokens (API-13, PRD-16); async scan jobs with migration 0005 (API-12, PRD-18); streamed scanning of oversize files, UTF-16/nested archives, path-only findings, annotation scanning, magic-byte sniffing (LAY-10/11/12/13/21); keyset pagination, index right-sizing, reading the write-only `tags`/`manifests` tables (DB-15/16/18); purge batching (DB-06); admin status/dry-run/down commands (DB-09); remaining detector coverage (DET-30/32/34/35); compose hardening and resource limits (CFG-11); Codacy failing on findings (REL-17).
+No 3.x minor release is planned, so nothing is "deferred": an item is either in
+3.0.0 or consciously not built. Not built, with the reason:
 
-3.2: Prometheus `/metrics` on a separate listener (PRD-17); cross-target layer cache and parallel prefetch after a benchmark (PRD-19, LAY-14).
+- Asynchronous scan jobs and migration 0005 (API-12, PRD-18): the API is
+  synchronous by design; a job table, worker and status endpoints change the
+  operational model and the schema for a use case the CLI plus a scheduler
+  already covers.
+- A Homebrew tap and a separate CLI image (PRD-25, CFG-14): both need a second
+  repository or registry name and add nothing over the signed binaries and
+  `go install`.
+- Streamed scanning of files above `MAX_FILE_BYTES` (LAY-10): regex detection
+  over chunked streams either misses matches that straddle chunks or re-scans
+  overlaps; raising `MAX_FILE_BYTES` is the supported knob and oversize files
+  are reported with a diagnostic.
+- Path-only findings and annotation scanning (LAY-13, LAY-21): low signal; file
+  names and annotations are already visible in the record.
+- Index right-sizing and reading the write-only `tags`/`manifests` tables
+  (DB-16, DB-18), the `down` admin command (DB-09): no operator need was
+  identified and `down` invites data loss.
+- Custom YAML detector rules, webhooks, scheduling, Helm chart, OpenTelemetry,
+  pgx migration while lib/pq stays current (DB-11, CFG-21), devcontainer,
+  CODEOWNERS, release-please, `/api/v2`, a v1.0.1 deprecation pointer release.
 
-Out: custom YAML detector rules, webhooks, scheduling, Helm chart, OpenTelemetry, pgx migration while lib/pq stays current (DB-11, CFG-21), devcontainer, CODEOWNERS, release-please, `/api/v2`, a v1.0.1 deprecation pointer release.
+### W10. Additional scope folded into 3.0.0
+
+Everything the first draft of this plan parked for a minor release and that is
+worth shipping is built in two more agent waves after W3/W4, each with the
+same regression-test-first rules, then documented in W6:
+
+Wave A (after the W3 merges, alongside the W4 contract pass):
+- Private-registry authentication (PRD-08, REG-23) in `internal/registry` and
+  `internal/config`: credentials from `--username`/`--password-stdin` (CLI
+  wiring in wave B), `LAYERLEAK_REGISTRY_USERNAME`/`PASSWORD`, and Docker
+  `config.json` `auths` entries (base64 `auth` and `username`/`password`; no
+  credential helpers); identity-scoped token cache; Basic fallback when the
+  registry offers no Bearer challenge; credentials never appear in logs,
+  errors, results or records.
+- API extras (API-13, PRD-16, PRD-17, DB-15): opt-in bearer tokens
+  (`LAYERLEAK_API_BEARER_TOKENS` or `_FILE`, constant-time compare, health
+  probes exempt, `401` envelope), a Prometheus text-format `/metrics` on a
+  separate `LAYERLEAK_API_METRICS_ADDR` listener with no new dependency, and
+  additive keyset cursors on the list endpoints.
+- Database extras (DB-06, DB-09): batched purge with progress, and
+  `layerleak-migrate-up --status` / `--dry-run`.
+- Detector coverage 2 (DET-30, DET-32, DET-34, DET-35): kubeconfig, gcloud and
+  Azure credential caches, cloud-provider key formats, OS/framework secrets,
+  long-tail SaaS tokens, each verified against the vendor shape.
+
+Wave B (after wave A and the W4 contract pass):
+- Local inputs (PRD-10): a `BlobSource` interface implemented by the registry
+  client and by readers for OCI image layouts (`oci:/path`), `docker save`
+  archives (`docker-archive:/path.tar`) and OCI archives (`oci-archive:`), so
+  images can be scanned without a registry.
+- Nested archives and a sweep layer cache (LAY-11, LAY-12, PRD-19, LAY-14):
+  bounded one-level scanning inside zip/jar/war and tar/tgz entries, UTF-16
+  text detection, and a per-sweep cache keyed on layer digest so `--all-tags`
+  does not replay identical layers for every tag.
+- CLI extras (PRD-13, PRD-14, PRD-15): `--baseline <file>` with a `baselined`
+  disposition keyed on fingerprints, `layerleak detectors list`, and
+  `--log-format text|json`, plus the registry-auth flags.
+- Release and operations (PRD-11, PRD-24, REL-18, REL-17, CFG-11): signed CLI
+  binaries with checksums, cosign signatures and attestations in
+  `release-manifest.json` schema 2, a composite `action.yml`, Codacy failing on
+  new findings, and Compose resource limits.
 
 ## PR sequence
 
@@ -210,7 +269,7 @@ Release: pre-publish jobs green on the real dispatch before approval; RC accepta
 
 ## Open questions (assumptions stated; non-blocking)
 
-1. Scope tier: ship the M+S set as planned, or pull private-registry authentication (PRD-08) into 3.0.0 at roughly +8 engineer-days? Assumed 3.1.
+1. Scope tier: resolved on 2026-10-01 by the maintainer: no 3.x minor releases are planned, so the former 3.1/3.2 items ship in 3.0.0 (W10) or are explicitly not built (W9).
 2. Decision 5 vs the stricter "module path only" reading (DOC-13): assumed schema v2 because the detector/redaction/fingerprint fixes change the wire shape anyway.
 3. Decision 7 default platform policy (skip non-linux manifests): assumed yes; it changes `layerleak scan golang:latest` from exit 1 to a completed linux-only scan with diagnostics.
 4. Exit code 3 and `--fail-on`: assumed yes; SIGINT stays 1.

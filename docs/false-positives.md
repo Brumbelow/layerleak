@@ -41,9 +41,10 @@ real secret in `/app/config/testimonials.json` or a vendor path containing
   `low` or `medium` confidence; vendor-prefixed detectors carry `high`.
 - Content digests (`sha256:` prefixes, lock files) are excluded from entropy
   detection on purpose.
-- A finding you have reviewed and accepted can be tracked by its
-  `fingerprint`, which is stable across installs. A baseline file keyed on
-  fingerprints is planned for 3.1.
+- A finding you have reviewed and accepted can be listed in a baseline file
+  passed with `--baseline <file>`, keyed on its `fingerprint` (stable across
+  installs); baselined findings are reported with the `baselined` disposition
+  and do not affect the exit code.
 
 ## Reporting a false positive or negative
 

@@ -58,9 +58,12 @@ credentials.
 | Database rows | hostile strings reaching PostgreSQL | sanitised at the boundary, parameterised statements only (`storage`) |
 | Local record directory | a symlink or shared directory in place of `./findings` | `Lstat`, symlink refused, never `chmod`-ed, records `0600`, never overwritten (`cli`) |
 
-Every cap is configurable through `LAYERLEAK_*` variables and documented in the
-README. Caps that would make the tool useless at `0` reject `0`; the rest treat
-`0` as "disabled" and the README says which is which. Exceeding a cap never
+Every operator-tunable cap is a `LAYERLEAK_*` variable documented in the
+README; the zstd decoder window (128 MiB), the Docker config size (1 MiB), the
+bearer-token file size (64 KiB), the `Authorization` header size (4 KiB) and
+the cursor length (512 bytes) are fixed constants. Among the tunable caps,
+those that would make the tool useless at `0` reject `0`; the rest treat `0`
+as "disabled" and the README says which is which. Exceeding a cap never
 truncates silently: the platform or scan becomes `partial` (or `failed`), a
 diagnostic names the cap, the CLI exits `3` (or `1`) unless `--allow-partial`
 was given, and the API returns 422 with the partial result attached.

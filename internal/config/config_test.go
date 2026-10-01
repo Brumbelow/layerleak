@@ -917,3 +917,51 @@ func TestSecretFormattingRedacts(t *testing.T) {
 		t.Fatalf("empty secret formats as %q", fmt.Sprint(Secret("")))
 	}
 }
+
+// composeAPINotForwarded lists the variables internal/config reads that the
+// Compose api service deliberately does not forward: the API never writes
+// local scan records.
+var composeAPINotForwarded = map[string]bool{
+	"LAYERLEAK_FINDINGS_DIR": true,
+}
+
+// TestComposeForwardsEveryAPIVariable keeps docker-compose.yml in step with
+// the variables the API reads, so a knob documented for the Compose
+// deployment cannot be silently dropped by the api service.
+func TestComposeForwardsEveryAPIVariable(t *testing.T) {
+	read := make(map[string]bool)
+	for _, name := range []string{"config.go", "bearer.go"} {
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, match := range regexp.MustCompile(`"(LAYERLEAK_[A-Z0-9_]+)"`).FindAllStringSubmatch(string(source), -1) {
+			read[match[1]] = true
+		}
+	}
+	if len(read) < 40 {
+		t.Fatalf("found only %d variables in internal/config; the pattern no longer matches how they are read", len(read))
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	service := regexp.MustCompile(`(?ms)^  api:\n(.*?)^  [a-z][a-z_-]*:\n`).FindStringSubmatch(string(raw))
+	if service == nil {
+		t.Fatal("docker-compose.yml has no api service")
+	}
+	forwarded := make(map[string]bool)
+	for _, match := range regexp.MustCompile(`(?m)^\s+(LAYERLEAK_[A-Z0-9_]+):`).FindAllStringSubmatch(service[1], -1) {
+		forwarded[match[1]] = true
+	}
+	names := make([]string, 0, len(read))
+	for name := range read {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !forwarded[name] && !composeAPINotForwarded[name] {
+			t.Errorf("the Compose api service does not forward %s", name)
+		}
+	}
+}

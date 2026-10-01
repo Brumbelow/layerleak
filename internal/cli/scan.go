@@ -429,7 +429,62 @@ func renderSummary(output io.Writer, result jobs.Result) error {
 	if err := renderSummaryTargets(writer, result); err != nil {
 		return err
 	}
+	if err := renderSummaryFindings(writer, result); err != nil {
+		return err
+	}
 	return writer.Flush()
+}
+
+// summaryFindingsCap bounds the findings table so a noisy image does not
+// scroll the counts off the terminal; the JSON output carries them all.
+const summaryFindingsCap = 50
+
+// renderSummaryFindings lists the actionable findings (detector, confidence,
+// location, redacted value, platform). Every cell is sanitised because
+// paths, keys and redacted values come from the image.
+func renderSummaryFindings(writer io.Writer, result jobs.Result) error {
+	if len(result.Findings) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(writer, ""); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(writer, "Detector\tConfidence\tLocation\tRedacted Value\tPlatform"); err != nil {
+		return err
+	}
+	shown := min(len(result.Findings), summaryFindingsCap)
+	for _, item := range result.Findings[:shown] {
+		if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n",
+			sanitizeProgressValue(item.DetectorName),
+			sanitizeProgressValue(item.Confidence),
+			sanitizeProgressValue(findingLocation(item)),
+			sanitizeProgressValue(item.RedactedValue),
+			sanitizeProgressValue(item.Platform.String()),
+		); err != nil {
+			return err
+		}
+	}
+	if remaining := len(result.Findings) - shown; remaining > 0 {
+		if _, err := fmt.Fprintf(writer, "and %d more\n", remaining); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// findingLocation is file_path[:line] for file findings and source_type:key
+// for image metadata findings.
+func findingLocation(item findings.Finding) string {
+	if item.FilePath != "" {
+		if item.LineNumber > 0 {
+			return fmt.Sprintf("%s:%d", item.FilePath, item.LineNumber)
+		}
+		return item.FilePath
+	}
+	if item.Key != "" {
+		return string(item.SourceType) + ":" + item.Key
+	}
+	return string(item.SourceType)
 }
 
 type summaryRow struct {

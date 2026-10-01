@@ -228,6 +228,10 @@ go test -short -race ./... -count=1
 LAYERLEAK_DB_PASSWORD=release-check docker compose --profile tools config --quiet
 ```
 
+   `make verify` runs the same commands plus lint, `govulncheck`, the
+   documentation, schema and SARIF validators and the release-script tests;
+   `make db-test` adds the PostgreSQL suite against a disposable database.
+
 5. Copy the full `main` commit SHA:
 
 ```bash
@@ -287,7 +291,15 @@ Confirm:
 - a real scan succeeds from a host without a proxy and from a host behind an
   `HTTPS_PROXY`, and a multi-platform image (for example `golang:latest`)
   completes with the Windows manifests reported as skipped;
-- attached SBOM/provenance/checksum files match `release-manifest.json`.
+- attached SBOM/provenance/checksum files match `release-manifest.json`;
+- the five CLI archives pass `scripts/release-preflight.py binaries`,
+  `sha256sum --check`, `cosign verify-blob` of the checksums bundle and
+  `gh attestation verify` as shown under [CLI binaries](#cli-binaries), and a
+  downloaded binary reports the RC tag from `layerleak version` on Linux,
+  macOS and Windows;
+- a scratch repository workflow that uses `brumbelow/layerleak@v3.0.0-rc.1`
+  with `format: sarif` verifies the archive, scans a small public image, and
+  uploads the SARIF file to code scanning.
 
 Soak an RC for at least 72 hours. The stable workflow enforces this interval
 from the immutable candidate release's publication timestamp. Treat a

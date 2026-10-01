@@ -11,10 +11,12 @@ import (
 	"text/tabwriter"
 
 	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
 	"github.com/brumbelow/layerleak/v3/internal/findings"
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/sarif"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
@@ -297,6 +299,8 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					return encoder.Encode(scanservice.PublicResult(result))
 				case "summary":
 					return renderSummary(out, result)
+				case "sarif":
+					return renderSARIF(out, scanservice.PublicResult(result))
 				default:
 					return fmt.Errorf("unsupported output format: %s", outputFormat)
 				}
@@ -319,7 +323,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	}
 
 	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform as os, os/arch or os/arch/variant (default: every linux platform)")
-	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary or json")
+	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary, json, or sarif (SARIF 2.1.0)")
 	cmd.Flags().BoolVar(&allTags, "all-tags", false, "Enumerate and scan every public tag in a bare repository reference")
 	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed (otherwise exit code 3)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "low", "Lowest confidence of an actionable finding that produces exit code 2: low, medium, high, or none to report only")
@@ -347,11 +351,29 @@ func writeFormattedOutput(stdout io.Writer, outputPath string, render func(io.Wr
 
 func parseOutputFormat(value string) (string, error) {
 	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
-	case "summary", "json":
+	case "summary", "json", "sarif":
 		return normalized, nil
 	default:
-		return "", fmt.Errorf("unsupported output format %q: use summary or json", value)
+		return "", fmt.Errorf("unsupported output format %q: use summary, json, or sarif", value)
 	}
+}
+
+// renderSARIF writes the result as a SARIF 2.1.0 log. The rule list comes
+// from the default detector catalog so every detector is described even when
+// it produced no result, and tool.driver.version is this binary's version.
+func renderSARIF(out io.Writer, result jobs.Result) error {
+	return sarif.Encode(out, sarif.FromResult(result, sarif.Options{
+		ToolVersion: effectiveVersion(),
+		Rules:       sarifRules(detectors.Default().Catalog()),
+	}))
+}
+
+func sarifRules(catalog []string) []sarif.Rule {
+	rules := make([]sarif.Rule, 0, len(catalog))
+	for _, id := range catalog {
+		rules = append(rules, sarif.Rule{ID: id})
+	}
+	return rules
 }
 
 func validateRepositoryScopeFlags(cmd *cobra.Command, allTags bool) error {

@@ -13,7 +13,8 @@
     "scanned_at": "2026-10-01T12:00:00Z",
     "scanner": {
       "name": "layerleak",
-      "version": "v3.0.0"
+      "version": "v3.0.0",
+      "detector_set_version": "sha256:969784a5633f45fff7588f2853dfc5bf72b8c94f8b75b274f75d4f8036fe0484"
     },
     "total_findings": 8,
     "unique_fingerprints": 8,

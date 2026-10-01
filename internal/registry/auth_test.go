@@ -281,6 +281,27 @@ func TestTokenCacheDefaultsToSixtySecondsWithoutExpiresIn(t *testing.T) {
 	}
 }
 
+func TestTokenExpiryBoundsAdvertisedLifetime(t *testing.T) {
+	client := MustNewClient(Options{BaseURL: "https://registry.test", AllowPrivateHosts: true})
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	client.now = func() time.Time { return now }
+
+	tests := map[int64]time.Duration{
+		0:                   defaultTokenLifetime - tokenExpirySafetyMargin,
+		-5:                  defaultTokenLifetime - tokenExpirySafetyMargin,
+		300:                 300*time.Second - tokenExpirySafetyMargin,
+		86400:               maxTokenLifetime - tokenExpirySafetyMargin,
+		86401:               maxTokenLifetime - tokenExpirySafetyMargin,
+		1 << 62:             maxTokenLifetime - tokenExpirySafetyMargin,
+		9223372036854775807: maxTokenLifetime - tokenExpirySafetyMargin,
+	}
+	for expiresIn, want := range tests {
+		if got := client.tokenExpiry(expiresIn).Sub(now); got != want {
+			t.Fatalf("tokenExpiry(%d) = now+%s, want now+%s", expiresIn, got, want)
+		}
+	}
+}
+
 func TestTokenShorterThanSafetyMarginIsNeverCached(t *testing.T) {
 	registry := &bearerRegistry{tokenBody: `{"token":"` + testToken + `","expires_in":5}`}
 	client := newBearerClient(t, registry, nil)

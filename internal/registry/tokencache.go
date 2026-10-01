@@ -16,6 +16,10 @@ const (
 	// tokenExpirySafetyMargin is subtracted from the advertised lifetime so a
 	// token is refreshed before the registry starts rejecting it.
 	tokenExpirySafetyMargin = 10 * time.Second
+	// maxTokenLifetime caps the advertised lifetime: expires_in is hostile
+	// input and an absurd value must neither overflow the duration arithmetic
+	// nor keep a token alive for the whole process lifetime.
+	maxTokenLifetime = 24 * time.Hour
 )
 
 // tokenCacheEntry is one cached bearer token. The cache lives inside the
@@ -38,13 +42,17 @@ func (c *Client) tokenCacheKey(challenge bearerChallenge, credential Credential)
 }
 
 // tokenExpiry converts the advertised expires_in (seconds) into an absolute
-// deadline, applying the default lifetime when it is absent and the safety
-// margin in both cases. A lifetime at or below the margin yields a deadline in
-// the past, so such a token is used once and never cached.
+// deadline, applying the default lifetime when it is absent or negative, the
+// 24-hour cap, and the safety margin. A lifetime at or below the margin yields
+// a deadline in the past, so such a token is used once and never cached.
 func (c *Client) tokenExpiry(expiresIn int64) time.Time {
 	lifetime := defaultTokenLifetime
 	if expiresIn > 0 {
-		lifetime = time.Duration(expiresIn) * time.Second
+		if expiresIn > int64(maxTokenLifetime/time.Second) {
+			lifetime = maxTokenLifetime
+		} else {
+			lifetime = time.Duration(expiresIn) * time.Second
+		}
 	}
 	return c.now().Add(lifetime - tokenExpirySafetyMargin)
 }

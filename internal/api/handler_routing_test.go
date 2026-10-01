@@ -103,3 +103,59 @@ func TestInvalidRepositoryNameMessageIsNeutral(t *testing.T) {
 		t.Fatalf("body echoed the path: %s", recorder.Body.String())
 	}
 }
+
+// TestRegistryQueryIsValidatedAndEchoed pins API-19: the registry filter is
+// validated as host[:port], normalised the way storage normalises it, passed
+// to the store in that form and echoed in the response so clients can see
+// which registry their page came from.
+func TestRegistryQueryIsValidatedAndEchoed(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		status   int
+		registry string
+	}{
+		{name: "default", query: "", status: http.StatusOK, registry: "docker.io"},
+		{name: "lowercased and trimmed", query: "?registry=%20GHCR.IO%20", status: http.StatusOK, registry: "ghcr.io"},
+		{name: "docker hub alias", query: "?registry=index.docker.io", status: http.StatusOK, registry: "docker.io"},
+		{name: "registry-1 alias", query: "?registry=Registry-1.docker.io", status: http.StatusOK, registry: "docker.io"},
+		{name: "host with port", query: "?registry=localhost:5000", status: http.StatusOK, registry: "localhost:5000"},
+		{name: "ipv4 with port", query: "?registry=10.0.0.5:5000", status: http.StatusOK, registry: "10.0.0.5:5000"},
+		{name: "bracketed ipv6 with port", query: "?registry=%5B::1%5D:5000", status: http.StatusOK, registry: "[::1]:5000"},
+		{name: "scheme", query: "?registry=https://ghcr.io", status: http.StatusBadRequest},
+		{name: "path", query: "?registry=ghcr.io/library", status: http.StatusBadRequest},
+		{name: "space inside", query: "?registry=not%20a%20host", status: http.StatusBadRequest},
+		{name: "bad port", query: "?registry=ghcr.io:99999", status: http.StatusBadRequest},
+		{name: "leading hyphen label", query: "?registry=-bad.example", status: http.StatusBadRequest},
+		{name: "unbracketed ipv6", query: "?registry=::1", status: http.StatusBadRequest},
+		{name: "credentials", query: "?registry=user:secret@ghcr.io", status: http.StatusBadRequest},
+	}
+	for _, endpoint := range []string{"scans", "findings"} {
+		for _, test := range tests {
+			t.Run(endpoint+"/"+test.name, func(t *testing.T) {
+				store := &stubReadStore{}
+				recorder := httptest.NewRecorder()
+				NewHandler(&stubScanner{}, store).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/repositories/library/app/"+endpoint+test.query, nil))
+
+				if recorder.Code != test.status {
+					t.Fatalf("status = %d, want %d; body=%s", recorder.Code, test.status, recorder.Body.String())
+				}
+				if test.status != http.StatusOK {
+					if store.repository != "" {
+						t.Fatalf("store was queried with an invalid registry")
+					}
+					if !strings.Contains(recorder.Body.String(), `"invalid_request"`) || strings.Contains(recorder.Body.String(), "secret") {
+						t.Fatalf("body = %s", recorder.Body.String())
+					}
+					return
+				}
+				if store.registry != test.registry {
+					t.Fatalf("store.registry = %q, want %q", store.registry, test.registry)
+				}
+				if !strings.Contains(recorder.Body.String(), `"registry": "`+test.registry+`"`) {
+					t.Fatalf("body = %s", recorder.Body.String())
+				}
+			})
+		}
+	}
+}

@@ -304,10 +304,17 @@ components:
       name: registry
       in: query
       required: false
-      description: OCI registry host. Defaults to docker.io.
+      description: |
+        OCI registry host as `host` or `host:port` (hostname, IPv4 or bracketed
+        IPv6 literal). Case-insensitive; `index.docker.io` and
+        `registry-1.docker.io` normalise to `docker.io`, which is also the
+        default. Anything else (schemes, paths, credentials, invalid ports)
+        is 400 `invalid_request`. The normalised value is echoed as
+        `registry` in the response.
       schema:
         type: string
         default: docker.io
+        examples: [ghcr.io, "localhost:5000"]
     Limit:
       name: limit
       in: query
@@ -968,8 +975,11 @@ components:
     RepositoryScansResponse:
       type: object
       additionalProperties: false
-      required: [repository, scans, limit, offset]
+      required: [registry, repository, scans, limit, offset]
       properties:
+        registry:
+          type: string
+          description: The normalised registry filter that was applied.
         repository:
           type: string
         scans:
@@ -1024,8 +1034,11 @@ components:
     RepositoryFindingsResponse:
       type: object
       additionalProperties: false
-      required: [repository, findings, disposition, limit, offset]
+      required: [registry, repository, findings, disposition, limit, offset]
       properties:
+        registry:
+          type: string
+          description: The normalised registry filter that was applied.
         repository:
           type: string
         findings:

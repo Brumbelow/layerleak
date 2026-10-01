@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -103,6 +104,7 @@ type repositoriesResponse struct {
 }
 
 type repositoryScansResponse struct {
+	Registry   string            `json:"registry"`
 	Repository string            `json:"repository"`
 	Scans      []scanSummaryItem `json:"scans"`
 	Limit      int               `json:"limit"`
@@ -117,6 +119,7 @@ type repositoryItem struct {
 }
 
 type repositoryFindingsResponse struct {
+	Registry    string               `json:"registry"`
 	Repository  string               `json:"repository"`
 	Findings    []findingSummaryItem `json:"findings"`
 	Disposition string               `json:"disposition"`
@@ -485,7 +488,11 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry, err := parseRegistryFilter(request.URL.Query().Get("registry"))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
 	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset)
@@ -495,6 +502,7 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 	}
 
 	response := repositoryScansResponse{
+		Registry:   registry,
 		Repository: repository,
 		Scans:      make([]scanSummaryItem, 0, len(items)),
 		Limit:      limit,
@@ -529,7 +537,11 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry, err := parseRegistryFilter(request.URL.Query().Get("registry"))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
 	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset)
@@ -539,6 +551,7 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 	}
 
 	response := repositoryFindingsResponse{
+		Registry:    registry,
 		Repository:  repository,
 		Findings:    make([]findingSummaryItem, 0, len(items)),
 		Disposition: string(disposition),
@@ -776,6 +789,69 @@ func parsePagination(values url.Values) (int, int, error) {
 	}
 
 	return limit, offset, nil
+}
+
+var errInvalidRegistryFilter = errors.New("registry must be a hostname or IP address, optionally with a port")
+
+// parseRegistryFilter validates the ?registry= query as host[:port] and
+// returns the normalised value the store filters on: trimmed, lowercased,
+// Docker Hub aliases folded to docker.io, and docker.io when empty. The
+// returned value is echoed in the response.
+func parseRegistryFilter(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "docker.io", "index.docker.io", "registry-1.docker.io":
+		return manifest.DockerHubRegistry, nil
+	}
+	if err := validateRegistryHost(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// validateRegistryHost accepts a lowercase hostname, IPv4 literal or bracketed
+// IPv6 literal, each optionally followed by :port, matching the registry
+// grammar manifest.ParseReference applies to image references.
+func validateRegistryHost(value string) error {
+	host := value
+	if strings.HasPrefix(value, "[") {
+		bracketed, port, err := net.SplitHostPort(value)
+		if err != nil || net.ParseIP(bracketed) == nil || !validRegistryPort(port) {
+			return errInvalidRegistryFilter
+		}
+		return nil
+	}
+	if colon := strings.LastIndexByte(value, ':'); colon >= 0 {
+		if strings.Count(value, ":") != 1 || !validRegistryPort(value[colon+1:]) {
+			return errInvalidRegistryFilter
+		}
+		host = value[:colon]
+	}
+	if host == "" {
+		return errInvalidRegistryFilter
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	if len(host) > 253 {
+		return errInvalidRegistryFilter
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return errInvalidRegistryFilter
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return errInvalidRegistryFilter
+			}
+		}
+	}
+	return nil
+}
+
+func validRegistryPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 1 && port <= 65535
 }
 
 func parseDispositionFilter(value string) (storage.FindingDispositionFilter, error) {

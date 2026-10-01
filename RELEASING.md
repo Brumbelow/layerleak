@@ -332,15 +332,21 @@ reports for at least 24 hours after stable publication.
 
 Every release attaches:
 
-- `release-manifest.json` with version, source SHA, workflow run, index digest,
-  and both platform manifest digests;
+- `release-manifest.json` (`schema_version` 2) with version, source SHA,
+  workflow SHA, workflow run, index digest, both platform manifest digests, the
+  `cli` object described under [CLI binaries](#cli-binaries) and the Go, Grype
+  and Cosign versions used;
+- the five CLI archives `layerleak_<version>_<os>_<arch>.tar.gz` /
+  `layerleak_<version>_windows_amd64.zip`, their `layerleak_<version>_checksums.txt`
+  and its Sigstore bundle `layerleak_<version>_checksums.txt.sigstore.json`;
 - per-platform SPDX JSON SBOMs;
 - per-platform SLSA v1 provenance;
 - image index metadata;
 - Critical and fixable-High Grype reports for both platforms;
 - the linked Go dependency license inventory;
-- GitHub attestation bundles;
-- `SHA256SUMS`.
+- GitHub attestation bundles for the image index, both SBOMs and the CLI
+  archives (`attestation-cli-binaries.jsonl`);
+- `SHA256SUMS` over every other asset.
 
 Verify a release digest:
 

@@ -39,6 +39,12 @@ inputs:
     description: Path of the formatted result. Defaults to $RUNNER_TEMP/layerleak/results.<sarif|json|txt>.
     required: false
     default: ""
+  extra-args:
+    description: >-
+      Additional `layerleak scan` flags, split on whitespace and appended after the flags this action sets
+      (for example `--all-tags --max-repository-tags 50`). Values containing spaces are not supported.
+    required: false
+    default: ""
 
 outputs:
   exit-code:
@@ -68,7 +74,18 @@ runs:
         INPUT_ALLOW_PARTIAL: ${{ inputs.allow-partial }}
         INPUT_PLATFORM: ${{ inputs.platform }}
         INPUT_OUTPUT_FILE: ${{ inputs.output-file }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
         ACTION_REF: ${{ github.action_ref }}
+        # The reviewed cosign release. scripts/release-tools.sh in this repository
+        # pins the same version and linux-amd64 digest (a test keeps them equal);
+        # the other digests are the matching entries of that release's official
+        # cosign_checksums.txt, so the bundle is verified on every runner target.
+        COSIGN_VERSION: v3.1.3
+        COSIGN_SHA256: 4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
+        COSIGN_SHA256_LINUX_ARM64: c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a
+        COSIGN_SHA256_DARWIN_AMD64: 2347488e5d5b25336644024dfeca5601b190e91197a71a917bda44744aff106c
+        COSIGN_SHA256_DARWIN_ARM64: 5cf948c2f4dfe59687bdd0b8523709067383e03982cc543475c8a7dc70e92a76
+        COSIGN_SHA256_WINDOWS_AMD64: 9fe59be0eca1271873ce019061335eb1ac419b7059202e797828467ddabe33be
       run: |
         set -euo pipefail
         version_pattern='^v3\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
@@ -99,6 +116,10 @@ runs:
           echo "::error::platform must look like os, os/arch or os/arch/variant." >&2
           exit 1
         fi
+        if [[ "${INPUT_EXTRA_ARGS}" =~ [[:cntrl:]] ]]; then
+          echo "::error::extra-args must not contain control characters." >&2
+          exit 1
+        fi
 
         case "${RUNNER_OS}" in
           Linux) goos=linux ;;
@@ -118,10 +139,19 @@ runs:
           fi
           archive="layerleak_${version}_${goos}_${goarch}.zip"
           binary=layerleak.exe
+          cosign_asset="cosign-windows-amd64.exe"
         else
           archive="layerleak_${version}_${goos}_${goarch}.tar.gz"
           binary=layerleak
+          cosign_asset="cosign-${goos}-${goarch}"
         fi
+        case "${goos}/${goarch}" in
+          linux/amd64) cosign_digest="${COSIGN_SHA256}" ;;
+          linux/arm64) cosign_digest="${COSIGN_SHA256_LINUX_ARM64}" ;;
+          darwin/amd64) cosign_digest="${COSIGN_SHA256_DARWIN_AMD64}" ;;
+          darwin/arm64) cosign_digest="${COSIGN_SHA256_DARWIN_ARM64}" ;;
+          windows/amd64) cosign_digest="${COSIGN_SHA256_WINDOWS_AMD64}" ;;
+        esac
 
         work="${RUNNER_TEMP}/layerleak"
         mkdir -p "${work}"
@@ -135,7 +165,9 @@ runs:
           echo "extension=${extension}"
           echo "output-file=${output_file}"
           echo "work=${work}"
-          echo "verify-cosign=$([[ "${goos}" == linux && "${goarch}" == amd64 ]] && echo true || echo false)"
+          echo "cosign-version=${COSIGN_VERSION}"
+          echo "cosign-asset=${cosign_asset}"
+          echo "cosign-sha256=${cosign_digest}"
         } >> "${GITHUB_OUTPUT}"
 
     - name: Download and verify the release archive
@@ -146,14 +178,16 @@ runs:
         ARCHIVE: ${{ steps.resolve.outputs.archive }}
         CHECKSUMS: ${{ steps.resolve.outputs.checksums }}
         WORK: ${{ steps.resolve.outputs.work }}
-        VERIFY_COSIGN: ${{ steps.resolve.outputs.verify-cosign }}
-        # The reviewed cosign release and digest; scripts/release-tools.sh in this
-        # repository pins the same values and a test keeps them equal.
-        COSIGN_VERSION: v3.1.3
-        COSIGN_SHA256: 4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
+        COSIGN_VERSION: ${{ steps.resolve.outputs.cosign-version }}
+        COSIGN_ASSET: ${{ steps.resolve.outputs.cosign-asset }}
+        COSIGN_SHA256: ${{ steps.resolve.outputs.cosign-sha256 }}
         RELEASE_REPOSITORY: Brumbelow/layerleak
-        SIGNING_IDENTITY: https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main
-        SIGNER_WORKFLOW: Brumbelow/layerleak/.github/workflows/container-release.yml
+        # The exact release workflow identity (workflow path and the main ref),
+        # anchored at both ends. GitHub owner names are case-insensitive, so the
+        # one tolerated variation is the owner's initial: the Fulcio certificate
+        # spells it as GitHub does, and an action pinned at an immutable tag must
+        # not fail closed over that letter.
+        SIGNING_IDENTITY_REGEXP: ^https://github\.com/[Bb]rumbelow/layerleak/\.github/workflows/container-release\.yml@refs/heads/main$
       run: |
         set -euo pipefail
         cd "${WORK}"
@@ -181,31 +215,36 @@ runs:
           exit 1
         fi
 
-        if [[ "${VERIFY_COSIGN}" == true ]]; then
-          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
-            --output cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
-          if [[ "$(sha256_of cosign)" != "${COSIGN_SHA256}" ]]; then
-            echo "::error::the downloaded cosign binary does not match the reviewed digest." >&2
-            exit 1
-          fi
-          chmod 0755 cosign
-          ./cosign verify-blob \
-            --bundle "${CHECKSUMS}.sigstore.json" \
-            --certificate-identity "${SIGNING_IDENTITY}" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "${CHECKSUMS}" >/dev/null
-          echo "Checksums signature verified with cosign ${COSIGN_VERSION}."
-        else
-          echo "cosign is pinned for Linux x86_64 only; relying on the archive attestation on ${RUNNER_OS}/${RUNNER_ARCH}."
+        # The checksums file is only trusted once its Sigstore bundle verifies
+        # against the release workflow identity, on every runner target.
+        cosign=cosign
+        if [[ "${COSIGN_ASSET}" == *.exe ]]; then
+          cosign=cosign.exe
         fi
+        curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+          --output "${cosign}" "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/${COSIGN_ASSET}"
+        if [[ "$(sha256_of "${cosign}")" != "${COSIGN_SHA256}" ]]; then
+          echo "::error::the downloaded ${COSIGN_ASSET} does not match the reviewed digest." >&2
+          exit 1
+        fi
+        chmod 0755 "${cosign}"
+        "./${cosign}" verify-blob \
+          --bundle "${CHECKSUMS}.sigstore.json" \
+          --certificate-identity-regexp "${SIGNING_IDENTITY_REGEXP}" \
+          --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          "${CHECKSUMS}" >/dev/null
+        echo "Checksums signature verified with cosign ${COSIGN_VERSION}."
 
         if ! command -v gh >/dev/null 2>&1; then
           echo "::error::the GitHub CLI is required to verify the archive attestation; install gh on this runner." >&2
           exit 1
         fi
+        # --cert-identity-regex replaces --signer-workflow, whose match is
+        # case-sensitive on the owner; it enforces the same workflow path and ref.
         gh attestation verify "${ARCHIVE}" \
           --repo "${RELEASE_REPOSITORY}" \
-          --signer-workflow "${SIGNER_WORKFLOW}" \
+          --cert-identity-regex "${SIGNING_IDENTITY_REGEXP}" \
+          --cert-oidc-issuer https://token.actions.githubusercontent.com \
           --source-ref refs/heads/main \
           --deny-self-hosted-runners >/dev/null
         echo "Build-provenance attestation verified for ${ARCHIVE}."
@@ -224,7 +263,10 @@ runs:
         if [[ "${ARCHIVE}" == *.zip ]]; then
           if command -v unzip >/dev/null 2>&1; then
             unzip -q -o "${WORK}/${ARCHIVE}" "${BINARY}" -d "${WORK}/bin"
+          elif command -v 7z >/dev/null 2>&1; then
+            7z x -y -bso0 -bsp0 -o"${WORK}/bin" "${WORK}/${ARCHIVE}" "${BINARY}"
           else
+            # bsdtar (tar.exe on Windows 10 and later) reads zip archives.
             tar -xf "${WORK}/${ARCHIVE}" -C "${WORK}/bin" "${BINARY}"
           fi
         else
@@ -248,6 +290,7 @@ runs:
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_ALLOW_PARTIAL: ${{ inputs.allow-partial }}
         INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
         OUTPUT_FILE: ${{ steps.resolve.outputs.output-file }}
       run: |
         set -euo pipefail
@@ -258,6 +301,12 @@ runs:
         fi
         if [[ -n "${INPUT_PLATFORM}" ]]; then
           args+=(--platform "${INPUT_PLATFORM}")
+        fi
+        # Whitespace-split only: the words reach the CLI as separate arguments
+        # without shell evaluation.
+        read -r -a extra_args <<< "${INPUT_EXTRA_ARGS}"
+        if (( ${#extra_args[@]} > 0 )); then
+          args+=("${extra_args[@]}")
         fi
         status=0
         "${LAYERLEAK}" "${args[@]}" || status=$?

@@ -390,8 +390,33 @@ class ReleasePreflightTests(unittest.TestCase):
         action = (root / 'action.yml').read_text(encoding='utf-8')
         self.assertIn(f'COSIGN_VERSION: {pin.group(1)}\n', action)
         self.assertIn(f'COSIGN_SHA256: {pin.group(2)}\n', action)
-        # The action verifies against the same release workflow identity the release documents.
-        self.assertIn('container-release.yml@refs/heads/main', action)
+        # Every other runner target the action supports selects its own pinned
+        # cosign digest, so the checksums bundle is verified everywhere.
+        for goos, goarch in self.module.CLI_TARGETS:
+            if (goos, goarch) == ('linux', 'amd64'):
+                continue
+            key = f'COSIGN_SHA256_{goos.upper()}_{goarch.upper()}'
+            digest = re.search(rf'^\s+{key}: ([0-9a-f]{{64}})\n', action, re.MULTILINE)
+            with self.subTest(target=f'{goos}/{goarch}'):
+                self.assertIsNotNone(digest, f'action.yml must pin {key}')
+                self.assertNotEqual(digest.group(1), pin.group(2))
+                self.assertIn(f'{goos}/{goarch}) cosign_digest="${{{key}}}"', action)
+        # The action verifies against the release workflow identity the release
+        # documents: anchored, exact in path and ref, tolerant only in the
+        # owner's initial, and used by both cosign and gh.
+        identity = r'^https://github\.com/[Bb]rumbelow/layerleak/\.github/workflows/container-release\.yml@refs/heads/main$'
+        self.assertIn(f'SIGNING_IDENTITY_REGEXP: {identity}\n', action)
+        self.assertRegex(identity, r'^\^.*\$$')
+        self.assertIsNotNone(re.fullmatch(identity, 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main'))
+        self.assertIsNotNone(re.fullmatch(identity, 'https://github.com/brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main'))
+        for other in ('https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/dev',
+                      'https://github.com/Brumbelow/layerleak/.github/workflows/test.yml@refs/heads/main',
+                      'https://github.com/Brumbelow/layerleak-fork/.github/workflows/container-release.yml@refs/heads/main',
+                      'https://github.com/evil/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main'):
+            with self.subTest(identity=other):
+                self.assertIsNone(re.fullmatch(identity, other))
+        self.assertIn('--certificate-identity-regexp "${SIGNING_IDENTITY_REGEXP}"', action)
+        self.assertIn('--cert-identity-regex "${SIGNING_IDENTITY_REGEXP}"', action)
         self.assertIn('--deny-self-hosted-runners', action)
 
     def test_release_workflow_builds_exactly_the_preflight_cli_targets(self):

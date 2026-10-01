@@ -47,6 +47,7 @@ The release workflow provisions the following exact versions on Linux x86_64:
 | Grype | [0.119.0](https://github.com/anchore/grype/releases/tag/v0.119.0) | Official archive and repository-pinned SHA-256; the scan job runs this binary directly |
 | Docker Buildx | [0.37.2](https://github.com/docker/buildx/releases/tag/v0.37.2) | Explicit version on every pinned setup action |
 | BuildKit | [0.33.1](https://github.com/moby/buildkit/releases/tag/v0.33.1) | Official multi-platform image pinned by digest in `BUILDKIT_IMAGE` |
+| Go | the `go` directive in `go.mod` | Digest-pinned `actions/setup-go` without a build cache; the `build-cli` job cross-compiles the five CLI archives with it and the manifest records the exact `go env GOVERSION` |
 
 These pins define the reviewed capability set, not an automatic claim that a
 future release is safe. Updates require a reviewed change to the installer,
@@ -365,6 +366,62 @@ gh attestation verify "oci://${image}@${digest}" \
 gh release verify "${version}" --repo Brumbelow/layerleak
 sha256sum --check SHA256SUMS
 ```
+
+### CLI binaries
+
+The `build-cli` job cross-compiles the `layerleak` CLI for linux/amd64,
+linux/arm64, darwin/amd64, darwin/arm64 and windows/amd64 from the validated
+source commit (`CGO_ENABLED=0 go build -trimpath -buildvcs=false`, version set
+through `internal/version.Version`, `SOURCE_DATE_EPOCH` from the source commit
+date) and attaches, per release:
+
+- `layerleak_<version>_<os>_<arch>.tar.gz` (`layerleak`, `LICENSE`,
+  `THIRD_PARTY_NOTICES.md`) for Linux and macOS and
+  `layerleak_<version>_windows_amd64.zip` (`layerleak.exe`) for Windows;
+- `layerleak_<version>_checksums.txt`, the `sha256sum` list of those archives,
+  keyless-signed as `layerleak_<version>_checksums.txt.sigstore.json`
+  (`cosign sign-blob --yes --bundle`);
+- `attestation-cli-binaries.jsonl`, the SLSA v1 build-provenance attestation
+  whose subjects are the five archives;
+- in `release-manifest.json` (`schema_version` 2) the `cli` object: checksums
+  name and digest, bundle names, the attestation digest and, per target, the
+  archive and binary digests; `workflow_sha` is the commit of the release
+  workflow run that the Sigstore certificates bind.
+
+Stable promotion does not re-attach the RC archives: it rebuilds from the
+accepted RC commit with the stable version string so `layerleak version`
+reports the downloaded tag, and the job proves reproducibility first by
+compiling every target with the RC's version string and requiring the binary
+digests recorded in the RC manifest byte for byte. A mismatch fails the stable
+release before anything is published. Verify the published archives with:
+
+```bash
+version=v3.0.0
+checksums="layerleak_${version}_checksums.txt"
+gh release download "${version}" --repo Brumbelow/layerleak \
+  --pattern "layerleak_${version}_*" --pattern release-manifest.json
+python3 scripts/release-preflight.py binaries \
+  --version "${version}" --checksums "${checksums}" --dir .
+sha256sum --check "${checksums}"
+
+cosign verify-blob \
+  --bundle "${checksums}.sigstore.json" \
+  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${checksums}"
+
+gh attestation verify "layerleak_${version}_linux_amd64.tar.gz" \
+  --repo Brumbelow/layerleak \
+  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
+  --source-ref refs/heads/main \
+  --source-digest "$(jq -r .workflow_sha release-manifest.json)" \
+  --deny-self-hosted-runners
+```
+
+`--source-digest` names `workflow_sha`, not `source_sha`: for a new release
+candidate the two are equal, while a stable release is dispatched from the
+current `main` head and compiles the RC's `source_sha`, which the attestation
+records under `predicate.buildDefinition.resolvedDependencies`.
 
 ## Failure and recovery
 

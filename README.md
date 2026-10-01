@@ -75,6 +75,91 @@ version, including a dirty-worktree marker, or `dev` without VCS information.
 Release-installed binaries report the resolved module version through
 `layerleak --version`.
 
+### Download a release archive
+
+Every release also attaches prebuilt CLI archives, so no Go toolchain is
+needed: `layerleak_<version>_<os>_<arch>.tar.gz` for `linux` and `darwin` on
+`amd64` and `arm64` (containing `layerleak`, `LICENSE` and
+`THIRD_PARTY_NOTICES.md`) and `layerleak_<version>_windows_amd64.zip`
+(`layerleak.exe`). Each release carries a `layerleak_<version>_checksums.txt`
+signed keylessly by the release workflow
+(`layerleak_<version>_checksums.txt.sigstore.json`) and a build-provenance
+attestation for every archive. Verify before you run:
+
+```bash
+version=v3.0.0
+archive="layerleak_${version}_linux_amd64.tar.gz"
+checksums="layerleak_${version}_checksums.txt"
+base="https://github.com/brumbelow/layerleak/releases/download/${version}"
+curl --fail --location --proto '=https' --tlsv1.2 --remote-name-all \
+  "${base}/${archive}" "${base}/${checksums}" "${base}/${checksums}.sigstore.json"
+
+sha256sum --check --ignore-missing "${checksums}"
+cosign verify-blob \
+  --bundle "${checksums}.sigstore.json" \
+  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${checksums}"
+gh attestation verify "${archive}" --repo Brumbelow/layerleak \
+  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+
+tar -xzf "${archive}" layerleak
+./layerleak version
+```
+
+The signature proves the checksums file came from this repository's release
+workflow on `main`, the checksum binds the archive to that file, and the
+attestation independently binds the archive to the workflow run that built it.
+`release-manifest.json` on the release lists every archive and the digest of
+the binary inside it. A stable release rebuilds the accepted release
+candidate's commit with the stable version string and refuses to publish
+unless the rebuild reproduces the candidate's binaries byte for byte, so
+`layerleak version` reports exactly the tag you downloaded.
+
+### GitHub Action
+
+The repository root is a composite action that downloads the archive for the
+runner, verifies it as above (checksum and attestation everywhere, the cosign
+bundle on Linux x86_64 runners with the cosign release pinned in
+`scripts/release-tools.sh`) and runs `layerleak scan`. Pin it to a release tag;
+the matching archives are downloaded from that release:
+
+```yaml
+name: Image secrets
+on: { push: { branches: [main] } }
+permissions: { contents: read, security-events: write }
+jobs:
+  layerleak:
+    runs-on: ubuntu-24.04
+    steps:
+      - id: scan
+        uses: brumbelow/layerleak@v3.0.0
+        with: { image: "ghcr.io/${{ github.repository }}:${{ github.sha }}", fail-on: none }
+      - uses: github/codeql-action/upload-sarif@v3
+        if: ${{ always() && steps.scan.outputs.sarif-file != '' }}
+        with: { sarif_file: "${{ steps.scan.outputs.sarif-file }}" }
+```
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `image` | required | Image reference to scan; private registries use `LAYERLEAK_REGISTRY_USERNAME`/`LAYERLEAK_REGISTRY_PASSWORD` in the step `env`. |
+| `version` | the tag in `uses:` | Release whose archive is downloaded; set it only when `uses:` names a branch or commit. |
+| `format` | `sarif` | `summary`, `json` or `sarif`. |
+| `fail-on` | `low` | Passed to `--fail-on`; `none` reports without failing the step. |
+| `allow-partial` | `false` | Passes `--allow-partial`. |
+| `platform` | every `linux` manifest | Passed to `--platform`. |
+| `output-file` | `$RUNNER_TEMP/layerleak/results.<ext>` | Where the formatted result is written. |
+
+Outputs: `exit-code` (the CLI exit code, see the table under "Scan images"),
+`result-file` (the written file) and `sarif-file` (the same path when `format`
+is `sarif`, otherwise empty). The step fails exactly when the CLI exits
+non-zero, so `fail-on: none` plus `if: always()` on the upload step gives a
+report-only scan. The action never prints findings; only the redacted
+`summary` format is echoed to the log, and the scan runs with `--no-artifacts`.
+It needs `curl`, `tar`/`unzip` and the GitHub CLI, all present on GitHub-hosted
+runners.
+
 Build from source:
 
 ```bash
@@ -675,7 +760,16 @@ The Compose services use a digest-pinned PostgreSQL 16.15 image, wait for
 PostgreSQL health, run the idempotent migration command to completion before
 the API starts (a fresh volume becomes ready without a manual step), run the
 API read-only with all capabilities dropped, and use the native readiness
-probe. The host port binds to `127.0.0.1` by default; set `LAYERLEAK_API_HOST`
+probe. Every service is bounded: the API gets a 256 MiB `/tmp` tmpfs, a
+2 GiB memory limit and a 256-process limit (`mem_limit` and `pids_limit`,
+which `docker compose` v2 honours; mirror them under
+`deploy.resources.limits` for a Swarm stack, and raise the memory limit together
+with any `LAYERLEAK_MAX_*_BYTES` bound you lift); the database drops every
+capability except the five the PostgreSQL entrypoint needs (`CHOWN`,
+`DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`), mounts tmpfs for
+`/run/postgresql` and `/tmp`, and gets 256 MiB of shared memory; the one-shot
+migrate and purge commands run read-only on a 64 MiB tmpfs. The host port
+binds to `127.0.0.1` by default; set `LAYERLEAK_API_HOST`
 only when an authenticated network edge is ready. The Compose connection string
 uses `sslmode=disable` only because the `db` container is reachable solely on
 the private Compose network; point the API at any other database with

@@ -1,0 +1,288 @@
+name: Layerleak image secret scan
+description: >-
+  Download the signed layerleak CLI release for this runner, verify its checksum,
+  Sigstore signature and build-provenance attestation, and scan an OCI image for
+  leaked secrets (SARIF, JSON or a redacted summary).
+author: brumbelow
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  image:
+    description: Image reference to scan, for example ghcr.io/org/app:1.2.3 or alpine@sha256:<digest>.
+    required: true
+  version:
+    description: >-
+      layerleak release whose archive is downloaded (v3.x.y or v3.x.y-rc.N). Defaults to the tag this
+      action was referenced with, so `uses: brumbelow/layerleak@v3.0.0` scans with v3.0.0.
+    required: false
+    default: ""
+  format:
+    description: "Output format: summary, json or sarif."
+    required: false
+    default: sarif
+  fail-on:
+    description: "Lowest confidence that fails the step (exit code 2): low, medium, high or none."
+    required: false
+    default: low
+  allow-partial:
+    description: Accept usable incomplete coverage instead of exit code 3 (true or false).
+    required: false
+    default: "false"
+  platform:
+    description: Platform selector passed to --platform (os, os/arch or os/arch/variant). Empty scans every linux manifest.
+    required: false
+    default: ""
+  output-file:
+    description: Path of the formatted result. Defaults to $RUNNER_TEMP/layerleak/results.<sarif|json|txt>.
+    required: false
+    default: ""
+
+outputs:
+  exit-code:
+    description: "Exit code of layerleak scan: 0 clean, 1 error, 2 findings at or above fail-on, 3 incomplete coverage."
+    value: ${{ steps.scan.outputs.exit-code }}
+  result-file:
+    description: Path of the written result file.
+    value: ${{ steps.scan.outputs.result-file }}
+  sarif-file:
+    description: Path of the SARIF log when format is sarif, otherwise empty.
+    value: ${{ steps.scan.outputs.sarif-file }}
+  version:
+    description: The layerleak release that was downloaded and verified.
+    value: ${{ steps.resolve.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve release and runner target
+      id: resolve
+      shell: bash
+      env:
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_ALLOW_PARTIAL: ${{ inputs.allow-partial }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_OUTPUT_FILE: ${{ inputs.output-file }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        version_pattern='^v3\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$'
+        version="${INPUT_VERSION:-${ACTION_REF}}"
+        if [[ ! "${version}" =~ ${version_pattern} ]]; then
+          echo "::error::layerleak needs a release tag to download: set the version input (v3.x.y) when uses: names '${ACTION_REF}'." >&2
+          exit 1
+        fi
+        if [[ -z "${INPUT_IMAGE}" || "${INPUT_IMAGE}" == -* || "${INPUT_IMAGE}" =~ [[:space:][:cntrl:]] ]]; then
+          echo "::error::image must be a single OCI reference." >&2
+          exit 1
+        fi
+        case "${INPUT_FORMAT}" in
+          summary) extension=txt ;;
+          json) extension=json ;;
+          sarif) extension=sarif ;;
+          *) echo "::error::format must be summary, json or sarif." >&2; exit 1 ;;
+        esac
+        case "${INPUT_FAIL_ON}" in
+          low|medium|high|none) ;;
+          *) echo "::error::fail-on must be low, medium, high or none." >&2; exit 1 ;;
+        esac
+        case "${INPUT_ALLOW_PARTIAL}" in
+          true|false) ;;
+          *) echo "::error::allow-partial must be true or false." >&2; exit 1 ;;
+        esac
+        if [[ -n "${INPUT_PLATFORM}" && ! "${INPUT_PLATFORM}" =~ ^[a-z0-9]+(/[a-z0-9]+(/[a-z0-9]+)?)?$ ]]; then
+          echo "::error::platform must look like os, os/arch or os/arch/variant." >&2
+          exit 1
+        fi
+
+        case "${RUNNER_OS}" in
+          Linux) goos=linux ;;
+          macOS) goos=darwin ;;
+          Windows) goos=windows ;;
+          *) echo "::error::unsupported runner operating system ${RUNNER_OS}." >&2; exit 1 ;;
+        esac
+        case "${RUNNER_ARCH}" in
+          X64) goarch=amd64 ;;
+          ARM64) goarch=arm64 ;;
+          *) echo "::error::unsupported runner architecture ${RUNNER_ARCH}." >&2; exit 1 ;;
+        esac
+        if [[ "${goos}" == windows ]]; then
+          if [[ "${goarch}" != amd64 ]]; then
+            echo "::error::layerleak releases ship windows/amd64 only." >&2
+            exit 1
+          fi
+          archive="layerleak_${version}_${goos}_${goarch}.zip"
+          binary=layerleak.exe
+        else
+          archive="layerleak_${version}_${goos}_${goarch}.tar.gz"
+          binary=layerleak
+        fi
+
+        work="${RUNNER_TEMP}/layerleak"
+        mkdir -p "${work}"
+        output_file="${INPUT_OUTPUT_FILE:-${work}/results.${extension}}"
+        mkdir -p "$(dirname "${output_file}")"
+        {
+          echo "version=${version}"
+          echo "archive=${archive}"
+          echo "binary=${binary}"
+          echo "checksums=layerleak_${version}_checksums.txt"
+          echo "extension=${extension}"
+          echo "output-file=${output_file}"
+          echo "work=${work}"
+          echo "verify-cosign=$([[ "${goos}" == linux && "${goarch}" == amd64 ]] && echo true || echo false)"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Download and verify the release archive
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ steps.resolve.outputs.version }}
+        ARCHIVE: ${{ steps.resolve.outputs.archive }}
+        CHECKSUMS: ${{ steps.resolve.outputs.checksums }}
+        WORK: ${{ steps.resolve.outputs.work }}
+        VERIFY_COSIGN: ${{ steps.resolve.outputs.verify-cosign }}
+        # The reviewed cosign release and digest; scripts/release-tools.sh in this
+        # repository pins the same values and a test keeps them equal.
+        COSIGN_VERSION: v3.1.3
+        COSIGN_SHA256: 4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71
+        RELEASE_REPOSITORY: Brumbelow/layerleak
+        SIGNING_IDENTITY: https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main
+        SIGNER_WORKFLOW: Brumbelow/layerleak/.github/workflows/container-release.yml
+      run: |
+        set -euo pipefail
+        cd "${WORK}"
+        base="https://github.com/brumbelow/layerleak/releases/download/${VERSION}"
+        for asset in "${ARCHIVE}" "${CHECKSUMS}" "${CHECKSUMS}.sigstore.json"; do
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "${asset}" "${base}/${asset}"
+        done
+
+        sha256_of() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | awk '{print $1}'
+          else
+            shasum -a 256 "$1" | awk '{print $1}'
+          fi
+        }
+        expected="$(awk -v name="${ARCHIVE}" '$2 == name { print $1 }' "${CHECKSUMS}")"
+        if [[ ! "${expected}" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "::error::${CHECKSUMS} has no entry for ${ARCHIVE}." >&2
+          exit 1
+        fi
+        actual="$(sha256_of "${ARCHIVE}")"
+        if [[ "${actual}" != "${expected}" ]]; then
+          echo "::error::${ARCHIVE} does not match its published checksum." >&2
+          exit 1
+        fi
+
+        if [[ "${VERIFY_COSIGN}" == true ]]; then
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output cosign "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          if [[ "$(sha256_of cosign)" != "${COSIGN_SHA256}" ]]; then
+            echo "::error::the downloaded cosign binary does not match the reviewed digest." >&2
+            exit 1
+          fi
+          chmod 0755 cosign
+          ./cosign verify-blob \
+            --bundle "${CHECKSUMS}.sigstore.json" \
+            --certificate-identity "${SIGNING_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${CHECKSUMS}" >/dev/null
+          echo "Checksums signature verified with cosign ${COSIGN_VERSION}."
+        else
+          echo "cosign is pinned for Linux x86_64 only; relying on the archive attestation on ${RUNNER_OS}/${RUNNER_ARCH}."
+        fi
+
+        if ! command -v gh >/dev/null 2>&1; then
+          echo "::error::the GitHub CLI is required to verify the archive attestation; install gh on this runner." >&2
+          exit 1
+        fi
+        gh attestation verify "${ARCHIVE}" \
+          --repo "${RELEASE_REPOSITORY}" \
+          --signer-workflow "${SIGNER_WORKFLOW}" \
+          --source-ref refs/heads/main \
+          --deny-self-hosted-runners >/dev/null
+        echo "Build-provenance attestation verified for ${ARCHIVE}."
+
+    - name: Extract the CLI
+      id: extract
+      shell: bash
+      env:
+        VERSION: ${{ steps.resolve.outputs.version }}
+        ARCHIVE: ${{ steps.resolve.outputs.archive }}
+        BINARY: ${{ steps.resolve.outputs.binary }}
+        WORK: ${{ steps.resolve.outputs.work }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${WORK}/bin"
+        if [[ "${ARCHIVE}" == *.zip ]]; then
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -q -o "${WORK}/${ARCHIVE}" "${BINARY}" -d "${WORK}/bin"
+          else
+            tar -xf "${WORK}/${ARCHIVE}" -C "${WORK}/bin" "${BINARY}"
+          fi
+        else
+          tar -xzf "${WORK}/${ARCHIVE}" -C "${WORK}/bin" "${BINARY}"
+        fi
+        chmod 0755 "${WORK}/bin/${BINARY}"
+        reported="$("${WORK}/bin/${BINARY}" --version)"
+        if [[ "${reported}" != "layerleak version ${VERSION}" ]]; then
+          echo "::error::the extracted binary reports '${reported}', expected 'layerleak version ${VERSION}'." >&2
+          exit 1
+        fi
+        echo "path=${WORK}/bin/${BINARY}" >> "${GITHUB_OUTPUT}"
+
+    - name: Scan the image
+      id: scan
+      shell: bash
+      env:
+        LAYERLEAK: ${{ steps.extract.outputs.path }}
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_ALLOW_PARTIAL: ${{ inputs.allow-partial }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        OUTPUT_FILE: ${{ steps.resolve.outputs.output-file }}
+      run: |
+        set -euo pipefail
+        args=(scan "${INPUT_IMAGE}" --format "${INPUT_FORMAT}" --output "${OUTPUT_FILE}"
+              --fail-on "${INPUT_FAIL_ON}" --no-artifacts --no-db --progress plain)
+        if [[ "${INPUT_ALLOW_PARTIAL}" == true ]]; then
+          args+=(--allow-partial)
+        fi
+        if [[ -n "${INPUT_PLATFORM}" ]]; then
+          args+=(--platform "${INPUT_PLATFORM}")
+        fi
+        status=0
+        "${LAYERLEAK}" "${args[@]}" || status=$?
+        result_file=""
+        if [[ -s "${OUTPUT_FILE}" ]]; then
+          result_file="${OUTPUT_FILE}"
+        fi
+        sarif_file=""
+        if [[ "${INPUT_FORMAT}" == sarif ]]; then
+          sarif_file="${result_file}"
+        fi
+        {
+          echo "exit-code=${status}"
+          echo "result-file=${result_file}"
+          echo "sarif-file=${sarif_file}"
+        } >> "${GITHUB_OUTPUT}"
+        # Only the redacted human summary is echoed; JSON and SARIF stay in the file.
+        if [[ "${INPUT_FORMAT}" == summary && -n "${result_file}" ]]; then
+          cat "${result_file}"
+        fi
+        case "${status}" in
+          0) echo "layerleak: no blocking findings." ;;
+          1) echo "::error::layerleak could not complete the scan (exit code 1)." >&2 ;;
+          2) echo "::error::layerleak found actionable secrets at or above fail-on=${INPUT_FAIL_ON} (exit code 2)." >&2 ;;
+          3) echo "::error::layerleak finished with incomplete coverage; pass allow-partial: true to accept it (exit code 3)." >&2 ;;
+          *) echo "::error::layerleak exited with code ${status}." >&2 ;;
+        esac
+        exit "${status}"

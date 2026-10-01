@@ -1,6 +1,8 @@
 package detectors
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"slices"
 	"strings"
 	"testing"
@@ -99,3 +101,22 @@ type undescribedDetector struct{}
 func (undescribedDetector) Name() string           { return "undescribed_rule" }
 func (undescribedDetector) IDs() []string          { return singleID("undescribed_rule") }
 func (undescribedDetector) Scan(ScanInput) []Match { return nil }
+
+// TestCatalogDigestHashesTheSortedIDs pins the detector_set_version format:
+// sha256 over the sorted catalog ids joined by newlines, stable across calls,
+// and different for a set with a different catalog.
+func TestCatalogDigestHashesTheSortedIDs(t *testing.T) {
+	set := Default()
+	sum := sha256.Sum256([]byte(strings.Join(set.Catalog(), "\n")))
+	want := "sha256:" + hex.EncodeToString(sum[:])
+	if got := set.CatalogDigest(); got != want {
+		t.Fatalf("CatalogDigest() = %q, want %q", got, want)
+	}
+	if again := Default().CatalogDigest(); again != want {
+		t.Fatalf("CatalogDigest() is not stable: %q then %q", want, again)
+	}
+	smaller := Set{detectors: set.detectors[:1]}
+	if smaller.CatalogDigest() == want {
+		t.Fatal("a set with a different catalog reported the same digest")
+	}
+}

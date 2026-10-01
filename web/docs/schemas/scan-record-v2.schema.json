@@ -13,7 +13,10 @@
       "format": "date-time",
       "description": "UTC time the record was written, RFC 3339 with second precision."
     },
-    "result": { "$ref": "result-v2.schema.json" },
+    "result": {
+      "$ref": "result-v2.schema.json",
+      "description": "The public result, identical to --format json: scanned_at, duration_ms and scanner (name, version, detector_set_version) date and attribute the scan."
+    },
     "findings": {
       "type": "array",
       "description": "Every finding of the scan, actionable first and then suppressed, in its public form.",

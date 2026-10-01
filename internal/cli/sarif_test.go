@@ -23,7 +23,8 @@ func TestSARIFRulesAndEncodingExactOutput(t *testing.T) {
 	result := jobs.Result{
 		ResultSchemaVersion: jobs.ResultSchemaVersion,
 		ScannedAt:           time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC),
-		Scanner:             jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0-test"},
+		DurationMS:          4210,
+		Scanner:             jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0-test", DetectorSetVersion: "sha256:" + strings.Repeat("d", 64)},
 		Status:              jobs.ResultStatusCompleted,
 		RequestedReference:  "library/app:latest",
 		Repository:          "library/app",

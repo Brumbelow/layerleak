@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +82,8 @@ func contractResult(status jobs.ResultStatus) jobs.Result {
 	result := jobs.Result{
 		ResultSchemaVersion:    jobs.ResultSchemaVersion,
 		ScannedAt:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
-		Scanner:                jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0"},
+		DurationMS:             4210,
+		Scanner:                jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0", DetectorSetVersion: "sha256:" + strings.Repeat("d", 64)},
 		Status:                 status,
 		RequestedReference:     "library/example:latest",
 		Repository:             "library/example",

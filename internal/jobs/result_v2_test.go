@@ -174,7 +174,7 @@ func TestScanSingleReferenceReportsTagResultsWithoutEnumeration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{`"tags_enumerated":0`, `"tags_resolved":0`, `"tags_failed":0`, `"suppressed_findings_count":0`, `"suppressed_unique_fingerprints":0`, `"scanned_at":"2026-10-01T11:00:00Z"`, `"scanner":{"name":"layerleak","version":"v3.0.0-test"}`, `"result_schema_version":2`} {
+	for _, key := range []string{`"tags_enumerated":0`, `"tags_resolved":0`, `"tags_failed":0`, `"suppressed_findings_count":0`, `"suppressed_unique_fingerprints":0`, `"scanned_at":"2026-10-01T11:00:00Z"`, `"scanner":{"name":"layerleak","version":"v3.0.0-test","detector_set_version":"` + detectors.Default().CatalogDigest() + `"}`, `"duration_ms":0`, `"result_schema_version":2`} {
 		if !strings.Contains(string(payload), key) {
 			t.Fatalf("payload missing %s: %s", key, payload)
 		}
@@ -263,6 +263,48 @@ func TestScannedAtIsTheScanStartTimeInBothModes(t *testing.T) {
 			if !result.ScannedAt.Equal(start) {
 				t.Fatalf("scanned_at = %s, want the scan start %s (clock ended at %s)", result.ScannedAt, start, clock)
 			}
+			// duration_ms runs from that start to the clock reading taken
+			// after the last registry request.
+			if want := clock.Sub(start).Milliseconds(); result.DurationMS != want {
+				t.Fatalf("duration_ms = %d, want %d", result.DurationMS, want)
+			}
 		})
+	}
+}
+
+// TestDurationMillisRoundsUpAndClampsUnknown keeps duration_ms at 0 only when
+// the elapsed time is unknown (a clock that did not advance or went
+// backwards) and rounds any measured time up to a whole millisecond.
+func TestDurationMillisRoundsUpAndClampsUnknown(t *testing.T) {
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		elapsed time.Duration
+		want    int64
+	}{
+		{0, 0},
+		{-time.Second, 0},
+		{time.Microsecond, 1},
+		{time.Millisecond, 1},
+		{1500 * time.Microsecond, 2},
+		{90 * time.Second, 90000},
+	}
+	for _, item := range cases {
+		if got := durationMillis(start, start.Add(item.elapsed)); got != item.want {
+			t.Errorf("durationMillis(%s) = %d, want %d", item.elapsed, got, item.want)
+		}
+	}
+}
+
+// TestDetectorSetVersionIdentifiesTheRequestSet reports the catalog digest of
+// the detector set the scan ran with.
+func TestDetectorSetVersionIdentifiesTheRequestSet(t *testing.T) {
+	fixture := newSweepFixture(t)
+	result, _ := Scan(context.Background(), sweepRequest(t, fixture))
+	want := detectors.Default().CatalogDigest()
+	if !strings.HasPrefix(want, "sha256:") || len(want) != len("sha256:")+64 {
+		t.Fatalf("CatalogDigest() = %q", want)
+	}
+	if result.Scanner.DetectorSetVersion != want {
+		t.Fatalf("detector_set_version = %q, want %q", result.Scanner.DetectorSetVersion, want)
 	}
 }

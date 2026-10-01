@@ -8,6 +8,7 @@
   "required": [
     "result_schema_version",
     "scanned_at",
+    "duration_ms",
     "scanner",
     "status",
     "requested_reference",
@@ -37,6 +38,11 @@
       "type": "string",
       "format": "date-time",
       "description": "UTC time the scan started, RFC 3339 with second precision."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock milliseconds from the scan start (scanned_at) to completion, rounded up to a whole millisecond; 0 only when the elapsed time is unknown."
     },
     "scanner": { "$ref": "#/$defs/scanner" },
     "status": { "$ref": "#/$defs/resultStatus" },
@@ -96,10 +102,15 @@
     "scanner": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version"],
+      "required": ["name", "version", "detector_set_version"],
       "properties": {
         "name": { "const": "layerleak" },
-        "version": { "type": "string", "minLength": 1 }
+        "version": { "type": "string", "minLength": 1 },
+        "detector_set_version": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "sha256 over the detector catalog identifiers the scan ran with (sorted, joined by newlines; the ids `layerleak detectors list` prints). It changes whenever a detector id is added, removed or renamed."
+        }
       }
     },
     "platform": {

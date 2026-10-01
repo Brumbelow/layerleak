@@ -450,6 +450,13 @@ The record (`record_schema_version` 2, schema at
   neutral `storage_unavailable` code;
 - `created_at`.
 
+Every result (`result_schema_version` 2, schema at
+`web/docs/schemas/result-v2.schema.json`) is dated and attributed by
+`scanned_at` (UTC scan start), `duration_ms` (wall-clock milliseconds to
+completion; 0 only when unknown) and `scanner`: `name`, `version` and
+`detector_set_version`, a `sha256:` digest of the sorted detector ids the scan
+ran with that changes whenever a detector id is added, removed or renamed.
+
 Directory and file handling is deliberately conservative. A missing directory
 is created with mode `0700`; an existing directory is never `chmod`-ed and a
 symbolic link in its place is refused, so pointing the CLI at a shared

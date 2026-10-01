@@ -1,6 +1,8 @@
 package detectors
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strings"
 )
@@ -161,6 +163,16 @@ func (sensitiveFileDetector) catalogEntries() []catalogEntry {
 
 func (d contextEntropyDetector) catalogEntries() []catalogEntry {
 	return singleEntry(d.Name(), StrategyEntropy, ConfidenceLow)
+}
+
+// CatalogDigest identifies the set's public identifier list for
+// scanner.detector_set_version: "sha256:" followed by the lowercase hex
+// SHA-256 of Catalog() joined by newlines. It changes whenever an identifier
+// is added, removed or renamed, never with the order strategies are
+// registered in, and like Describe it never changes what the set matches.
+func (s Set) CatalogDigest() string {
+	sum := sha256.Sum256([]byte(strings.Join(s.Catalog(), "\n")))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Describe returns one Info per catalog identifier, sorted by id, merging

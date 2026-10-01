@@ -32,6 +32,7 @@
         "subject": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       }
     ],
+    "duration_ms": 4210,
     "failed_manifest_count": 1,
     "failed_target_count": 1,
     "findings": [],
@@ -45,6 +46,7 @@
     "result_schema_version": 2,
     "scanned_at": "2026-09-30T12:00:00Z",
     "scanner": {
+      "detector_set_version": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "name": "layerleak",
       "version": "v3.0.0"
     },

@@ -581,15 +581,18 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
 - Deployments must apply migration 0004 before `/readyz` returns success.
 - Compose deployments must set `LAYERLEAK_DB_PASSWORD`.
 - Local output: one record per scan under `./findings` (or `--output-dir`,
-  `LAYERLEAK_FINDINGS_DIR`) instead of a findings array plus a companion record
-  under `findings/scans/`; the record is `record_schema_version` 2. Consumers
-  of the old array must read `findings[]` from the record instead.
-- `result_schema_version` 1 -> 2: new `scanned_at` and `scanner` fields,
-  counters are no longer omitted when zero, `platform` is omitted when empty,
-  `tag_results[].status` adds `partial` and `skipped` and uses `scanned` in
-  both modes. Stored version 1 results keep their shape and version when the
-  API returns them (they are never upgraded to version 2); only error and
-  diagnostic message strings are neutralised on read, as before.
+  `LAYERLEAK_FINDINGS_DIR`) with `record_schema_version` 2, instead of the
+  findings-array file that v1.0.0 and the v2.x tags wrote next to the nearest
+  `go.mod`. Consumers of the old array must read `findings[]` from the record.
+  v1.0.0 wrote raw values and snippets into that array unconditionally, so
+  treat existing `findings/` directories from it as containing secrets.
+- Results carry `result_schema_version` 2 (results from the v1.0.0 and v2.x
+  tags carry no version field): new `scanned_at`, `duration_ms` and `scanner`
+  fields, counters are no longer omitted when zero, `platform` is omitted when
+  empty, and `tag_results[].status` adds `partial` and `skipped` and uses
+  `scanned` in both modes. Stored results keep their shape when the API
+  returns them (they are never upgraded); only error and diagnostic message
+  strings are neutralised on read, as before.
 - Exit code 3 is new. Scripts that treated exit 1 as retryable must add 3 as
   "incomplete coverage"; `--fail-on` defaults to `low`, which preserves the
   previous exit 2 behaviour.

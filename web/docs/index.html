@@ -397,9 +397,11 @@ layerleak scan docker-archive:save.tar:app:1.2</code></pre>
                 <code>1</code>, <code>true</code>, <code>yes</code>, <code>on</code> and
                 <code>0</code>, <code>false</code>, <code>no</code>, <code>off</code>. Rows marked
                 <strong>must be positive</strong> reject <code>0</code>; every other
-                <code>MAX_*</code> bound accepts <code>0</code> to disable it. Exceeding a bound never
+                <code>MAX_*</code> bound accepts <code>0</code> to disable it. Exceeding a scan bound never
                 truncates silently: the scan becomes <code>partial</code> or <code>failed</code> and a
-                diagnostic names the bound.
+                diagnostic names the bound. Two bounds are informational instead: the nested-archive
+                bounds add a <code>nested_archive_skipped</code> diagnostic and the raw-value bound adds
+                a <code>raw_retention_truncated</code> diagnostic, and coverage stays complete for both.
               </p>
               <div class="table-shell" role="region" aria-label="Core and registry variables" tabindex="0">
                 <table>

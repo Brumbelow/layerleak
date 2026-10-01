@@ -1,8 +1,14 @@
+> **Superseded.** This document records the September 2026 preparation for a
+> `v1.1.0` release that was never published. The project instead ships
+> **3.0.0** under the module path `github.com/brumbelow/layerleak/v3`; see
+> [docs/plans/2026-09-30-v3-release-plan.md](../plans/2026-09-30-v3-release-plan.md)
+> and [RELEASING.md](../../RELEASING.md). It is kept unchanged for history.
+
 # Layerleak release readiness and reliability plan
 
 Status: preparation implemented and verified on 2026-09-09. Publication pending separate authorization.
 
-Verification record: [release-readiness-2026-09-09.md](../release-readiness-2026-09-09.md).
+Verification record: [release-readiness-2026-09-09.md](2026-09-09-release-readiness-verification.md).
 
 Reviewed on 2026-09-09 at `e7bb40419961b33d2399355cca4c97ecc4bf8625` on `main`.
 

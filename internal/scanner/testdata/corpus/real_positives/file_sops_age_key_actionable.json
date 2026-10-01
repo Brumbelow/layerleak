@@ -1,0 +1,11 @@
+{
+  "name": "file_sops_age_key_actionable",
+  "source_type": "file_final",
+  "path": "root/.config/sops/age/keys.txt",
+  "key": "",
+  "content": "# created: 2026-01-01T00:00:00Z\n# public key: age1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce\nAGE-SECRET-KEY-1QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7LQPZRY9X8GF2TVDW0S3JN54KHCE\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["age_secret_key"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

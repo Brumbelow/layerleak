@@ -1,0 +1,11 @@
+{
+  "name": "file_compact_json_basic_auth_url_actionable",
+  "source_type": "file_final",
+  "path": "app/config/registries.json",
+  "key": "",
+  "content": "{\"registry\":\"https://deploy:Sup3rS3cretPw9Xy@registry.internal\",\"insecure\":false}",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["basic_auth_url"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

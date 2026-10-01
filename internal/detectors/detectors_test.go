@@ -1,6 +1,8 @@
 package detectors
 
 import (
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -75,7 +77,7 @@ func TestDefaultSetScan(t *testing.T) {
 				Path:    "/root/.npmrc",
 				Content: "//registry.npmjs.org/:_auth=dXNlcjpwYXNz",
 			},
-			wantDetector: "npmrc_auth",
+			wantDetector: "npmrc_basic_auth",
 		},
 		{
 			name: "netrc password",
@@ -94,11 +96,11 @@ func TestDefaultSetScan(t *testing.T) {
 			wantDetector: "pypirc_password",
 		},
 		{
-			name: "jwt",
+			name: "json_web_token",
 			input: ScanInput{
 				Content: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.signaturetoken",
 			},
-			wantDetector: "jwt",
+			wantDetector: "json_web_token",
 		},
 		{
 			name: "basic auth url",
@@ -120,14 +122,14 @@ func TestDefaultSetScan(t *testing.T) {
 			input: ScanInput{
 				Content: "DO_TOKEN=dop_v1_" + strings.Repeat("0", 64),
 			},
-			wantDetector: "digitalocean_pat",
+			wantDetector: "digitalocean_personal_access_token",
 		},
 		{
 			name: "digitalocean oauth token",
 			input: ScanInput{
 				Content: "DO_TOKEN=doo_v1_" + strings.Repeat("0", 64),
 			},
-			wantDetector: "digitalocean_pat",
+			wantDetector: "digitalocean_personal_access_token",
 		},
 		{
 			name: "mailchimp api key",
@@ -141,7 +143,7 @@ func TestDefaultSetScan(t *testing.T) {
 			input: ScanInput{
 				Content: "VAULT_TOKEN=hvs." + strings.Repeat("a", 24),
 			},
-			wantDetector: "hashicorp_vault_token",
+			wantDetector: "vault_token",
 		},
 		{
 			name: "kubeconfig token",
@@ -240,8 +242,15 @@ func TestDefaultSetScan(t *testing.T) {
 			name: "age secret key",
 			input: ScanInput{
 				// Prefix split to avoid triggering secret-scanner false positives in test files.
-				// 58 lowercase alphanumeric chars after the bech32 separator '1'.
-				Content: "AGE-" + "SECRET-KEY-1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce",
+				// Real identities are uppercase Bech32: 58 charset symbols after the separator '1'.
+				Content: "AGE-" + "SECRET-KEY-1" + ageBech32UpperBody,
+			},
+			wantDetector: "age_secret_key",
+		},
+		{
+			name: "age secret key lowercase bech32",
+			input: ScanInput{
+				Content: "AGE-" + "SECRET-KEY-1" + strings.ToLower(ageBech32UpperBody),
 			},
 			wantDetector: "age_secret_key",
 		},
@@ -393,7 +402,7 @@ func TestDefaultSetScan(t *testing.T) {
 			input: ScanInput{
 				Content: "PLANETSCALE_TOKEN=pscale_tkn_" + strings.Repeat("A", 43),
 			},
-			wantDetector: "planetscale_token",
+			wantDetector: "planetscale_service_token",
 		},
 		{
 			name: "fly api token",
@@ -887,8 +896,26 @@ func TestContextualServiceTokensRequireServiceContext(t *testing.T) {
 }
 
 func TestDefaultSetContainsOnlyNativeRules(t *testing.T) {
-	if got := Default().Len(); got != 80 {
-		t.Fatalf("Default().Len() = %d, want 80", got)
+	set := Default()
+	identifier := regexp.MustCompile(`^[a-z0-9]+(?:_[a-z0-9]+)*$`)
+	for _, detector := range set.detectors {
+		switch detector.(type) {
+		case regexDetector, pathRegexDetector, keyValueDetector, contextEntropyDetector,
+			contextualTokenDetector, awsSharedCredentialsDetector, gitCredentialsDetector,
+			credentialedURLDetector, discordBotTokenDetector, telegramBotTokenDetector, pemPrivateKeyDetector, pgpassDetector:
+		default:
+			t.Fatalf("non-native detector type %T registered in Default()", detector)
+		}
+		if !identifier.MatchString(detector.Name()) {
+			t.Fatalf("detector identifier %q is not snake_case", detector.Name())
+		}
+	}
+
+	// The catalog lists emitted identifiers (see identifiers_test.go); here
+	// only its shape is checked.
+	catalog := set.Catalog()
+	if len(catalog) == 0 || !slices.IsSorted(catalog) {
+		t.Fatalf("Catalog() = %v", catalog)
 	}
 }
 
@@ -1338,7 +1365,8 @@ func TestSentryDSNDetector(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected sentry_dsn in %#v", matches)
 		}
-		if match.Confidence != ConfidenceHigh {
+		// A DSN is a client-side identifier, so it is reported at medium (DET-21).
+		if match.Confidence != ConfidenceMedium {
 			t.Fatalf("match.Confidence = %q", match.Confidence)
 		}
 	})

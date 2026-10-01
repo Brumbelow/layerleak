@@ -1,0 +1,11 @@
+{
+  "name": "env_redis_url_empty_user_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "REDIS_URL",
+  "content": "REDIS_URL=redis://:Sup3rS3cretPw9Xy@cache.internal:6379/0",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["connection_url_credentials"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

@@ -17,6 +17,11 @@ const (
 	ReasonPlaceholderMarker  = "placeholder_marker"
 	ReasonReservedHost       = "reserved_host"
 	ReasonKnownDummyValue    = "known_dummy_value"
+	// ReasonDefaultCredentials marks a URL whose userinfo is a well-known
+	// default pair (admin:admin, postgres:postgres). It is a finding worth
+	// seeing (CWE-1392), so it is suppressed with this reason rather than
+	// discarded.
+	ReasonDefaultCredentials = "default_credentials"
 )
 
 func DiscardReason(value string) string {
@@ -52,8 +57,15 @@ func ExampleReason(filePath, key, line, value string) string {
 		return ReasonKnownDummyValue
 	}
 
-	if hasPlaceholderMarkerSignal(filePath, key, line, value) {
+	// Markers are decisive in the key, the value and the assignment itself,
+	// but not in a trailing comment ("# TODO replace this with vault lookup")
+	// and not in the file path, which only counts as a weak signal below.
+	if hasPlaceholderMarkerSignal(key, stripTrailingComment(line), value) {
 		return ReasonPlaceholderMarker
+	}
+
+	if reason := credentialPairReason(value); reason != ReasonNone {
+		return reason
 	}
 
 	weakSignals := 0
@@ -61,6 +73,14 @@ func ExampleReason(filePath, key, line, value string) string {
 	if hasWeakExamplePathSignal(filePath) {
 		weakSignals++
 		reason = firstReason(reason, ReasonExamplePath)
+	}
+	if hasWeakExampleFilenameSignal(filePath) {
+		weakSignals++
+		reason = firstReason(reason, ReasonExamplePath)
+	}
+	if hasPlaceholderMarkerSignal(filePath) {
+		weakSignals++
+		reason = firstReason(reason, ReasonPlaceholderMarker)
 	}
 	if hasReservedHostSignal(line) || hasReservedHostSignal(value) {
 		weakSignals++
@@ -78,11 +98,14 @@ func ExampleReason(filePath, key, line, value string) string {
 	return ReasonNone
 }
 
+// TestPathReason reports the segments that only ever hold test material.
+// OpenAPI spec/ directories, RPM SPECS/, e2e and acceptance configs, stubs and
+// mocks ship in production images, so those segments are weak signals instead
+// (see hasWeakExamplePathSignal).
 func TestPathReason(filePath string) string {
 	for _, part := range normalizedPathParts(filePath) {
 		switch part {
-		case "test", "tests", "__tests__", "testdata", "fixture", "fixtures", "mock", "mocks", "__mocks__", "spec", "specs",
-			"e2e", "acceptance", "stubs":
+		case "test", "tests", "__tests__", "testdata", "fixtures", "__mocks__":
 			return ReasonTestPath
 		}
 	}
@@ -96,12 +119,61 @@ func ExampleFilenameReason(filePath string) string {
 		return ReasonNone
 	}
 
-	for _, marker := range []string{".example", ".sample", ".template"} {
+	for _, marker := range []string{".example", ".sample"} {
 		if strings.Contains(base, marker+".") || strings.HasSuffix(base, marker) {
 			return ReasonExamplePath
 		}
 	}
 
+	return ReasonNone
+}
+
+// hasWeakExampleFilenameSignal reports *.template names. envsubst templates
+// (nginx.conf.template) are shipped in production images, so the suffix alone
+// does not suppress a finding.
+func hasWeakExampleFilenameSignal(filePath string) bool {
+	base := strings.ToLower(path.Base(strings.ReplaceAll(filePath, "\\", "/")))
+	return strings.Contains(base, ".template.") || strings.HasSuffix(base, ".template")
+}
+
+// stripTrailingComment removes a shell/YAML '#' or C-style '//' comment that
+// follows the assignment, so a note such as "# replace this with a vault
+// lookup" does not turn the real secret before it into an example. A line
+// that is entirely a comment yields "".
+func stripTrailingComment(line string) string {
+	for _, marker := range []string{" #", "\t#", " //", "\t//"} {
+		if index := strings.Index(line, marker); index >= 0 {
+			line = line[:index]
+		}
+	}
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
+		return ""
+	}
+	return line
+}
+
+// credentialPairReason classifies the userinfo of a URL value: a well-known
+// default pair is a suppressed default_credentials finding and the foobar
+// placeholder user a known dummy. Pairs on reserved hosts never reach here;
+// DiscardReason drops them.
+func credentialPairReason(value string) string {
+	trimmed := strings.Trim(strings.TrimSpace(value), "\"'`")
+	if !strings.Contains(trimmed, "://") {
+		return ReasonNone
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.User == nil {
+		return ReasonNone
+	}
+	username := strings.ToLower(parsed.User.Username())
+	password, _ := parsed.User.Password()
+	if isPlaceholderCredentialPair(username, strings.ToLower(password)) {
+		return ReasonDefaultCredentials
+	}
+	if username == "foobar" {
+		return ReasonKnownDummyValue
+	}
 	return ReasonNone
 }
 
@@ -133,7 +205,8 @@ func normalizedPathParts(filePath string) []string {
 func hasWeakExamplePathSignal(filePath string) bool {
 	for _, part := range normalizedPathParts(filePath) {
 		switch part {
-		case "example", "examples", "sample", "samples", "demo", "demos", "doc", "docs":
+		case "example", "examples", "sample", "samples", "demo", "demos", "doc", "docs",
+			"spec", "specs", "e2e", "acceptance", "stubs", "mock", "mocks", "fixture":
 			return true
 		}
 	}
@@ -184,6 +257,14 @@ func hasKnownDummyValueSignal(value string) bool {
 	trimmed := strings.Trim(strings.TrimSpace(value), "\"'`")
 	if trimmed == "" {
 		return false
+	}
+
+	// A URL is judged by its credentials, not by its host: "example" in
+	// git.examplecorp.internal says nothing about the password before it.
+	if strings.Contains(trimmed, "://") {
+		if parsed, err := url.Parse(trimmed); err == nil && parsed.User != nil {
+			trimmed = parsed.User.String()
+		}
 	}
 
 	lower := strings.ToLower(trimmed)
@@ -283,22 +364,25 @@ func shouldDiscardPlaceholderURL(parsed *url.URL) bool {
 	password = strings.ToLower(strings.TrimSpace(password))
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 
-	if isPlaceholderCredentialPair(username, password) {
+	// Only a placeholder on a reserved or example host is documentation. The
+	// same pair on a real host is a default credential and stays a finding
+	// (suppressed with ReasonDefaultCredentials by ExampleReason).
+	if !hasReservedHostSignal(host) {
+		return false
+	}
+	if isPlaceholderCredentialPair(username, password) || username == "foobar" {
 		return true
 	}
-	if username == "foobar" {
-		return true
-	}
-	if (username == "user" || username == "admin" || username == "test") && host == "example.com" {
-		return true
-	}
-
-	return false
+	return username == "user" || username == "admin" || username == "test"
 }
 
+// isPlaceholderCredentialPair reports the documentation placeholders and the
+// factory-default pairs of common services.
 func isPlaceholderCredentialPair(username, password string) bool {
 	switch username + ":" + password {
-	case "foo:bar", "admin:admin", "admin:password", "root:password", "test:test", "user:user":
+	case "foo:bar", "admin:admin", "admin:password", "admin:admin123", "root:password", "root:root", "root:toor",
+		"test:test", "user:user", "user:password", "guest:guest", "postgres:postgres", "mysql:mysql",
+		"minioadmin:minioadmin", "elastic:changeme", "neo4j:neo4j", "rabbitmq:rabbitmq", "redis:redis":
 		return true
 	default:
 		return false

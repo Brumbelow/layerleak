@@ -1,0 +1,11 @@
+{
+  "name": "history_bearer_header_actionable",
+  "source_type": "history",
+  "path": "",
+  "key": "history[2].created_by",
+  "content": "RUN curl -fsSL -H 'Authorization: Bearer Xk9fL2mQ8vR4tY7wZ1aB3cD5eF6gH8' https://artifacts.internal/v1/bundle.tgz -o /tmp/bundle.tgz",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["http_bearer_authorization_header"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

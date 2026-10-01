@@ -8,26 +8,31 @@ import (
 	"unicode"
 )
 
+// uuidPattern is the lowercase RFC 4122 text form.
+const uuidPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
+
 var (
 	awsSharedCredentialsPathExpression = regexp.MustCompile(`(^|/)\.aws/(credentials|config)$`)
 	gitCredentialsPathExpression       = regexp.MustCompile(`(^|/)\.git-credentials$`)
-	uuidTokenExpression                = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	uuidTokenCandidateExpression       = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+	uuidTokenExpression                = regexp.MustCompile(`(?i)^` + uuidPattern + `$`)
+	uuidTokenCandidateExpression       = regexp.MustCompile(`(?i)\b` + uuidPattern + `\b`)
 )
 
 type contextualTokenDetector struct {
 	name               string
 	keyExpression      *regexp.Regexp
-	assignedExpression *regexp.Regexp
-	prefixedExpression *regexp.Regexp
+	assignedExpression compiledRule
+	prefixedExpression compiledRule
 }
 
 func newHerokuTokenDetector() Detector {
 	return contextualTokenDetector{
-		name:               "heroku_api_key",
-		keyExpression:      regexp.MustCompile(`(?i)^heroku(?:[_-]?api)?[_-]?(?:key|token)$`),
-		assignedExpression: regexp.MustCompile(`(?im)\bheroku(?:[_-]?api)?[_-]?(?:key|token)\b\s*(?:=|:|=>)\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`),
-		prefixedExpression: regexp.MustCompile(`\bHRKU-[A-Za-z0-9_-]{20,}\b`),
+		name:          "heroku_api_key",
+		keyExpression: regexp.MustCompile(`(?i)^heroku(?:[_-]?api)?[_-]?(?:key|token)$`),
+		// The assigned expression is lowercase and runs over the lowered content
+		// so Go keeps the "heroku" literal prefix instead of a (?i) flag.
+		assignedExpression: compileRule(regexp.MustCompile(`\b` + assignedValuePattern(`heroku(?:[_-]?api)?[_-]?(?:key|token)\b`, uuidPattern, `\b`))),
+		prefixedExpression: compileRule(regexp.MustCompile(`\bHRKU-[A-Za-z0-9_-]{20,}\b`)),
 	}
 }
 
@@ -35,7 +40,7 @@ func newSnykTokenDetector() Detector {
 	return contextualTokenDetector{
 		name:               "snyk_api_token",
 		keyExpression:      regexp.MustCompile(`(?i)^snyk(?:[_-]?api)?[_-]?(?:key|token)$`),
-		assignedExpression: regexp.MustCompile(`(?im)\bsnyk(?:[_-]?api)?[_-]?(?:key|token)\b\s*(?:=|:|=>)\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`),
+		assignedExpression: compileRule(regexp.MustCompile(`\b` + assignedValuePattern(`snyk(?:[_-]?api)?[_-]?(?:key|token)\b`, uuidPattern, `\b`))),
 	}
 }
 
@@ -43,13 +48,17 @@ func (d contextualTokenDetector) Name() string {
 	return d.name
 }
 
+func (d contextualTokenDetector) IDs() []string {
+	return singleID(d.name)
+}
+
 func (d contextualTokenDetector) Scan(input ScanInput) []Match {
 	matches := make([]Match, 0, 2)
-	appendIndexes := func(expression *regexp.Regexp, group int) {
-		if expression == nil {
+	appendIndexes := func(rule compiledRule, haystack ScanInput, group int) {
+		if rule.expression == nil {
 			return
 		}
-		for _, indexes := range expression.FindAllStringSubmatchIndex(input.Content, -1) {
+		for _, indexes := range rule.findAll(haystack) {
 			start, end := indexes[0], indexes[1]
 			if group > 0 && len(indexes) >= (group+1)*2 {
 				start, end = indexes[group*2], indexes[group*2+1]
@@ -68,8 +77,8 @@ func (d contextualTokenDetector) Scan(input ScanInput) []Match {
 		}
 	}
 
-	appendIndexes(d.assignedExpression, 1)
-	appendIndexes(d.prefixedExpression, 0)
+	appendIndexes(d.assignedExpression, input.loweredView(), 1)
+	appendIndexes(d.prefixedExpression, input, 0)
 
 	if d.keyExpression.MatchString(strings.TrimSpace(input.Key)) {
 		for _, indexes := range uuidTokenCandidateExpression.FindAllStringIndex(input.Content, -1) {
@@ -106,6 +115,12 @@ type awsSharedCredentialsDetector struct{}
 
 func (awsSharedCredentialsDetector) Name() string {
 	return "aws_shared_credentials"
+}
+
+// IDs are the per-field identifiers the reader emits; the strategy name
+// itself never appears in a finding.
+func (awsSharedCredentialsDetector) IDs() []string {
+	return []string{"aws_shared_credentials_access_key_id", "aws_shared_credentials_secret_access_key", "aws_shared_credentials_session_token"}
 }
 
 func (awsSharedCredentialsDetector) Scan(input ScanInput) []Match {
@@ -204,7 +219,14 @@ func parseAWSSharedCredentialsEntries(content string) []awsSharedCredentialsEntr
 	currentSection := "default"
 
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line.Value)
+		// A UTF-8 BOM is not White_Space, so TrimSpace leaves it in front of
+		// the first section header and that profile would merge into default.
+		lineValue, bomOffset := strings.CutPrefix(line.Value, "\uFEFF")
+		offset := line.Offset
+		if bomOffset {
+			offset += len("\uFEFF")
+		}
+		trimmed := strings.TrimSpace(lineValue)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
 			continue
 		}
@@ -214,7 +236,7 @@ func parseAWSSharedCredentialsEntries(content string) []awsSharedCredentialsEntr
 			continue
 		}
 
-		key, value, start, end, ok := parseINIKeyValue(line.Value)
+		key, value, start, end, ok := parseINIKeyValue(lineValue)
 		if !ok {
 			continue
 		}
@@ -225,8 +247,8 @@ func parseAWSSharedCredentialsEntries(content string) []awsSharedCredentialsEntr
 				section: currentSection,
 				key:     key,
 				value:   value,
-				start:   line.Offset + start,
-				end:     line.Offset + end,
+				start:   offset + start,
+				end:     offset + end,
 			})
 		}
 	}
@@ -260,7 +282,9 @@ func parseINIKeyValue(line string) (key, value string, start, end int, ok bool) 
 		return "", "", 0, 0, false
 	}
 	start = separator + 1 + len(valuePart) - len(trimmedLeft)
-	value = strings.TrimRight(trimmedLeft, " \t")
+	// Trim every trailing space, including the '\r' of CRLF files, before the
+	// surrounding-quote check or `"..."\r` keeps its quotes.
+	value = strings.TrimRightFunc(trimmedLeft, unicode.IsSpace)
 
 	if len(value) >= 2 && value[0] == value[len(value)-1] && (value[0] == '"' || value[0] == '\'') {
 		value = value[1 : len(value)-1]
@@ -283,6 +307,10 @@ func (gitCredentialsDetector) Name() string {
 	return "git_credentials"
 }
 
+func (gitCredentialsDetector) IDs() []string {
+	return []string{"git_credentials_password"}
+}
+
 func (gitCredentialsDetector) Scan(input ScanInput) []Match {
 	pathValue := strings.ToLower(strings.TrimSpace(input.Path))
 	if pathValue == "" || !gitCredentialsPathExpression.MatchString(pathValue) {
@@ -302,22 +330,24 @@ func (gitCredentialsDetector) Scan(input ScanInput) []Match {
 			continue
 		}
 		username := parsed.User.Username()
-		password, ok := parsed.User.Password()
-		if !ok || username == "" || !looksLikeBasicAuthURL(trimmed) {
+		if _, ok := parsed.User.Password(); !ok || username == "" || !looksLikeBasicAuthURL(trimmed) {
 			continue
 		}
 
-		needle := ":" + password + "@"
-		index := strings.Index(line.Value, needle)
-		if index < 0 {
+		// Report the raw bytes of the password as stored: git credential-store
+		// percent-encodes reserved characters, and url.Parse decodes them, so a
+		// decoded needle would not be found in the line.
+		start, end, ok := rawURLPasswordSpan(line.Value)
+		if !ok {
 			continue
 		}
+		password := line.Value[start:end]
 
 		matches = append(matches, Match{
 			Detector:   "git_credentials_password",
 			Value:      password,
-			Start:      line.Offset + index + 1,
-			End:        line.Offset + index + 1 + len(password),
+			Start:      line.Offset + start,
+			End:        line.Offset + end,
 			Confidence: adjustConfidence(ConfidenceHigh, input.Path, "password", password),
 			Priority:   priorityStructured,
 		})
@@ -326,8 +356,34 @@ func (gitCredentialsDetector) Scan(input ScanInput) []Match {
 	return matches
 }
 
+// rawURLPasswordSpan returns the span of the password inside the userinfo of
+// the URL in line, as written (not decoded).
+func rawURLPasswordSpan(line string) (int, int, bool) {
+	schemeEnd := strings.Index(line, "://")
+	if schemeEnd < 0 {
+		return 0, 0, false
+	}
+	authorityStart := schemeEnd + 3
+	authority := line[authorityStart:]
+	if slash := strings.IndexByte(authority, '/'); slash >= 0 {
+		authority = authority[:slash]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return 0, 0, false
+	}
+	userinfo := authority[:at]
+	colon := strings.IndexByte(userinfo, ':')
+	if colon < 0 || colon+1 >= len(userinfo) {
+		return 0, 0, false
+	}
+	return authorityStart + colon + 1, authorityStart + at, true
+}
+
+var awsAccessKeyIDExpression = regexp.MustCompile(`^(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}$`)
+
 func looksLikeAWSAccessKeyID(value string) bool {
-	return regexp.MustCompile(`^(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}$`).MatchString(strings.TrimSpace(value))
+	return awsAccessKeyIDExpression.MatchString(strings.TrimSpace(value))
 }
 
 func looksLikeAWSSessionToken(value string) bool {

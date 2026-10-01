@@ -1,0 +1,11 @@
+{
+  "name": "env_database_url_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "DATABASE_URL",
+  "content": "DATABASE_URL=postgres://app:Sup3rS3cretPw9Xy@db.internal:5432/app?sslmode=require",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["connection_url_credentials"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

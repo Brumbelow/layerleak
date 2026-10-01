@@ -21,7 +21,7 @@
     "findings": [
       {
         "confidence": "high",
-        "context_snippet": "GH_TOKEN=ghp********************************56",
+        "context_snippet": "GH_TOKEN=[REDACTED]",
         "detector_name": "github_token",
         "disposition": "actionable",
         "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -30,7 +30,7 @@
         "match_start": 9,
         "platform": {},
         "present_in_final_image": true,
-        "redacted_value": "ghp********************************56",
+        "redacted_value": "ghp********",
         "source_type": "env"
       }
     ],

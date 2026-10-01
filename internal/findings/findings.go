@@ -45,6 +45,10 @@ const (
 	DispositionReasonPlaceholderMarker DispositionReason = "placeholder_marker"
 	DispositionReasonReservedHost      DispositionReason = "reserved_host"
 	DispositionReasonKnownDummyValue   DispositionReason = "known_dummy_value"
+	// DispositionReasonDefaultCredentials marks a connection or basic-auth URL
+	// carrying a well-known default pair such as admin:admin; it is suppressed
+	// rather than discarded so the default credential is still visible.
+	DispositionReasonDefaultCredentials DispositionReason = "default_credentials"
 )
 
 type Input struct {
@@ -188,7 +192,7 @@ func NewDetailedNormalizerWithProvenance(input Input, matches, filePathMatches, 
 	metadataKey := sanitizedProvenance(input.Key, metadataKeyMatches, matches)
 	normalizer := &DetailedNormalizer{
 		input:       input,
-		spans:       mergeSensitiveSpans(input.Content, matches),
+		spans:       mergeContentSensitiveSpans(input.Content, matches),
 		lineBreaks:  lineBreaks,
 		filePath:    filePath,
 		metadataKey: metadataKey,
@@ -308,6 +312,23 @@ func DeduplicateDetailed(items []DetailedFinding) []DetailedFinding {
 	return deduped
 }
 
+const (
+	// redactPrefixRevealMinRunes is the shortest value whose leading runes may
+	// appear in a redacted value. Anything shorter is masked completely, so a
+	// 7-rune password no longer shows five of its characters.
+	redactPrefixRevealMinRunes = 12
+	// redactPrefixRunes is how many leading runes a long value reveals; it is
+	// enough to recognise a vendor prefix (ghp, AKI, sk-) and nothing more.
+	redactPrefixRunes = 3
+	// redactMask is the fixed asterisk run. Its length never varies with the
+	// input, so the redacted value does not disclose the secret's length.
+	redactMask = "********"
+)
+
+// Redact returns the public rendering of a matched value. Values shorter than
+// twelve runes are masked completely; longer values keep only their first
+// three runes. The mask has a fixed length and no suffix is ever shown, so the
+// output discloses neither the length nor the tail of the secret.
 func Redact(value string) string {
 	if value == "" {
 		return ""
@@ -318,11 +339,11 @@ func Redact(value string) string {
 	}
 
 	runes := []rune(value)
-	if len(runes) <= 6 {
-		return strings.Repeat("*", len(runes))
+	if len(runes) < redactPrefixRevealMinRunes {
+		return redactMask
 	}
 
-	return SanitizeControlCharacters(string(runes[:3]) + strings.Repeat("*", len(runes)-5) + string(runes[len(runes)-2:]))
+	return SanitizeControlCharacters(string(runes[:redactPrefixRunes]) + redactMask)
 }
 
 func Fingerprint(value string) string {
@@ -348,6 +369,75 @@ func mergeSensitiveSpans(content string, matches []detectors.Match) []sensitiveS
 	}
 	slices.SortFunc(spans, compareSensitiveSpans)
 	return mergeSortedSensitiveSpans(spans)
+}
+
+// minRepeatRedactionBytes is the shortest matched value whose undetected
+// repeats are also redacted from context snippets. Shorter values (a
+// four-character netrc password, say) are blanked only where a detector
+// matched them, so "pass" never erases the inside of "password".
+const minRepeatRedactionBytes = 8
+
+// mergeContentSensitiveSpans returns the detector spans plus every other
+// textual occurrence of a matched value in the content, so a copy of a secret
+// that no detector matched (a repeat after a comment marker, a CSV column, the
+// next line) is still redacted when it falls inside a context window.
+func mergeContentSensitiveSpans(content string, matches []detectors.Match) []sensitiveSpan {
+	spans := mergeSensitiveSpans(content, matches)
+	repeats := repeatValueSpans(content, matches)
+	if len(repeats) == 0 {
+		return spans
+	}
+	spans = append(spans, repeats...)
+	slices.SortFunc(spans, compareSensitiveSpans)
+	return mergeSortedSensitiveSpans(spans)
+}
+
+// repeatValueSpans finds every occurrence of every distinct matched value of
+// at least minRepeatRedactionBytes in content. Values are indexed by their
+// first eight bytes and the content is walked once, so the cost is linear in
+// the content plus the occurrences, whatever the number of distinct values a
+// hostile input produces.
+func repeatValueSpans(content string, matches []detectors.Match) []sensitiveSpan {
+	var firstBytes [256]bool
+	index := make(map[string][]string)
+	seen := make(map[string]struct{})
+	for _, match := range matches {
+		if len(match.Value) < minRepeatRedactionBytes {
+			continue
+		}
+		if _, ok := seen[match.Value]; ok {
+			continue
+		}
+		seen[match.Value] = struct{}{}
+		key := match.Value[:minRepeatRedactionBytes]
+		index[key] = append(index[key], match.Value)
+		firstBytes[match.Value[0]] = true
+	}
+	if len(index) == 0 {
+		return nil
+	}
+
+	spans := make([]sensitiveSpan, 0)
+	for position := 0; position+minRepeatRedactionBytes <= len(content); position++ {
+		if !firstBytes[content[position]] {
+			continue
+		}
+		candidates, ok := index[content[position:position+minRepeatRedactionBytes]]
+		if !ok {
+			continue
+		}
+		for _, value := range candidates {
+			if !strings.HasPrefix(content[position:], value) {
+				continue
+			}
+			spans = append(spans, sensitiveSpan{
+				start:     position,
+				end:       position + len(value),
+				multiline: strings.Contains(value, "\n"),
+			})
+		}
+	}
+	return spans
 }
 
 func compareSensitiveSpans(left, right sensitiveSpan) int {
@@ -526,7 +616,36 @@ func compareFindings(left, right Finding) int {
 	if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
 		return value
 	}
-	return strings.Compare(left.Key, right.Key)
+	// Offsets and the remaining public fields make the order total, so
+	// Deduplicate yields the same sequence whatever the input order.
+	if left.MatchStart != right.MatchStart {
+		return left.MatchStart - right.MatchStart
+	}
+	if left.MatchEnd != right.MatchEnd {
+		return left.MatchEnd - right.MatchEnd
+	}
+	if value := strings.Compare(left.Key, right.Key); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.Confidence, right.Confidence); value != 0 {
+		return value
+	}
+	if value := strings.Compare(string(left.DispositionReason), string(right.DispositionReason)); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.RedactedValue, right.RedactedValue); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.ContextSnippet, right.ContextSnippet); value != 0 {
+		return value
+	}
+	if left.PresentInFinalImage != right.PresentInFinalImage {
+		if left.PresentInFinalImage {
+			return 1
+		}
+		return -1
+	}
+	return 0
 }
 
 func compareDetailedFindings(left, right DetailedFinding) int {

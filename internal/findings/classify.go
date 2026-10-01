@@ -55,6 +55,8 @@ func mapDispositionReason(reason string) DispositionReason {
 		return DispositionReasonReservedHost
 	case detectionpolicy.ReasonKnownDummyValue:
 		return DispositionReasonKnownDummyValue
+	case detectionpolicy.ReasonDefaultCredentials:
+		return DispositionReasonDefaultCredentials
 	default:
 		return DispositionReasonNone
 	}

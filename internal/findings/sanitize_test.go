@@ -105,7 +105,7 @@ func TestRedactSanitizesControlCharactersInRedactedValue(t *testing.T) {
 	if strings.ContainsAny(redacted, "\x00\x01") {
 		t.Fatalf("Redact() = %q still carries control characters", redacted)
 	}
-	if redacted != "ab�*********�l" {
+	if redacted != "ab�********" {
 		t.Fatalf("Redact() = %q", redacted)
 	}
 }

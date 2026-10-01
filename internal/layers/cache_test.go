@@ -27,7 +27,7 @@ func TestLayerCacheIsLRUAndBounded(t *testing.T) {
 
 	record := func(digest string, size int64) *LayerRecord {
 		descriptor := manifest.Descriptor{Digest: digest, MediaType: manifest.MediaTypeOCIImageLayerGzip}
-		item := newLayerRecord(descriptor)
+		item := newLayerRecord(descriptor, 0)
 		item.size = size
 		return item
 	}
@@ -344,7 +344,7 @@ func TestReplayDoesNotRecordHardlinksWithoutTarget(t *testing.T) {
 	}
 	cache.Store(recorded.LayerRecords[0])
 	linkDescriptor := manifest.Descriptor{Digest: "sha256:link", MediaType: manifest.MediaTypeDockerSchema2LayerGzip}
-	forced := newLayerRecord(linkDescriptor)
+	forced := newLayerRecord(linkDescriptor, 0)
 	forced.addEntry(cachedEntry{name: ".netrc", linkname: "app/notes.txt", typeflag: tar.TypeLink, physicalHeader: 512, physicalBody: 512})
 	forced.physicalEnd = 1536
 	if !cache.Store(forced) {
@@ -354,6 +354,90 @@ func TestReplayDoesNotRecordHardlinksWithoutTarget(t *testing.T) {
 	_, err = Replay(context.Background(), both, withCache, opener)
 	if !errors.Is(err, ErrCacheUnusable) {
 		t.Fatalf("Replay() error = %v, want ErrCacheUnusable", err)
+	}
+}
+
+// TestReplayBoundsLayerRecordsWhileTheyAreBuilt is the regression for
+// records that held every raw tar name of a layer, uncharged, until the
+// cache rejected them after the whole manifest was scanned: a record stops
+// growing once it would exceed the cache bound and is dropped, while the
+// replay itself (unsafe entries included) is unchanged.
+func TestReplayBoundsLayerRecordsWhileTheyAreBuilt(t *testing.T) {
+	const entries = 300
+	longName := strings.Repeat("n", 8<<10)
+	tarEntries := make([]tarEntry, 0, entries)
+	for index := range entries {
+		tarEntries = append(tarEntries, tarEntry{name: fmt.Sprintf("%s/%04d", longName, index), body: "x"})
+	}
+	layer := []testLayer{{digest: "sha256:long-names", body: gzipLayer(t, tarEntries)}}
+	options := ReplayOptions{MaxFileBytes: 1 << 20, MaxRetainedBytes: 1 << 20, MaxLayerEntries: 50000}
+	reference, err := replayTestLayers(t, layer, options)
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if reference.Coverage.EntriesSkippedUnsafe != entries {
+		t.Fatalf("EntriesSkippedUnsafe = %d, want %d", reference.Coverage.EntriesSkippedUnsafe, entries)
+	}
+
+	options.Cache = NewLayerCache(1 << 20)
+	recorded, err := replayTestLayers(t, layer, options)
+	if err != nil {
+		t.Fatalf("Replay() with cache error = %v", err)
+	}
+	if len(recorded.LayerRecords) != 0 {
+		t.Fatalf("LayerRecords = %d (size %d), want the over-budget record dropped", len(recorded.LayerRecords), recorded.LayerRecords[0].size)
+	}
+	if recorded.Coverage != reference.Coverage {
+		t.Fatalf("coverage differs with recording on:\n%+v\n%+v", recorded.Coverage, reference.Coverage)
+	}
+
+	// The record itself never grows past its bound, and drops what it held.
+	descriptor := manifest.Descriptor{Digest: "sha256:x", MediaType: manifest.MediaTypeDockerSchema2LayerGzip}
+	record := newLayerRecord(descriptor, 1000)
+	for range 10 {
+		record.addEntry(cachedEntry{name: "short"})
+	}
+	if record.cacheable || record.entries != nil || record.size > 1000 {
+		t.Fatalf("record = cacheable %t, %d entries, size %d; want dropped within 1000 bytes", record.cacheable, len(record.entries), record.size)
+	}
+}
+
+// TestReplayFromCacheKeepsUnsafeEntriesWithTruncatedNames checks that a
+// recorded unsafe entry costs a bounded number of bytes (its over-long name
+// is truncated just past the path bound) and still replays from the cache
+// as the same unsafe skip.
+func TestReplayFromCacheKeepsUnsafeEntriesWithTruncatedNames(t *testing.T) {
+	longName := strings.Repeat("n", 20<<10)
+	layer := []testLayer{{digest: "sha256:unsafe", body: gzipLayer(t, []tarEntry{
+		{name: longName, body: "x"},
+		{name: "link", typeflag: tar.TypeSymlink, linkname: longName},
+		{name: "kept.txt", body: "plain\n"},
+	})}}
+	options := ReplayOptions{MaxFileBytes: 1 << 20, MaxRetainedBytes: 1 << 30}
+	reference, err := replayTestLayers(t, layer, options)
+	if err != nil || reference.Coverage.EntriesSkippedUnsafe != 2 {
+		t.Fatalf("Replay() = %v, coverage %+v", err, reference.Coverage)
+	}
+	cache := NewLayerCache(1 << 20)
+	options.Cache = cache
+	opener, descriptors := newCountingOpener(layer)
+	recorded, err := Replay(context.Background(), descriptors, options, opener)
+	if err != nil || len(recorded.LayerRecords) != 1 {
+		t.Fatalf("Replay() = %v, records %d", err, len(recorded.LayerRecords))
+	}
+	if size := recorded.LayerRecords[0].size; size > 3*(cachedEntryBaseBytes+2*(maxArchivePathBytes+1))+cachedLayerBaseBytes+64 {
+		t.Fatalf("record size = %d, want over-long names truncated", size)
+	}
+	cache.Store(recorded.LayerRecords[0])
+	cached, err := Replay(context.Background(), descriptors, options, opener)
+	if err != nil {
+		t.Fatalf("Replay() from cache error = %v", err)
+	}
+	if opener.opens["sha256:unsafe"] != 1 {
+		t.Fatalf("layer opened %d times, want 1 (second replay from the cache)", opener.opens["sha256:unsafe"])
+	}
+	if cached.Coverage != reference.Coverage || !reflect.DeepEqual(withoutContent(cached), withoutContent(reference)) {
+		t.Fatalf("cached replay differs:\n%+v\n%+v", withoutContent(cached), withoutContent(reference))
 	}
 }
 

@@ -221,8 +221,10 @@ type State struct {
 	nestedSkips       []NestedSkip
 	// journal records the mutations of the layer being applied, nil between layers.
 	journal *layerJournal
-	// records holds the cache records of committed, cacheable layers.
-	records []*LayerRecord
+	// records holds the cache records of committed, cacheable layers, and
+	// recordBytes their total size.
+	records     []*LayerRecord
+	recordBytes int64
 }
 
 func NewState() *State {
@@ -333,7 +335,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		options:    options,
 	}
 	if options.Cache != nil {
-		source.layer = newLayerRecord(descriptor)
+		source.layer = newLayerRecord(descriptor, options.Cache.maxBytes)
 	}
 	nested := newNestedExpander(descriptor.Digest, options, s.coverage)
 	if err := s.applyEntries(ctx, descriptor, source, nested, options); err != nil {
@@ -345,8 +347,11 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			// stack, so its outcome cannot be replayed from metadata.
 			source.layer.markUncacheable()
 		}
-		if source.layer.cacheable {
+		if source.layer.cacheable && (source.layer.maxBytes <= 0 || s.recordBytes+source.layer.size <= source.layer.maxBytes) {
+			// The records a manifest holds until the scanner stores them are
+			// bounded together by the cache's size, which is all it could keep.
 			s.records = append(s.records, source.layer)
+			s.recordBytes += source.layer.size
 		}
 	}
 	return nil

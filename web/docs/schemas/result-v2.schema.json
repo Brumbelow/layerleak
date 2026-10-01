@@ -54,7 +54,7 @@
     "tags_enumerated": { "$ref": "#/$defs/count" },
     "tags_resolved": { "$ref": "#/$defs/count" },
     "tags_failed": { "$ref": "#/$defs/count" },
-    "target_count": { "$ref": "#/$defs/count" },
+    "target_count": { "$ref": "#/$defs/count", "description": "Distinct digests selected for scanning. When a repository sweep exceeds the target bound it stops resolving tags and reports the bound plus one." },
     "completed_target_count": { "$ref": "#/$defs/count" },
     "failed_target_count": { "$ref": "#/$defs/count" },
     "partial_target_count": { "$ref": "#/$defs/count" },
@@ -83,7 +83,7 @@
     "tagStatus": {
       "type": "string",
       "enum": ["resolved", "scanned", "partial", "failed", "skipped"],
-      "description": "scanned: every selected manifest of the tag's target completed; partial: some did; failed: the tag could not be resolved or its target failed; skipped: the sweep stopped before the tag's target; resolved: the tag resolved to a digest the sweep had not scanned yet (only in results of sweeps that stopped during tag resolution)."
+      "description": "scanned: every selected manifest of the tag's target completed; partial: some did; failed: the tag could not be resolved or its target failed; skipped: the sweep stopped before the tag's target was scanned, or before the tag was resolved because the repository target bound was exceeded (such entries carry no root_digest); resolved: the tag resolved to a digest the sweep had not scanned yet (only in results of sweeps that stopped during tag resolution)."
     },
     "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
     "disposition": {

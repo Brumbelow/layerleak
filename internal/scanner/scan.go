@@ -77,6 +77,58 @@ type Diagnostic struct {
 	Observed int64  `json:"observed,omitempty"`
 }
 
+// UnsupportedManifestError reports a selected manifest that Layerleak cannot
+// scan because its layers are foreign/non-distributable or use an unknown
+// media type. It is a coverage outcome (the platform is reported as failed
+// with a manifest_unsupported diagnostic and the scan continues), never an
+// integrity failure, so --allow-partial may accept it.
+type UnsupportedManifestError struct {
+	Digest   string
+	Platform manifest.Platform
+	Cause    error
+}
+
+func (e *UnsupportedManifestError) Error() string {
+	subject := strings.TrimSpace(e.Digest)
+	if platform := e.Platform.String(); platform != "" {
+		subject = platform + " (" + subject + ")"
+	}
+	return fmt.Sprintf("manifest %s is not supported: %v", subject, e.Cause)
+}
+
+func (e *UnsupportedManifestError) Unwrap() error {
+	return e.Cause
+}
+
+// IsUnsupportedManifest reports whether err describes a manifest that cannot
+// be scanned on this platform policy.
+func IsUnsupportedManifest(err error) bool {
+	var target *UnsupportedManifestError
+	return errors.As(err, &target)
+}
+
+// PlatformNotFoundError reports that a single-manifest image does not match
+// the requested platform selector.
+type PlatformNotFoundError struct {
+	Selector string
+	Actual   manifest.Platform
+}
+
+func (e *PlatformNotFoundError) Error() string {
+	actual := e.Actual.String()
+	if actual == "" {
+		actual = "unspecified"
+	}
+	return fmt.Sprintf("platform %s not found in image manifest (image platform is %s)", e.Selector, actual)
+}
+
+// IsPlatformNotFound reports whether err describes a platform selector that
+// matched no manifest.
+func IsPlatformNotFound(err error) bool {
+	var target *PlatformNotFoundError
+	return errors.As(err, &target)
+}
+
 type ProgressPhase string
 
 const (
@@ -196,14 +248,22 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			manifest: &document.Manifest,
 		})
 	case manifest.DocumentKindIndex:
-		selected, err := manifest.SelectDescriptors(document.Index, request.Platform)
+		selection, err := manifest.SelectManifests(document.Index, request.Platform)
 		if err != nil {
 			return result, err
 		}
-		if request.MaxImageManifests > 0 && len(selected) > request.MaxImageManifests {
+		if request.MaxImageManifests > 0 && len(selection.Selected) > request.MaxImageManifests {
 			return result, limits.NewExceeded(limits.Kind("image_manifests"), int64(request.MaxImageManifests), "image index")
 		}
-		for _, descriptor := range selected {
+		for _, skipped := range selection.Skipped {
+			result.Diagnostics = appendDiagnostic(result.Diagnostics, Diagnostic{
+				Code:    string(skipped.Reason),
+				Scope:   "platform",
+				Subject: skipped.Descriptor.Digest,
+				Message: skipped.Detail,
+			})
+		}
+		for _, descriptor := range selection.Selected {
 			targets = append(targets, target{descriptor: descriptor})
 		}
 	default:
@@ -221,6 +281,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
+	platformErrors := make([]error, 0)
 	findingsFound := 0
 	for _, target := range targets {
 		if budget.rawExceeded {
@@ -272,6 +333,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			result.Coverage = mergeCoverage(result.Coverage, platformResult.Coverage, result.CompletedManifestCount+result.FailedManifestCount > 0)
 			result.Diagnostics = append(result.Diagnostics, platformResult.Diagnostics...)
 			result.FailedManifestCount++
+			platformErrors = append(platformErrors, err)
 			emitProgress(request, ProgressUpdate{
 				Phase:                 ProgressPhaseManifestFailed,
 				Repository:            request.Reference.Repository,
@@ -311,7 +373,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
 	if result.CompletedManifestCount == 0 {
-		return result, allSelectedManifestsFailedError(result.PlatformResults)
+		return result, allSelectedManifestsFailedError(result.PlatformResults, platformErrors)
 	}
 	emitProgress(request, ProgressUpdate{
 		Phase:                 ProgressPhaseCompleted,
@@ -385,6 +447,18 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 		platform.Variant = imageConfig.Variant
 	}
 	platformResult.Platform = platform
+	if preloaded != nil && strings.TrimSpace(request.Platform) != "" {
+		// The root document was a single image manifest, so no index entry was
+		// matched against the selector. Enforce it against the image config
+		// before any detection runs for a platform the caller did not ask for.
+		selector, err := manifest.ParsePlatformSelector(request.Platform)
+		if err != nil {
+			return platformResult, nil, nil, err
+		}
+		if !platform.Matches(selector) {
+			return platformResult, nil, nil, &PlatformNotFoundError{Selector: strings.TrimSpace(request.Platform), Actual: platform}
+		}
+	}
 
 	budgetStart := budget.snapshot()
 	metadataFindings := scanMetadataWithBudget(budget, request.Detectors, descriptor.Digest, platform, imageConfig)
@@ -425,6 +499,9 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 			}
 			return &verifiedReadCloser{VerifyingReader: verifier, closer: response.Body, cancel: cancel}, nil
 		}))
+		if layers.IsUnsupportedLayer(err) {
+			err = &UnsupportedManifestError{Digest: descriptor.Digest, Platform: platform, Cause: err}
+		}
 	}
 
 	fileFindings := scanArtifactsWithBudget(budget, request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileFinal, true, layerResult.FinalFiles)
@@ -848,14 +925,42 @@ func sortPlatformResults(items []PlatformResult) {
 	})
 }
 
-func allSelectedManifestsFailedError(items []PlatformResult) error {
-	errors := collectErrorMessages(len(items), func(index int) string {
+// allSelectedManifestsFailedError summarises why no manifest completed. Only
+// the typed platform outcomes (unsupported manifests and selector mismatches)
+// are exposed through Unwrap so callers can classify them without inheriting
+// transport or registry failures from other platforms.
+func allSelectedManifestsFailedError(items []PlatformResult, causes []error) error {
+	typed := make([]error, 0, len(causes))
+	for _, cause := range causes {
+		if IsUnsupportedManifest(cause) || IsPlatformNotFound(cause) {
+			typed = append(typed, cause)
+		}
+	}
+	if len(causes) == 1 && len(typed) == 1 && IsPlatformNotFound(typed[0]) {
+		return typed[0]
+	}
+
+	messages := collectErrorMessages(len(items), func(index int) string {
 		return items[index].Error
 	})
-	if len(errors) == 0 {
-		return fmt.Errorf("all selected manifests failed")
+	message := "all selected manifests failed"
+	if len(messages) > 0 {
+		message += ": " + strings.Join(messages, "; ")
 	}
-	return fmt.Errorf("all selected manifests failed: %s", strings.Join(errors, "; "))
+	return &selectedManifestsFailedError{message: message, causes: typed}
+}
+
+type selectedManifestsFailedError struct {
+	message string
+	causes  []error
+}
+
+func (e *selectedManifestsFailedError) Error() string {
+	return e.message
+}
+
+func (e *selectedManifestsFailedError) Unwrap() []error {
+	return e.causes
 }
 
 func collectErrorMessages(limit int, message func(index int) string) []string {
@@ -1190,6 +1295,14 @@ func mergeCoverage(left, right Coverage, initialized bool) Coverage {
 
 func diagnosticForError(scope, subject string, err error) Diagnostic {
 	diagnostic := Diagnostic{Scope: scope, Subject: subject, Message: err.Error()}
+	if IsUnsupportedManifest(err) {
+		diagnostic.Code = "manifest_unsupported"
+		return diagnostic
+	}
+	if IsPlatformNotFound(err) {
+		diagnostic.Code = "platform_not_found"
+		return diagnostic
+	}
 	if integrityErr, ok := manifest.AsIntegrityError(err); ok {
 		diagnostic.Code = string(integrityErr.Kind)
 		return diagnostic

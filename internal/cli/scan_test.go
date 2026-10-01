@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
@@ -334,6 +335,25 @@ func TestScanCommandRejectsInvalidScopeFlags(t *testing.T) {
 				t.Fatalf("Execute() err = %q, want validation message", err.Error())
 			}
 		})
+	}
+}
+
+func TestCanAcceptPartialAcceptsUnsupportedManifestsButNotIntegrityFailures(t *testing.T) {
+	result := jobs.Result{ResultSchemaVersion: 1, CompletedManifestCount: 1, FailedManifestCount: 1}
+	unsupported := &scanner.UnsupportedManifestError{
+		Digest:   "sha256:" + strings.Repeat("a", 64),
+		Platform: manifest.Platform{OS: "windows", Architecture: "amd64"},
+		Cause:    &layers.UnsupportedLayerError{Digest: "sha256:" + strings.Repeat("f", 64), MediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+	}
+	if !canAcceptPartial(context.Background(), result, unsupported) {
+		t.Fatal("canAcceptPartial(unsupported manifest) = false")
+	}
+	integrity := &manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch, Subject: "sha256:" + strings.Repeat("a", 64)}
+	if canAcceptPartial(context.Background(), result, integrity) {
+		t.Fatal("canAcceptPartial(integrity error) = true")
+	}
+	if canAcceptPartial(context.Background(), jobs.Result{ResultSchemaVersion: 1}, unsupported) {
+		t.Fatal("canAcceptPartial(no completed manifest) = true")
 	}
 }
 

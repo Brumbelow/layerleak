@@ -14,9 +14,33 @@ import (
 
 	"github.com/brumbelow/layerleak/v3/internal/detectors"
 	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
+
+func TestMustPreserveScanErrorLetsUnsupportedManifestsContinueTheSweep(t *testing.T) {
+	unsupported := &scanner.UnsupportedManifestError{
+		Digest: "sha256:" + strings.Repeat("a", 64),
+		Cause:  &layers.UnsupportedLayerError{Digest: "sha256:" + strings.Repeat("f", 64), MediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+	}
+	notFound := &scanner.PlatformNotFoundError{Selector: "linux/arm64", Actual: manifest.Platform{OS: "linux", Architecture: "amd64"}}
+	for _, err := range []error{unsupported, notFound} {
+		if mustPreserveScanError(err) {
+			t.Fatalf("mustPreserveScanError(%T) = true", err)
+		}
+	}
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		&manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch},
+	} {
+		if !mustPreserveScanError(err) {
+			t.Fatalf("mustPreserveScanError(%v) = false", err)
+		}
+	}
+}
 
 func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	configOneBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)

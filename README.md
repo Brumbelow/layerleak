@@ -106,10 +106,13 @@ layerleak scan public.ecr.aws/docker/library/alpine:3.20
 layerleak scan mcr.microsoft.com/hello-world:latest
 ```
 
-Choose one platform from a multi-platform index:
+Choose platforms from a multi-platform index. Without `--platform` every
+`linux` manifest is scanned and entries for other operating systems are
+reported as `platform_skipped` diagnostics instead of being downloaded:
 
 ```bash
 layerleak scan alpine:latest --platform linux/arm64
+layerleak scan golang:latest --platform linux
 ```
 
 Scanning every public tag is explicit because it can perform substantial work:
@@ -127,7 +130,7 @@ Useful scan flags:
 | Flag | Meaning |
 | --- | --- |
 | `--format summary|json` | Human summary or stable JSON result. |
-| `--platform os/arch[/variant]` | Restrict a multi-platform image. |
+| `--platform os[/arch[/variant]]` | Select platforms from a multi-platform image; omitted parts match anything and `linux/arm64/v8` is equivalent to `linux/arm64`. Defaults to every `linux` manifest. A single-manifest image that does not match fails with `platform_not_found`. |
 | `--all-tags` | Enumerate every public tag for a bare repository. |
 | `--allow-partial` | Accept usable incomplete coverage while preserving `status`, coverage, and diagnostics. |
 | `--progress auto|tty|plain|off` | Select interactive, log-safe, or disabled progress output. |

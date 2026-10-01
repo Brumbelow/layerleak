@@ -236,8 +236,8 @@ variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 | `LAYERLEAK_MAX_AUTH_RESPONSE_BYTES` | `1048576` | Maximum registry token response size; must be positive. |
 | `LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS` | empty | Comma-separated exact private registry `host[:port]` allowlist. |
 | `LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS` | empty | Comma-separated exact private auth `host[:port]` allowlist. |
-| `LAYERLEAK_REGISTRY_BASE_URL` | empty | Advanced registry endpoint override. |
-| `LAYERLEAK_REGISTRY_AUTH_URL` | empty | Advanced auth endpoint override. |
+| `LAYERLEAK_REGISTRY_BASE_URL` | empty | Registry endpoint override for a pull-through mirror or alternate registry; validated at startup. Use `HTTPS_PROXY` for forward proxies. |
+| `LAYERLEAK_REGISTRY_AUTH_URL` | empty | Token endpoint override matching the registry override; validated at startup. |
 
 Private destination allowlists are an explicit trust decision. Entries accept
 an exact DNS hostname or IPv4 address, optionally with a port, or bracketed

@@ -159,24 +159,49 @@
     });
   }
 
+  function selectTable(tableName) {
+    if (!state.complete || state.activeTable === tableName) {
+      return;
+    }
+    state.activeTable = tableName;
+    renderTabs();
+    renderTable(tableName);
+  }
+
   function buildTabs() {
     tabsEl.innerHTML = "";
-    state.data.table_order.forEach((tableName) => {
+    state.data.table_order.forEach((tableName, index) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "tab-button";
+      button.id = `demo-tab-${index}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", "false");
+      button.setAttribute("aria-controls", "demo-table-wrap");
+      button.tabIndex = -1;
       button.dataset.table = tableName;
       button.textContent = tableName;
       button.disabled = true;
-      button.addEventListener("click", () => {
-        if (!state.complete || state.activeTable === tableName) {
-          return;
-        }
-        state.activeTable = tableName;
-        renderTabs();
-        renderTable(tableName);
-      });
+      button.addEventListener("click", () => selectTable(tableName));
       tabsEl.appendChild(button);
+    });
+
+    // WAI-ARIA tabs pattern: arrow keys move between tabs, Home/End jump.
+    tabsEl.addEventListener("keydown", (event) => {
+      const tabs = Array.from(tabsEl.querySelectorAll(".tab-button")).filter((tab) => !tab.disabled);
+      const current = tabs.indexOf(document.activeElement);
+      if (current === -1 || tabs.length === 0) {
+        return;
+      }
+      let next = current;
+      if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      tabs[next].focus();
+      selectTable(tabs[next].dataset.table);
     });
   }
 
@@ -185,6 +210,10 @@
       const active = button.dataset.table === state.activeTable;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+      if (active) {
+        tableWrapEl.setAttribute("aria-labelledby", button.id);
+      }
     });
   }
 

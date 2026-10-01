@@ -1,11 +1,12 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;700&display=swap");
-
+/* System font stacks only: no third-party font requests leave the visitor's
+   browser, and the page renders without waiting on a network fetch. */
 :root {
+  color-scheme: light dark;
   --paper: #f4f5ef;
   --paper-strong: #ffffff;
   --ink: #17202a;
   --ink-soft: #526071;
-  --ink-muted: #6f7d8d;
+  --ink-muted: #566474;
   --line: rgba(23, 32, 42, 0.14);
   --line-strong: rgba(23, 32, 42, 0.22);
   --accent: #b84625;
@@ -39,7 +40,7 @@ body {
     linear-gradient(180deg, #fbfbf7 0%, var(--paper) 56%, #e7ece6 100%);
   background-size: 44px 44px, auto;
   color: var(--ink);
-  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+  font-family: system-ui, "Segoe UI", "Avenir Next", Helvetica, Arial, sans-serif;
   line-height: 1.6;
   min-height: 100vh;
 }
@@ -92,7 +93,7 @@ pre,
 .command-chip,
 .table-shell,
 .site-kicker {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .site-shell {
@@ -701,7 +702,7 @@ pre,
 .docs-status-strip span,
 .doc-heading span {
   display: block;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.76rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
@@ -734,7 +735,7 @@ pre,
   padding: 0.78rem 0.9rem;
   border: 1px solid rgba(23, 32, 42, 0.18);
   background: rgba(244, 245, 239, 0.9);
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.86rem;
   box-shadow: 7px 7px 0 rgba(11, 111, 99, 0.1);
 }
@@ -763,7 +764,7 @@ pre,
 .docs-status-strip strong {
   display: block;
   margin-top: 0.3rem;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.92rem;
   overflow-wrap: anywhere;
   color: var(--ink);
@@ -839,7 +840,7 @@ pre,
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   background: rgba(24, 34, 45, 0.04);
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.78rem;
   letter-spacing: 0.06em;
   color: var(--ink);
@@ -895,7 +896,7 @@ pre,
   border: 1px solid rgba(11, 111, 99, 0.22);
   border-radius: 4px;
   background: var(--signal-soft);
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.82rem;
   color: var(--ink);
 }
@@ -952,7 +953,7 @@ pre,
 }
 
 .api-list code {
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.92rem;
   color: var(--ink);
   background: transparent;
@@ -968,7 +969,7 @@ pre,
   min-width: 3.4rem;
   padding: 0.18rem 0.55rem;
   border-radius: 4px;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.72rem;
   letter-spacing: 0.06em;
   font-weight: 600;
@@ -1017,14 +1018,40 @@ pre,
   flex-wrap: wrap;
 }
 
-[data-reveal] {
-  opacity: 1;
-  transform: none;
-}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #11161c;
+    --paper-strong: #1a2129;
+    --ink: #e8edf2;
+    --ink-soft: #b7c2cd;
+    --ink-muted: #9aa7b4;
+    --line: rgba(232, 237, 242, 0.16);
+    --line-strong: rgba(232, 237, 242, 0.28);
+    --accent: #e8825f;
+    --accent-deep: #b84625;
+    --signal: #4fb8a8;
+    --signal-soft: rgba(79, 184, 168, 0.18);
+    --warn: #e0a24a;
+    --warn-soft: rgba(224, 162, 74, 0.18);
+    --focus: #4fb8a8;
+    --shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+  }
 
-[data-reveal].is-visible {
-  opacity: 1;
-  transform: none;
+  body {
+    background:
+      linear-gradient(90deg, rgba(232, 237, 242, 0.04) 1px, transparent 1px),
+      linear-gradient(180deg, #0e1319 0%, var(--paper) 56%, #0b0f14 100%);
+    background-size: 44px 44px, auto;
+  }
+
+  .skip-link {
+    background: var(--paper-strong);
+    color: var(--ink);
+  }
+
+  .table-wrap th {
+    background: #222b35;
+  }
 }
 
 @media (max-width: 1024px) {

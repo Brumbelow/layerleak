@@ -90,16 +90,16 @@ test("replay advances frames, gates tabs, formats cells and resets on replay", a
   // eslint-disable-next-line xss/no-mixed-html -- Cell text must retain the fixture's literal markup characters.
   assert.deepEqual(await page.locator("tbody td").allTextContents(), ["—", "—", "—", "false", "0", '{"ok":true}', "<em>plain table text</em>"]);
   assert.equal(await page.locator("tbody em").count(), 0);
-  await page.getByRole("button", { name: "other", exact: true }).click();
+  await page.getByRole("tab", { name: "other", exact: true }).click();
   assert.deepEqual(await page.locator("tbody td").allTextContents(), ["second", "third"]);
   assert.equal(await page.locator("#table-meta").textContent(), "Other rows · 2 rows");
-  assert.equal(await page.getByRole("button", { name: "other", exact: true }).getAttribute("aria-selected"), "true");
+  assert.equal(await page.getByRole("tab", { name: "other", exact: true }).getAttribute("aria-selected"), "true");
   await page.locator("#demo-replay").click();
   assert.equal(await page.locator("#demo-terminal").textContent(), "first transcript");
   assert.equal(await page.locator("#demo-tabs button").first().isDisabled(), true);
   assert.equal(await page.locator("tbody").count(), 0);
   await page.clock.runFor(300);
-  assert.equal(await page.getByRole("button", { name: "sample", exact: true }).getAttribute("aria-selected"), "true");
+  assert.equal(await page.getByRole("tab", { name: "sample", exact: true }).getAttribute("aria-selected"), "true");
 });
 
 test("missing table and row fields do not resolve inherited object properties", async (t) => {
@@ -110,7 +110,7 @@ test("missing table and row fields do not resolve inherited object properties", 
   const page = await openDemo(t, data);
   await completeReplay(page);
   assert.deepEqual(await page.locator("tbody td").allTextContents(), ["own fixture field", "—", "—"]);
-  await page.getByRole("button", { name: "constructor", exact: true }).click();
+  await page.getByRole("tab", { name: "constructor", exact: true }).click();
   assert.equal(await page.locator("#table-meta").textContent(), "Missing table fixture");
   assert.equal(await page.locator("#demo-table-wrap").textContent(), "Unknown table.");
 });
@@ -130,7 +130,7 @@ test("the checked-in fixture completes and renders its initial table", async (t)
   await page.clock.runFor(8000);
   assert.equal(await page.locator("#demo-replay").isDisabled(), false);
   assert.equal(await page.locator("#demo-status").textContent(), "Status: showing final summary");
-  assert.equal(await page.getByRole("button", { name: "repositories", exact: true }).getAttribute("aria-selected"), "true");
+  assert.equal(await page.getByRole("tab", { name: "repositories", exact: true }).getAttribute("aria-selected"), "true");
   assert.equal(await page.locator("tbody tr").count(), 1);
   assert.equal(await page.locator("#demo-tabs button:disabled").count(), 0);
 });

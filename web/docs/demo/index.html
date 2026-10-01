@@ -30,10 +30,10 @@
       </header>
 
       <main class="demo-layout">
-        <section class="demo-panel" data-reveal>
+        <section class="demo-panel">
           <div class="section-heading">
             <span>Browser replay</span>
-            <h2>One fixed scan, one synthetic local machine snapshot.</h2>
+            <h1>One fixed scan, one synthetic local machine snapshot.</h1>
           </div>
           <div class="simulation-banner">
             <span class="sim-label">Simulated demo</span>
@@ -59,17 +59,17 @@
           </p>
         </section>
 
-        <section class="terminal-shell" data-reveal>
+        <section class="terminal-shell">
           <div class="terminal-topbar">
             <div class="terminal-dots" aria-hidden="true">
               <span></span><span></span><span></span>
             </div>
-            <div class="terminal-status" id="demo-status"><strong>Status:</strong> waiting to replay</div>
+            <div class="terminal-status" id="demo-status" role="status" aria-live="polite" aria-atomic="true"><strong>Status:</strong> waiting to replay</div>
           </div>
-          <pre class="terminal-screen" id="demo-terminal"></pre>
+          <pre class="terminal-screen" id="demo-terminal" aria-label="Replayed scan transcript" aria-live="off" tabindex="0"></pre>
         </section>
 
-        <section class="demo-panel" data-reveal>
+        <section class="demo-panel">
           <div class="section-heading">
             <span>Local snapshot</span>
             <h2>Fake Postgres rows that emulate the local machine setup.</h2>
@@ -82,16 +82,16 @@
           </div>
         </section>
 
-        <section class="table-shell" data-reveal>
+        <section class="table-shell">
           <div class="table-topbar">
             <div>
               <div class="metric-label">Simulated local database</div>
               <h2 style="margin: 0.25rem 0 0">layerleak tables after the replayed run</h2>
             </div>
-            <div class="metric-label" id="table-meta">Run the replay to load rows</div>
+            <div class="metric-label" id="table-meta" aria-live="polite">Run the replay to load rows</div>
           </div>
           <div class="tab-row" id="demo-tabs" role="tablist" aria-label="Database tables"></div>
-          <div class="table-wrap" id="demo-table-wrap">
+          <div class="table-wrap" id="demo-table-wrap" role="tabpanel" aria-label="Selected table">
             <div class="table-empty">Run the simulated scan to load the fake Postgres snapshot.</div>
           </div>
         </section>

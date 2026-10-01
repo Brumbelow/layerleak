@@ -302,6 +302,7 @@ apply. Hosts matched by `NO_PROXY` are connected directly with address pinning.
 | `LAYERLEAK_API_READINESS_CACHE_TTL` | `5s` | How long a `/readyz` result (success or failure) is reused before the ping and schema-contract validation run again; concurrent probes share one check. `0s` validates on every probe. |
 | `LAYERLEAK_API_BEARER_TOKENS` | empty | Opt-in authentication: comma-separated bearer tokens, each at least 32 printable ASCII characters. When set, every `/api/` request needs `Authorization: Bearer <token>` (401 `unauthorized` otherwise); `/health`, `/livez` and `/readyz` stay open. Tokens are kept only as SHA-256 digests and compared in constant time. Mutually exclusive with `LAYERLEAK_API_BEARER_TOKENS_FILE`. |
 | `LAYERLEAK_API_BEARER_TOKENS_FILE` | empty | Path of a file with one bearer token per line (blank lines ignored, at most 64 KiB), read once at startup; the same rules as `LAYERLEAK_API_BEARER_TOKENS` apply. Use it to mount tokens as a secret instead of an environment variable. |
+| `LAYERLEAK_API_METRICS_ADDR` | empty | Optional `host:port` for a second listener that serves Prometheus text-format metrics at `GET /metrics` (request counts and durations by route pattern, scan outcomes and error codes, in-flight scans, process start time). Empty disables it; it must differ from `LAYERLEAK_API_ADDR`, because metrics are never served on the API port. Bind it to a private interface: the endpoint is unauthenticated. |
 | `LAYERLEAK_DATABASE_URL` | empty | PostgreSQL connection URL. The password may be left out of the URL and supplied through `PGPASSWORD` or `PGPASSFILE`; the driver fills any field the URL omits from the standard `PG*` variables. |
 | `LAYERLEAK_DATABASE_MAX_OPEN_CONNS` | `10` | Open connection cap; must be positive. |
 | `LAYERLEAK_DATABASE_MAX_IDLE_CONNS` | `5` | Idle connection cap. |
@@ -513,6 +514,16 @@ response, pagination, and error schemas.
 
 The API logs one JSON record per request (method, route pattern, status,
 bytes, duration, request id, remote address; never the path, query or body).
+Setting `LAYERLEAK_API_METRICS_ADDR` adds a separate listener that serves
+Prometheus text-format metrics at `GET /metrics`, with the same timeouts and
+drain as the API: `layerleak_api_requests_total{route,status_class}`,
+`layerleak_api_request_duration_seconds` (fixed buckets from 5 ms to 30 min, by
+`route`), `layerleak_scans_total{outcome}`, `layerleak_scan_errors_total{code}`,
+`layerleak_scans_in_flight`, `layerleak_process_start_time_seconds` and
+`layerleak_build_info{version}`. Label values are mux route patterns, status
+classes and error codes only; no path, reference or request body ever becomes
+a label. The metrics port is unauthenticated and is never the API port, so
+bind it to a private interface.
 On `SIGTERM` or `SIGINT` it drains: `/readyz` answers 503 and new scans are
 refused for `LAYERLEAK_API_PRESTOP_DELAY` while in-flight requests continue,
 then in-flight scans are cancelled with 503 `server_shutting_down` and the

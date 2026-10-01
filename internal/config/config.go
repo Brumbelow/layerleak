@@ -28,7 +28,10 @@ type Config struct {
 	// APIBearerTokenDigests holds the SHA-256 digest of every accepted API
 	// bearer token (LAYERLEAK_API_BEARER_TOKENS or _FILE). Nil disables
 	// authentication; the plaintext tokens are never retained.
-	APIBearerTokenDigests       [][]byte
+	APIBearerTokenDigests [][]byte
+	// APIMetricsAddr is the optional host:port of the Prometheus /metrics
+	// listener (LAYERLEAK_API_METRICS_ADDR). Empty disables it.
+	APIMetricsAddr              string
 	RegistryBaseURL             string
 	RegistryAuthURL             string
 	AllowedPrivateRegistryHosts []string
@@ -130,6 +133,13 @@ func Load() (Config, error) {
 	apiBearerTokenDigests, err := bearerTokenDigestsFromEnv("LAYERLEAK_API_BEARER_TOKENS", "LAYERLEAK_API_BEARER_TOKENS_FILE")
 	if err != nil {
 		return Config{}, err
+	}
+	apiMetricsAddr, err := optionalListenAddrFromEnv("LAYERLEAK_API_METRICS_ADDR")
+	if err != nil {
+		return Config{}, err
+	}
+	if apiMetricsAddr != "" && apiMetricsAddr == apiAddr {
+		return Config{}, fmt.Errorf("LAYERLEAK_API_METRICS_ADDR must differ from LAYERLEAK_API_ADDR; metrics are never served on the API port")
 	}
 	timeout, err := durationFromEnv("LAYERLEAK_HTTP_TIMEOUT", 30*time.Second)
 	if err != nil {
@@ -274,6 +284,7 @@ func Load() (Config, error) {
 		APIReadinessTimeout:         apiReadinessTimeout,
 		APIReadinessCacheTTL:        apiReadinessCacheTTL,
 		APIBearerTokenDigests:       apiBearerTokenDigests,
+		APIMetricsAddr:              apiMetricsAddr,
 		RegistryBaseURL:             registryBaseURL,
 		RegistryAuthURL:             registryAuthURL,
 		AllowedPrivateRegistryHosts: allowedPrivateRegistryHosts,
@@ -358,7 +369,20 @@ func endpointURLFromEnv(key string) (string, error) {
 // listenAddrFromEnv validates a host:port listen address at load time so a
 // malformed value fails before the database is opened.
 func listenAddrFromEnv(key, fallback string) (string, error) {
-	value := envOrDefault(key, fallback)
+	return validateListenAddr(key, envOrDefault(key, fallback))
+}
+
+// optionalListenAddrFromEnv is listenAddrFromEnv for a listener that is off
+// when the variable is blank.
+func optionalListenAddrFromEnv(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", nil
+	}
+	return validateListenAddr(key, value)
+}
+
+func validateListenAddr(key, value string) (string, error) {
 	host, port, err := net.SplitHostPort(value)
 	if err != nil {
 		return "", fmt.Errorf("parse %s: %w", key, err)

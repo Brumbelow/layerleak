@@ -24,7 +24,12 @@ const defaultShutdownTimeout = 30 * time.Second
 // when the serve context is cancelled.
 type ServerOptions struct {
 	// Addr is the host:port ListenAndServe binds.
-	Addr              string
+	Addr string
+	// MetricsAddr, when set, is a second host:port on which ListenAndServe
+	// serves GET /metrics (Prometheus text format) with the same timeouts
+	// and drain. Empty disables the metrics listener. It is never the API
+	// address: metrics are not exposed on the API port.
+	MetricsAddr       string
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
 	IdleTimeout       time.Duration
@@ -62,11 +67,12 @@ func (options ServerOptions) withDefaults() ServerOptions {
 // abort with 503 server_shutting_down, and http.Server.Shutdown waits for
 // handlers to finish.
 type Server struct {
-	handler    *Handler
-	httpServer *http.Server
-	options    ServerOptions
-	logger     *slog.Logger
-	cancelBase context.CancelFunc
+	handler       *Handler
+	httpServer    *http.Server
+	metricsServer *http.Server
+	options       ServerOptions
+	logger        *slog.Logger
+	cancelBase    context.CancelFunc
 }
 
 // NewServer builds the API server from its dependencies. The scanner serves
@@ -86,28 +92,56 @@ func NewServer(scanner scanExecutor, store storage.ReadStore, options ServerOpti
 		// outside the middleware) join the JSON log stream.
 		ErrorLog: slog.NewLogLogger(options.Logger.Handler(), slog.LevelError),
 	}
+	metricsServer := &http.Server{
+		Addr:              options.MetricsAddr,
+		Handler:           handler.MetricsHandler(),
+		ReadHeaderTimeout: options.ReadHeaderTimeout,
+		ReadTimeout:       options.ReadTimeout,
+		IdleTimeout:       options.IdleTimeout,
+		ErrorLog:          slog.NewLogLogger(options.Logger.Handler(), slog.LevelError),
+	}
 	return &Server{
-		handler:    handler,
-		httpServer: httpServer,
-		options:    options,
-		logger:     options.Logger,
-		cancelBase: cancelBase,
+		handler:       handler,
+		httpServer:    httpServer,
+		metricsServer: metricsServer,
+		options:       options,
+		logger:        options.Logger,
+		cancelBase:    cancelBase,
 	}
 }
 
-// ListenAndServe binds Addr and serves until ctx is cancelled, then drains.
+// ListenAndServe binds Addr (and MetricsAddr when configured) and serves
+// until ctx is cancelled, then drains.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.options.Addr)
 	if err != nil {
 		return fmt.Errorf("listen on api address: %w", err)
 	}
-	return s.Serve(ctx, listener)
+	var metricsListener net.Listener
+	if strings.TrimSpace(s.options.MetricsAddr) != "" {
+		metricsListener, err = net.Listen("tcp", s.options.MetricsAddr)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("listen on metrics address: %w", err)
+		}
+	}
+	return s.ServeListeners(ctx, listener, metricsListener)
 }
 
-// Serve accepts connections on listener until ctx is cancelled and then runs
-// the drain sequence. It returns nil after a clean shutdown and the serve or
-// shutdown error otherwise. Shutdown closes the listener.
+// Serve accepts API connections on listener until ctx is cancelled and then
+// runs the drain sequence, without a metrics listener.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+	return s.ServeListeners(ctx, listener, nil)
+}
+
+// ServeListeners serves the API on listener and, when metricsListener is not
+// nil, GET /metrics on it, until ctx is cancelled. It then drains: readiness
+// flips, the pre-stop delay elapses, in-flight contexts are cancelled and both
+// servers shut down within ShutdownTimeout. Metrics stay scrapeable through
+// the drain. It returns nil after a clean shutdown and the API serve or
+// shutdown error otherwise; a metrics listener that stops early is logged and
+// the API keeps serving. Shutdown closes both listeners.
+func (s *Server) ServeListeners(ctx context.Context, listener, metricsListener net.Listener) error {
 	served := make(chan error, 1)
 	go func() {
 		err := s.httpServer.Serve(listener)
@@ -116,10 +150,22 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		}
 		served <- err
 	}()
+	metricsDone := make(chan struct{})
+	if metricsListener != nil {
+		go func() {
+			defer close(metricsDone)
+			if err := s.metricsServer.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.logger.Error("metrics listener stopped", "error_type", fmt.Sprintf("%T", err))
+			}
+		}()
+	} else {
+		close(metricsDone)
+	}
 
 	select {
 	case err := <-served:
 		s.cancelBase()
+		s.shutdownMetrics(metricsDone)
 		return serveError(err)
 	case <-ctx.Done():
 	}
@@ -136,6 +182,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		case err := <-served:
 			timer.Stop()
 			s.cancelBase()
+			s.shutdownMetrics(metricsDone)
 			return serveError(err)
 		}
 	}
@@ -144,13 +191,27 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.options.ShutdownTimeout)
 	defer cancel()
 	if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		s.shutdownMetrics(metricsDone)
 		return fmt.Errorf("shutdown api server: %w", err)
 	}
 	if err := serveError(<-served); err != nil {
+		s.shutdownMetrics(metricsDone)
 		return err
 	}
+	s.shutdownMetrics(metricsDone)
 	s.logger.Info("api stopped")
 	return nil
+}
+
+// shutdownMetrics stops the metrics listener (a scrape is a single quick
+// response, so a short bound suffices) and waits for its serve loop to end.
+func (s *Server) shutdownMetrics(done <-chan struct{}) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.metricsServer.Shutdown(shutdownCtx); err != nil {
+		_ = s.metricsServer.Close()
+	}
+	<-done
 }
 
 func serveError(err error) error {
@@ -198,6 +259,7 @@ func Run() error {
 
 	server := NewServer(scanservice.New(cfg, store), store, ServerOptions{
 		Addr:              cfg.APIAddr,
+		MetricsAddr:       cfg.APIMetricsAddr,
 		ReadHeaderTimeout: cfg.APIReadHeaderTimeout,
 		ReadTimeout:       cfg.APIReadTimeout,
 		IdleTimeout:       cfg.APIIdleTimeout,

@@ -27,6 +27,9 @@ services:
       # Opt-in bearer tokens; prefer a mounted secret file over inline values.
       LAYERLEAK_API_BEARER_TOKENS: "${LAYERLEAK_API_BEARER_TOKENS:-}"
       LAYERLEAK_API_BEARER_TOKENS_FILE: "${LAYERLEAK_API_BEARER_TOKENS_FILE:-}"
+      # Optional Prometheus listener, e.g. 0.0.0.0:9090; add a ports: entry to
+      # publish it, preferably on a private interface.
+      LAYERLEAK_API_METRICS_ADDR: "${LAYERLEAK_API_METRICS_ADDR:-}"
       LAYERLEAK_API_IDLE_TIMEOUT: ${LAYERLEAK_API_IDLE_TIMEOUT:-60s}
       LAYERLEAK_API_MAX_CONCURRENT_SCANS: ${LAYERLEAK_API_MAX_CONCURRENT_SCANS:-1}
       LAYERLEAK_API_MAX_REQUEST_BYTES: ${LAYERLEAK_API_MAX_REQUEST_BYTES:-16384}

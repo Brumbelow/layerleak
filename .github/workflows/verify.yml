@@ -88,7 +88,7 @@ jobs:
           set -euo pipefail
           # Each Fuzz function runs for a short, bounded time beyond its seed corpus.
           while IFS=: read -r file func; do
-            go test "./$(dirname "${file}")" -run '^$' -fuzz "^${func}\$" -fuzztime 20s
+            go test "./$(dirname "${file}")" -run '^$' -fuzz "^${func}\$" -fuzztime 30s -fuzzminimizetime 5s
           done < <(grep -rEo --include='*_test.go' '^func Fuzz[A-Za-z0-9_]+' . | sed -E 's#^\./([^:]+):func (Fuzz[A-Za-z0-9_]+)$#\1:\2#')
 
       - name: Install and exercise CLI

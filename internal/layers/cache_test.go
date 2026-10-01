@@ -297,6 +297,66 @@ func TestReplayFromCacheRefusesHardlinksIntoCachedText(t *testing.T) {
 	}
 }
 
+// TestReplayDoesNotRecordHardlinksWithoutTarget covers hardlinks whose target
+// is not a regular file of the stack they were recorded in: a missing target
+// and a directory target both resolve against the layers below in another
+// stack, so the layer must not be cached. As defence in depth, a cached
+// layer that resolves a hardlink to clean cached content of another layer
+// refuses to serve the manifest.
+func TestReplayDoesNotRecordHardlinksWithoutTarget(t *testing.T) {
+	link := gzipLayer(t, []tarEntry{{name: ".netrc", typeflag: tar.TypeLink, linkname: "app/notes.txt"}})
+	options := ReplayOptions{MaxFileBytes: 1 << 20, MaxRetainedBytes: 1 << 30}
+	for _, tc := range []struct {
+		name  string
+		lower []tarEntry
+	}{
+		{name: "missing target", lower: []tarEntry{{name: "other.txt", body: "plain\n"}}},
+		{name: "directory target", lower: []tarEntry{{name: "app/notes.txt/", typeflag: tar.TypeDir}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withCache := options
+			withCache.Cache = NewLayerCache(1 << 20)
+			opener, descriptors := newCountingOpener([]testLayer{
+				{digest: "sha256:lower", body: gzipLayer(t, tc.lower)},
+				{digest: "sha256:link", body: link},
+			})
+			result, err := Replay(context.Background(), descriptors, withCache, opener)
+			if err != nil {
+				t.Fatalf("Replay() error = %v", err)
+			}
+			for _, record := range result.LayerRecords {
+				if record.Digest == "sha256:link" {
+					t.Fatal("a layer with a hardlink that has no regular-file target was recorded for the cache")
+				}
+			}
+		})
+	}
+
+	// A record of the hardlink layer that slipped into the cache must not
+	// resolve the hardlink to the clean cached file of another layer.
+	cache := NewLayerCache(1 << 20)
+	withCache := options
+	withCache.Cache = cache
+	opener, lowerOnly := newCountingOpener([]testLayer{{digest: "sha256:lower", body: gzipLayer(t, []tarEntry{{name: "app/notes.txt", body: "plain\n"}})}})
+	recorded, err := Replay(context.Background(), lowerOnly, withCache, opener)
+	if err != nil || len(recorded.LayerRecords) != 1 {
+		t.Fatalf("Replay() = %v, records %d", err, len(recorded.LayerRecords))
+	}
+	cache.Store(recorded.LayerRecords[0])
+	linkDescriptor := manifest.Descriptor{Digest: "sha256:link", MediaType: manifest.MediaTypeDockerSchema2LayerGzip}
+	forced := newLayerRecord(linkDescriptor)
+	forced.addEntry(cachedEntry{name: ".netrc", linkname: "app/notes.txt", typeflag: tar.TypeLink, physicalHeader: 512, physicalBody: 512})
+	forced.physicalEnd = 1536
+	if !cache.Store(forced) {
+		t.Fatal("Store(forced) = false")
+	}
+	opener, both := newCountingOpener([]testLayer{{digest: "sha256:lower"}, {digest: "sha256:link", body: link}})
+	_, err = Replay(context.Background(), both, withCache, opener)
+	if !errors.Is(err, ErrCacheUnusable) {
+		t.Fatalf("Replay() error = %v, want ErrCacheUnusable", err)
+	}
+}
+
 func TestReplayDoesNotRecordLayersWithNestedArchives(t *testing.T) {
 	archive := zipArchive(t, []zipEntry{{name: "inner.txt", body: "x"}})
 	testLayers := []testLayer{

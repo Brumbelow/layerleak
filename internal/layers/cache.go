@@ -28,9 +28,10 @@ var ErrCacheUnusable = errors.New("layer cache cannot serve this manifest: conte
 // A cached layer holds metadata only: entry names, types, sizes, content
 // classes and the physical stream positions that make limit enforcement
 // reproducible. It never holds file content, so no secret bytes live in it;
-// a layer with any finding, with nested archives or with hardlinks into
-// other layers is never cached. Replaying from the cache is byte-identical
-// to replaying from the registry.
+// a layer with any finding, with nested archives or with a hardlink whose
+// target is not a file of the same layer (another layer's file, a directory
+// or nothing at all) is never cached. Replaying from the cache is
+// byte-identical to replaying from the registry.
 type LayerCache struct {
 	mu        sync.Mutex
 	maxBytes  int64

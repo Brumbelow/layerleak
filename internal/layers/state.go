@@ -518,6 +518,10 @@ func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor
 			}
 			target, ok := s.final[linkTarget]
 			if !ok {
+				// Without a target here (missing, or a directory) the hardlink
+				// resolves against whatever the layers below hold in another
+				// stack, so this layer's outcome is not a property of the layer.
+				source.record().markUncacheable()
 				// A hardlink to a directory is invalid but harmless: runtimes
 				// refuse it without failing the layer, so it is ignored rather
 				// than counted as an unsafe entry that forces partial coverage.
@@ -526,10 +530,12 @@ func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor
 				}
 				continue
 			}
-			if target.KnownClean && !source.fromCache() {
+			if target.KnownClean && (!source.fromCache() || target.LayerDigest != descriptor.Digest) {
 				// Detectors judge content by path, so the hardlink's own path
 				// must be scanned with the target's content, which a cached
-				// layer does not hold: this manifest needs the real stream.
+				// layer does not hold: this manifest needs the real stream. A
+				// cached layer may only resolve a hardlink to clean content of
+				// its own layer, whose scan under this path was recorded.
 				return ErrCacheUnusable
 			}
 			if target.LayerDigest != descriptor.Digest {

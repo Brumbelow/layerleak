@@ -38,6 +38,32 @@ class DocumentationValidationTests(unittest.TestCase):
 
         self.assert_invalid("scan-completed.json")
 
+    def test_accepts_stored_version_1_result_without_v2_only_fields(self):
+        # GET /api/v1/scans/{id} returns result_json as it was stored, so a
+        # scan persisted by 2.x (result_schema_version 1, no scanned_at or
+        # scanner, zero counters omitted) must still satisfy ScanResult.
+        spec = validate_docs.load_yaml(self.root / "web" / "docs" / "openapi.yaml")
+        schema = validate_docs._response_schema(
+            spec, "/api/v1/scans/{id}", "get", "200", "application/json"
+        )
+        detail = json.loads(
+            (self.root / "web" / "testdata" / "api" / "scan-detail.json").read_text()
+        )
+        result = detail["scan"]["result"]
+        result["result_schema_version"] = 1
+        for field in (
+            "scanned_at",
+            "scanner",
+            "tags_enumerated",
+            "tags_resolved",
+            "tags_failed",
+            "suppressed_findings_count",
+            "suppressed_unique_fingerprints",
+        ):
+            result.pop(field, None)
+
+        validate_docs._validate_instance(spec, schema, detail, "stored v1 result")
+
     def test_rejects_openapi_version_that_differs_from_changelog_release(self):
         spec_path = self.root / "web" / "docs" / "openapi.yaml"
         spec = validate_docs.load_yaml(spec_path)

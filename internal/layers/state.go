@@ -198,6 +198,8 @@ type State struct {
 	entries           int
 	coverage          Coverage
 	nestedSkips       []NestedSkip
+	// journal records the mutations of the layer being applied, nil between layers.
+	journal *layerJournal
 }
 
 func NewState() *State {
@@ -293,34 +295,23 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		options.MaxTotalBytes,
 	)
 	tarReader := tar.NewReader(limitedReader)
-	base := s
-	working := &State{
-		final:             cloneArtifactMap(s.final),
-		deleted:           append([]Artifact(nil), s.deleted...),
-		dirs:              cloneDirectoryMap(s.dirs),
-		directoryChildren: clonePathIndex(s.directoryChildren),
-		artifactChildren:  clonePathIndex(s.artifactChildren),
-		entries:           s.entries,
-		coverage:          s.coverage,
-		nestedSkips:       s.nestedSkips,
-	}
 	retention := retentionBudget{maxBytes: options.MaxRetainedBytes}
 	nested := newNestedExpander(descriptor.Digest, options, s.coverage)
+	journal := s.beginLayer()
 	committed := false
 	defer func() {
 		if committed {
 			return
 		}
-		// Nested expansion counters and skips are observations like the file
-		// counters: a failed layer keeps them.
-		nested.flush(working)
-		s.nestedSkips = working.nestedSkips
-		observed := working.coverage
-		observed.ExpandedBytes = expandedBytesAfterLayer(s.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
-		observed.RetainedBytes = s.coverage.RetainedBytes
-		s.coverage = observed
+		// A failed layer leaves the state exactly as it was before it: every
+		// mutation is undone in reverse order and the retained-byte counter is
+		// restored. The file, entry and nested-expansion counters are
+		// observations of the failed layer and are kept.
+		nested.flush(s)
+		s.rollback(journal)
+		s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
 	}()
-	currentPaths := make(map[string]struct{})
+	currentPaths := journal.currentPaths
 	whiteouts := make([]string, 0)
 	opaqueDirectories := make([]string, 0)
 	entryCount := 0
@@ -362,7 +353,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			if !errors.Is(err, errRootEntry) {
 				// A `./` or `.` entry names the layer root itself (tar -C rootfs -c .
 				// always emits one); it carries nothing to record and is not unsafe.
-				working.coverage.EntriesSkippedUnsafe++
+				s.coverage.EntriesSkippedUnsafe++
 			}
 			if err := drainEntry(entryReader); err != nil {
 				return err
@@ -370,7 +361,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			continue
 		}
 		if err := validateLinkname(header.Linkname); err != nil {
-			working.coverage.EntriesSkippedUnsafe++
+			s.coverage.EntriesSkippedUnsafe++
 			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
@@ -379,7 +370,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 
 		if isOpaqueWhiteout(entryPath) {
 			directory := path.Dir(entryPath)
-			if err := retention.retainTemporary(working, retainedSliceStringBytes(directory)); err != nil {
+			if err := retention.retainTemporary(s, retainedSliceStringBytes(directory)); err != nil {
 				return err
 			}
 			opaqueDirectories = append(opaqueDirectories, directory)
@@ -391,9 +382,9 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		if isWhiteout(entryPath) {
 			target, targetErr := whiteoutTarget(entryPath)
 			if targetErr != nil {
-				working.coverage.EntriesSkippedUnsafe++
+				s.coverage.EntriesSkippedUnsafe++
 			} else {
-				if err := retention.retainTemporary(working, retainedSliceStringBytes(target)); err != nil {
+				if err := retention.retainTemporary(s, retainedSliceStringBytes(target)); err != nil {
 					return err
 				}
 				whiteouts = append(whiteouts, target)
@@ -409,23 +400,23 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
-			if err := working.preparePath(entryPath, true, descriptor.Digest, &retention); err != nil {
+			if err := s.preparePath(entryPath, true, descriptor.Digest, &retention); err != nil {
 				return err
 			}
-			if err := working.addDirectory(entryPath, &retention); err != nil {
+			if err := s.addDirectory(entryPath, &retention); err != nil {
 				return err
 			}
-			if err := retainCurrentPath(working, currentPaths, entryPath, &retention); err != nil {
+			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
 			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
-			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
+			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
 				return err
 			}
-			if err := working.put(Artifact{
+			if err := s.put(Artifact{
 				Path:         entryPath,
 				LayerDigest:  descriptor.Digest,
 				Type:         ArtifactTypeSymlink,
@@ -435,7 +426,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			}, &retention); err != nil {
 				return err
 			}
-			if err := retainCurrentPath(working, currentPaths, entryPath, &retention); err != nil {
+			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
 				return err
 			}
 		case tar.TypeLink:
@@ -445,17 +436,17 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			linkTarget, err := normalizePath(header.Linkname)
 			if err != nil {
 				if !errors.Is(err, errRootEntry) {
-					working.coverage.EntriesSkippedUnsafe++
+					s.coverage.EntriesSkippedUnsafe++
 				}
 				continue
 			}
-			target, ok := working.final[linkTarget]
+			target, ok := s.final[linkTarget]
 			if !ok {
 				// A hardlink to a directory is invalid but harmless: runtimes
 				// refuse it without failing the layer, so it is ignored rather
 				// than counted as an unsafe entry that forces partial coverage.
-				if _, isDirectory := working.dirs[linkTarget]; !isDirectory {
-					working.coverage.EntriesSkippedUnsafe++
+				if _, isDirectory := s.dirs[linkTarget]; !isDirectory {
+					s.coverage.EntriesSkippedUnsafe++
 				}
 				continue
 			}
@@ -470,38 +461,38 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			if isFile {
 				linked.Type = ArtifactTypeHardlink
 				linked.Linkname = linkTarget
-				working.coverage.FilesSeen++
+				s.coverage.FilesSeen++
 			}
-			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
+			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
 				return err
 			}
-			if err := working.put(linked, &retention); err != nil {
+			if err := s.put(linked, &retention); err != nil {
 				return err
 			}
-			if err := retainCurrentPath(working, currentPaths, entryPath, &retention); err != nil {
+			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
 				return err
 			}
 			if !isFile {
 				continue
 			}
 			if target.Scannable {
-				working.coverage.FilesScanned++
+				s.coverage.FilesScanned++
 				if target.SourceEncoding != "" {
-					working.coverage.FilesTranscodedUTF16++
+					s.coverage.FilesTranscodedUTF16++
 				}
 			} else if target.ContentClass == ContentClassOversize {
-				working.coverage.FilesSkippedOversize++
+				s.coverage.FilesSkippedOversize++
 			} else {
-				working.coverage.FilesExcludedBinary++
+				s.coverage.FilesExcludedBinary++
 			}
 		case tar.TypeReg, tar.TypeGNUSparse, tar.TypeCont:
 			// archive/tar normalizes the legacy TypeRegA flag to TypeReg but keeps
 			// the old-GNU sparse ('S') and GNU contiguous ('7') flags on regular
 			// files; the entry reader already presents their logical content.
-			working.coverage.FilesSeen++
+			s.coverage.FilesSeen++
 			if header.Size <= options.MaxFileBytes {
 				prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.Size
-				if err := retention.ensure(working, prospective); err != nil {
+				if err := retention.ensure(s, prospective); err != nil {
 					return err
 				}
 			}
@@ -512,38 +503,38 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			if len(artifact.Nested) > 0 {
 				// Nested entries never fail a layer: when retaining them would
 				// exceed the retained-bytes limit they are dropped and reported.
-				if err := retention.ensure(working, retainedFinalArtifactBytes(artifact)); err != nil {
+				if err := retention.ensure(s, retainedFinalArtifactBytes(artifact)); err != nil {
 					nested.skip(entryPath, NestedSkipRetainedBytes, int64(len(artifact.Nested)), options.MaxRetainedBytes)
 					artifact.Nested = nil
 				}
 			}
-			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
+			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
 				return err
 			}
-			if err := working.put(artifact, &retention); err != nil {
+			if err := s.put(artifact, &retention); err != nil {
 				return err
 			}
-			if err := retainCurrentPath(working, currentPaths, entryPath, &retention); err != nil {
+			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
 				return err
 			}
 			if artifact.Scannable {
-				working.coverage.FilesScanned++
+				s.coverage.FilesScanned++
 				if artifact.SourceEncoding != "" {
-					working.coverage.FilesTranscodedUTF16++
+					s.coverage.FilesTranscodedUTF16++
 				}
 			} else if artifact.ContentClass == ContentClassOversize {
-				working.coverage.FilesSkippedOversize++
+				s.coverage.FilesSkippedOversize++
 			} else {
-				working.coverage.FilesExcludedBinary++
+				s.coverage.FilesExcludedBinary++
 			}
 		default:
 			if err := drainEntry(entryReader); err != nil {
 				return err
 			}
-			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
+			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
 				return err
 			}
-			if err := working.put(Artifact{
+			if err := s.put(Artifact{
 				Path:         entryPath,
 				LayerDigest:  descriptor.Digest,
 				Type:         ArtifactTypeOther,
@@ -552,7 +543,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 			}, &retention); err != nil {
 				return err
 			}
-			if err := retainCurrentPath(working, currentPaths, entryPath, &retention); err != nil {
+			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
 				return err
 			}
 		}
@@ -570,21 +561,15 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 	}
 
 	for _, directory := range opaqueDirectories {
-		working.deleteLowerPrefix(base, directory, descriptor.Digest, currentPaths)
+		s.deleteLowerPrefix(directory, descriptor.Digest, journal)
 	}
 	for _, target := range whiteouts {
-		working.deleteLowerPath(base, target, descriptor.Digest, currentPaths)
+		s.deleteLowerPath(target, descriptor.Digest, journal)
 	}
-	working.coverage.ExpandedBytes = expandedBytesAfterLayer(s.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
-	nested.flush(working)
-	s.final = working.final
-	s.deleted = working.deleted
-	s.dirs = working.dirs
-	s.directoryChildren = working.directoryChildren
-	s.artifactChildren = working.artifactChildren
-	s.entries = s.entries + entryCount
-	s.coverage = working.coverage
-	s.nestedSkips = working.nestedSkips
+	s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
+	nested.flush(s)
+	s.entries += entryCount
+	s.endLayer()
 	committed = true
 	return nil
 }
@@ -772,8 +757,7 @@ func (s *State) put(artifact Artifact, budget *retentionBudget) error {
 	if err := budget.retainPersistent(s, retainedFinalArtifactBytes(artifact)); err != nil {
 		return err
 	}
-	s.final[artifact.Path] = artifact
-	addPathIndexEntry(s.artifactChildren, artifact.Path)
+	s.setFinal(artifact)
 	s.removeDirectory(artifact.Path)
 	return nil
 }
@@ -784,6 +768,10 @@ func (s *State) addDirectory(target string, budget *retentionBudget) error {
 	}
 	if err := budget.retainPersistent(s, retainedMapStringBytes(target)); err != nil {
 		return err
+	}
+	s.journal.record(undoRecord{kind: undoDirAdd, path: target})
+	if s.journal != nil {
+		s.journal.createdDirs[target] = struct{}{}
 	}
 	s.dirs[target] = struct{}{}
 	addPathIndexEntry(s.directoryChildren, target)
@@ -796,6 +784,10 @@ func (s *State) removeDirectory(target string) {
 	}
 	if len(s.directoryChildren[target]) > 0 || len(s.artifactChildren[target]) > 0 {
 		return
+	}
+	s.journal.record(undoRecord{kind: undoDirRemove, path: target})
+	if s.journal != nil {
+		delete(s.journal.createdDirs, target)
 	}
 	delete(s.dirs, target)
 	removePathIndexEntry(s.directoryChildren, target)
@@ -840,8 +832,7 @@ func (s *State) deletePath(targetPath, deletedBy string) {
 		return
 	}
 
-	delete(s.final, targetPath)
-	removePathIndexEntry(s.artifactChildren, targetPath)
+	s.unsetFinal(targetPath, current)
 	s.coverage.RetainedBytes -= retainedFinalArtifactBytes(current)
 	current.DeletedByLayerDigest = deletedBy
 	if current.Type == ArtifactTypeRegularFile || current.Type == ArtifactTypeHardlink {
@@ -855,78 +846,6 @@ func (s *State) deletePrefix(directoryPath, deletedBy string) {
 	for _, target := range s.artifactPathsBelow(directoryPath) {
 		s.deletePath(target, deletedBy)
 	}
-}
-
-func (s *State) deleteLowerPath(base *State, target, deletedBy string, currentPaths map[string]struct{}) {
-	if _, sameLayer := currentPaths[target]; !sameLayer {
-		if current, ok := base.final[target]; ok {
-			s.deleteArtifactIfEqual(target, current, deletedBy)
-		}
-	}
-	if _, ok := base.dirs[target]; ok {
-		s.deleteLowerPrefix(base, target, deletedBy, currentPaths)
-	}
-}
-
-func (s *State) deleteLowerPrefix(base *State, directory, deletedBy string, currentPaths map[string]struct{}) {
-	directory = strings.Trim(directory, "/")
-	for _, target := range base.artifactPathsBelow(directory) {
-		if _, sameLayer := currentPaths[target]; sameLayer {
-			continue
-		}
-		s.deleteArtifactIfEqual(target, base.final[target], deletedBy)
-	}
-	for _, target := range base.directoryPathsAtOrBelow(directory) {
-		if _, sameLayer := currentPaths[target]; !sameLayer {
-			s.removeDirectory(target)
-		}
-	}
-}
-
-func (s *State) deleteArtifactIfEqual(target string, lower Artifact, deletedBy string) {
-	current, ok := s.final[target]
-	if !ok || current.LayerDigest != lower.LayerDigest || current.Type != lower.Type {
-		return
-	}
-	delete(s.final, target)
-	removePathIndexEntry(s.artifactChildren, target)
-	s.coverage.RetainedBytes -= retainedFinalArtifactBytes(current)
-	lower.DeletedByLayerDigest = deletedBy
-	if lower.Type == ArtifactTypeRegularFile || lower.Type == ArtifactTypeHardlink {
-		s.deleted = append(s.deleted, lower)
-		s.coverage.RetainedBytes += retainedDeletedArtifactBytes(lower)
-	}
-}
-
-func cloneArtifactMap(source map[string]Artifact) map[string]Artifact {
-	result := make(map[string]Artifact, len(source))
-	for key, artifact := range source {
-		// Artifact content is immutable after construction. Sharing its backing
-		// bytes keeps transactional layer snapshots bounded by map metadata rather
-		// than duplicating the retained image for every layer.
-		result[key] = artifact
-	}
-	return result
-}
-
-func cloneDirectoryMap(source map[string]struct{}) map[string]struct{} {
-	result := make(map[string]struct{}, len(source))
-	for key := range source {
-		result[key] = struct{}{}
-	}
-	return result
-}
-
-func clonePathIndex(source map[string]map[string]struct{}) map[string]map[string]struct{} {
-	result := make(map[string]map[string]struct{}, len(source))
-	for parent, children := range source {
-		cloned := make(map[string]struct{}, len(children))
-		for child := range children {
-			cloned[child] = struct{}{}
-		}
-		result[parent] = cloned
-	}
-	return result
 }
 
 func addPathIndexEntry(index map[string]map[string]struct{}, value string) {

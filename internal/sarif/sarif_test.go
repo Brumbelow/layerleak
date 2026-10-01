@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/findings"
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
@@ -20,7 +21,9 @@ var update = flag.Bool("update", false, "rewrite the golden SARIF fixture")
 func fixtureResult() jobs.Result {
 	manifestDigest := "sha256:" + strings.Repeat("b", 64)
 	return jobs.Result{
-		ResultSchemaVersion:    1,
+		ResultSchemaVersion:    jobs.ResultSchemaVersion,
+		ScannedAt:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
+		Scanner:                jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0"},
 		Status:                 jobs.ResultStatusPartial,
 		RequestedReference:     "ghcr.io/example/app:1.2.3",
 		Repository:             "ghcr.io/example/app",

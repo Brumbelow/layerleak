@@ -49,13 +49,15 @@ lint: tools
 vuln: tools
 	$(TOOL_BIN)/govulncheck ./...
 
-## docs-verify: OpenAPI, documentation, SARIF, release-script and compose validation
+## docs-verify: OpenAPI, documentation, SARIF, JSON Schema, release-script and compose validation
 docs-verify:
 	test -x $(VENV)/bin/python || $(PYTHON) -m venv $(VENV)
 	$(VENV)/bin/python -m pip install --quiet --require-hashes -r requirements-docs.txt
 	$(VENV)/bin/python -m unittest scripts/test_validate_docs.py
 	$(VENV)/bin/python scripts/validate_docs.py
 	$(VENV)/bin/python scripts/validate_sarif.py internal/sarif/testdata/*.sarif.json
+	$(VENV)/bin/python -m unittest scripts/tests/test_validate_schemas.py
+	$(VENV)/bin/python scripts/validate_schemas.py
 	$(PYTHON) -m unittest discover -s scripts/tests
 	LAYERLEAK_DB_PASSWORD=make-verify docker compose -f docker-compose.yml config --quiet
 	LAYERLEAK_DB_PASSWORD=make-verify docker compose -f docker-compose.yml --profile tools config --quiet

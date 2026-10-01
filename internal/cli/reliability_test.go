@@ -106,15 +106,47 @@ func TestScanCommandPreservesOutputAfterSaveFailure(t *testing.T) {
 	}
 	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	if len(paths) != 1 {
-		t.Fatalf("local result lost: %v", paths)
-	}
-	records, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-	if len(records) != 1 {
-		t.Fatalf("scan record lost: %v", records)
+		t.Fatalf("scan record lost: %v", paths)
 	}
 	body, _ := os.ReadFile(paths[0])
 	if !json.Valid(body) {
 		t.Fatal("invalid local result")
+	}
+}
+
+func TestScanCommandFailedScanEmitsPublicResultJSON(t *testing.T) {
+	installReliableCommandFixture(t, jobs.ResultStatusFailed)
+	dir := t.TempDir()
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
+	command := newScanCmd()
+	command.SilenceUsage = true
+	var stdout, stderr bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&stderr)
+	command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off"})
+	err := command.Execute()
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) || coded.ExitCode() != 1 {
+		t.Fatalf("failed scan exit = %v", err)
+	}
+	var result jobs.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("failed scan produced no JSON result: %v; stdout=%q", decodeErr, stdout.String())
+	}
+	if result.Status != jobs.ResultStatusFailed || result.ResultSchemaVersion != jobs.ResultSchemaVersion {
+		t.Fatalf("result = %+v", result)
+	}
+	// The real registry error reaches the operator instead of "scan step failed".
+	if len(result.Targets) != 1 || !strings.Contains(result.Targets[0].Error, "404") || result.Targets[0].Error == "scan step failed" {
+		t.Fatalf("target error = %#v", result.Targets)
+	}
+	records, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	if len(records) != 1 {
+		t.Fatalf("failed scan record = %v", records)
+	}
+	record := readLocalScanRecord(t, records[0])
+	if record.Result.Status != jobs.ResultStatusFailed || !strings.Contains(record.Result.Targets[0].Error, "404") {
+		t.Fatalf("record = %+v", record.Result)
 	}
 }
 
@@ -125,30 +157,27 @@ func (*commandFailingStore) SaveScan(context.Context, storage.ScanRecord) (int64
 	return 0, errors.New("synthetic database failure")
 }
 
-func TestScanCommandPublishesJSONWhenCompanionPublicationFails(t *testing.T) {
+func TestScanCommandPublishesJSONWhenRecordPublicationFails(t *testing.T) {
 	installReliableCommandFixture(t)
-	dir := t.TempDir()
-	t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
-	if err := os.WriteFile(filepath.Join(dir, "scans"), []byte("obstruction"), 0o600); err != nil {
+	dir := filepath.Join(t.TempDir(), "records")
+	if err := os.WriteFile(dir, []byte("obstruction"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
 	command := newScanCmd()
 	command.SilenceUsage = true
 	var stdout, stderr bytes.Buffer
 	command.SetOut(&stdout)
 	command.SetErr(&stderr)
 	command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "plain"})
-	if err := command.Execute(); err == nil {
-		t.Fatal("publication error hidden")
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("publication error hidden: %v", err)
 	}
 	if !json.Valid(stdout.Bytes()) {
 		t.Fatalf("usable stdout lost: %s", stdout.String())
 	}
-	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	if len(paths) != 1 {
-		t.Fatalf("successful legacy artifact lost: %v", paths)
-	}
-	if !strings.Contains(stderr.String(), paths[0]) || strings.Contains(stderr.String(), "Scan record:") {
+	if strings.Contains(stderr.String(), "Scan record:") {
 		t.Fatalf("incorrect artifact reporting: %s", stderr.String())
 	}
 }
@@ -165,7 +194,7 @@ func TestScanCommandOutputFailureRemainsVisibleAfterSave(t *testing.T) {
 	if err := command.Execute(); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("output error hidden: %v", err)
 	}
-	paths, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
+	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	if len(paths) != 1 {
 		t.Fatalf("saved record lost: %v", paths)
 	}
@@ -183,8 +212,8 @@ func TestScanCommandCoverageAndSaveFailureExitCodes(t *testing.T) {
 		{jobs.ResultStatusCompleted, true, 1, "failed", 0},
 		{jobs.ResultStatusPartial, false, 0, "saved", 17},
 		{jobs.ResultStatusPartial, true, 1, "failed", 0},
-		{jobs.ResultStatusFailed, false, 1, "", 0},
-		{jobs.ResultStatusFailed, true, 1, "", 0},
+		{jobs.ResultStatusFailed, false, 1, "saved", 17},
+		{jobs.ResultStatusFailed, true, 1, "failed", 0},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/save_fails=%v", tt.status, tt.saveFails), func(t *testing.T) {
@@ -222,13 +251,8 @@ func assertCommandExitAndSave(t *testing.T, err error, wantCode, saves int) {
 
 func assertCommandCoveragePublication(t *testing.T, dir string, stdout []byte, status jobs.ResultStatus, persistence string, scanRunID int64) {
 	t.Helper()
-	paths, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-	if status == jobs.ResultStatusFailed {
-		if len(paths) != 0 || len(stdout) != 0 {
-			t.Fatalf("failed scan publication behavior changed: files=%v stdout=%s", paths, stdout)
-		}
-		return
-	}
+	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	// A failed scan publishes its result like any other outcome (CLI-06).
 	if len(paths) != 1 {
 		t.Fatalf("record lost: %v", paths)
 	}
@@ -284,10 +308,9 @@ func TestScanCommandPreservesResultsAfterStorageDeadline(t *testing.T) {
 			if result.Status != status {
 				t.Fatalf("status=%s want=%s", result.Status, status)
 			}
-			legacy, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-			records, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-			if len(legacy) != 1 || len(records) != 1 {
-				t.Fatalf("storage deadline discarded artifacts: %v %v", legacy, records)
+			records, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+			if len(records) != 1 {
+				t.Fatalf("storage deadline discarded artifacts: %v", records)
 			}
 			body, _ := os.ReadFile(records[0])
 			var record localScanRecord
@@ -312,7 +335,7 @@ func TestScanCommandReportsDurableArtifactPaths(t *testing.T) {
 	for _, mode := range []string{"off", "tty", "plain"} {
 		t.Run(mode, func(t *testing.T) {
 			installReliableCommandFixture(t)
-			dir := filepath.Join(t.TempDir(), strings.Repeat("long-directory-", 8))
+			dir := filepath.Join(t.TempDir(), strings.Repeat("long-directory-", 8), "two  spaces\tand tab")
 			t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
 			t.Setenv("COLUMNS", "80")
 			command := newScanCmd()
@@ -327,16 +350,16 @@ func TestScanCommandReportsDurableArtifactPaths(t *testing.T) {
 			if !json.Valid(stdout.Bytes()) {
 				t.Fatalf("stdout polluted: %s", stdout.String())
 			}
-			paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-			records, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-			if len(paths) != 1 || len(records) != 1 {
-				t.Fatalf("missing artifacts: %v %v", paths, records)
+			records, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+			if len(records) != 1 {
+				t.Fatalf("missing artifacts: %v", records)
 			}
-			want := "Findings: " + paths[0] + "\nScan record: " + records[0] + "\n"
+			// The path is quoted so whitespace (two spaces, a tab) survives copy-paste.
+			want := fmt.Sprintf("Scan record: %q\n", records[0])
 			if !strings.HasSuffix(stderr.String(), want) {
-				t.Fatalf("missing durable full paths at end of stderr: %q", stderr.String())
+				t.Fatalf("missing durable full path at end of stderr: %q", stderr.String())
 			}
-			if strings.Count(stderr.String(), paths[0]) != 1 || strings.Count(stderr.String(), records[0]) != 1 {
+			if strings.Count(stderr.String(), fmt.Sprintf("%q", records[0])) != 1 {
 				t.Fatalf("duplicate artifact paths: %q", stderr.String())
 			}
 		})
@@ -361,13 +384,108 @@ func TestScanCommandCancellationDuringSaveStillSkipsPublication(t *testing.T) {
 		t.Fatalf("actual cancellation not retained: %v", err)
 	}
 	paths, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-	records, _ := filepath.Glob(filepath.Join(dir, "scans", "*.json"))
-	if stdout.Len() != 0 || len(paths) != 0 || len(records) != 0 {
-		t.Fatalf("canceled command published results: stdout=%q paths=%v records=%v", stdout.String(), paths, records)
+	if stdout.Len() != 0 || len(paths) != 0 {
+		t.Fatalf("canceled command published results: stdout=%q paths=%v", stdout.String(), paths)
 	}
-	if strings.Contains(stderr.String(), "Findings: ") || strings.Contains(stderr.String(), "Scan record: ") {
+	if strings.Contains(stderr.String(), "Scan record: ") {
 		t.Fatalf("canceled command claimed artifacts: %q", stderr.String())
 	}
+}
+
+func TestScanCommandOutputFlags(t *testing.T) {
+	t.Run("output-dir overrides the environment", func(t *testing.T) {
+		installReliableCommandFixture(t)
+		envDir := t.TempDir()
+		flagDir := filepath.Join(t.TempDir(), "flagged")
+		t.Setenv("LAYERLEAK_FINDINGS_DIR", envDir)
+		command := newScanCmd()
+		command.SetOut(io.Discard)
+		command.SetErr(io.Discard)
+		command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off", "--output-dir", flagDir})
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		flagged, _ := filepath.Glob(filepath.Join(flagDir, "*.json"))
+		fromEnv, _ := filepath.Glob(filepath.Join(envDir, "*.json"))
+		if len(flagged) != 1 || len(fromEnv) != 0 {
+			t.Fatalf("records: flag=%v env=%v", flagged, fromEnv)
+		}
+	})
+	t.Run("default directory is ./findings under the working directory", func(t *testing.T) {
+		installReliableCommandFixture(t)
+		workdir := t.TempDir()
+		t.Chdir(workdir)
+		t.Setenv("LAYERLEAK_FINDINGS_DIR", "")
+		command := newScanCmd()
+		command.SetOut(io.Discard)
+		command.SetErr(io.Discard)
+		command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off"})
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		records, _ := filepath.Glob(filepath.Join(workdir, "findings", "*.json"))
+		if len(records) != 1 {
+			t.Fatalf("default records = %v", records)
+		}
+	})
+	t.Run("no-artifacts writes nothing", func(t *testing.T) {
+		installReliableCommandFixture(t)
+		dir := t.TempDir()
+		t.Setenv("LAYERLEAK_FINDINGS_DIR", dir)
+		command := newScanCmd()
+		var stdout, stderr bytes.Buffer
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off", "--no-artifacts"})
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		entries, _ := os.ReadDir(dir)
+		if len(entries) != 0 || strings.Contains(stderr.String(), "Scan record:") || !json.Valid(stdout.Bytes()) {
+			t.Fatalf("entries=%d stderr=%q", len(entries), stderr.String())
+		}
+	})
+	t.Run("output writes the result to a file", func(t *testing.T) {
+		installReliableCommandFixture(t)
+		t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+		target := filepath.Join(t.TempDir(), "result.json")
+		command := newScanCmd()
+		var stdout bytes.Buffer
+		command.SetOut(&stdout)
+		command.SetErr(io.Discard)
+		command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off", "--output", target})
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		body, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result jobs.Result
+		if err := json.Unmarshal(body, &result); err != nil || result.Status != jobs.ResultStatusCompleted {
+			t.Fatalf("output file = %s (%v)", body, err)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("stdout still carried the result: %q", stdout.String())
+		}
+		assertPrivateArtifacts(t, target)
+	})
+	t.Run("no-db skips the configured database", func(t *testing.T) {
+		installReliableCommandFixture(t)
+		t.Setenv("LAYERLEAK_FINDINGS_DIR", t.TempDir())
+		t.Setenv("LAYERLEAK_DATABASE_URL", "postgres://layerleak:placeholder@127.0.0.1:1/layerleak?sslmode=disable")
+		opened := false
+		command := newScanCmdWithStore(func(config.Config) (storage.Store, error) {
+			opened = true
+			return nil, errors.New("database must not be opened")
+		})
+		command.SetOut(io.Discard)
+		command.SetErr(io.Discard)
+		command.SetArgs([]string{"library/app:latest", "--format", "json", "--progress", "off", "--no-db"})
+		if err := command.Execute(); err != nil || opened {
+			t.Fatalf("--no-db: err=%v opened=%v", err, opened)
+		}
+	})
 }
 
 type cancelingStore struct{ cancel context.CancelFunc }

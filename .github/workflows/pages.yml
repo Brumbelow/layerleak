@@ -7,6 +7,9 @@ on:
       - "web/**"
       - "scripts/validate_docs.py"
       - "scripts/test_validate_docs.py"
+      - "scripts/validate_schemas.py"
+      - "scripts/tests/test_validate_schemas.py"
+      - "internal/cli/testdata/*.json"
       - "requirements-docs.txt"
       - "CHANGELOG.md"
       - ".github/workflows/pages.yml"
@@ -44,6 +47,8 @@ jobs:
         run: |
           python -m unittest scripts/test_validate_docs.py
           python scripts/validate_docs.py
+          python -m unittest scripts/tests/test_validate_schemas.py
+          python scripts/validate_schemas.py
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
 

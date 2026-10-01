@@ -179,7 +179,7 @@ type Result struct {
 
 type PlatformResult struct {
 	Status         ResultStatus      `json:"status"`
-	Platform       manifest.Platform `json:"platform,omitempty"`
+	Platform       manifest.Platform `json:"platform,omitzero"`
 	ManifestDigest string            `json:"manifest_digest"`
 	FindingsCount  int               `json:"findings_count"`
 	Error          string            `json:"error,omitempty"`

@@ -28,7 +28,6 @@
         "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "match_end": 49,
         "match_start": 9,
-        "platform": {},
         "present_in_final_image": true,
         "redacted_value": "ghp********",
         "source_type": "env"
@@ -41,8 +40,18 @@
     "requested_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "requested_reference": "library/example:latest",
     "resolved_reference": "docker.io/library/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "result_schema_version": 1,
+    "result_schema_version": 2,
+    "scanned_at": "2026-09-30T12:00:00Z",
+    "scanner": {
+      "name": "layerleak",
+      "version": "v3.0.0"
+    },
     "status": "completed",
+    "suppressed_findings_count": 0,
+    "suppressed_unique_fingerprints": 0,
+    "tags_enumerated": 0,
+    "tags_failed": 0,
+    "tags_resolved": 0,
     "target_count": 1,
     "targets": [
       {

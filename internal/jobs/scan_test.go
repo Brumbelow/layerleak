@@ -620,8 +620,12 @@ func TestScanRepositoryAppliesMaxFindingsAcrossTargets(t *testing.T) {
 	if result.TotalFindings != 1 {
 		t.Fatalf("result.TotalFindings = %d", result.TotalFindings)
 	}
-	if len(result.Targets) != 1 || result.Targets[0].Status != ResultStatusCompleted {
+	// The unscanned second target is accounted for instead of dropped (CLI-04).
+	if len(result.Targets) != 2 || result.Targets[0].Status != ResultStatusCompleted || result.Targets[1].Status != ResultStatusFailed || !strings.Contains(result.Targets[1].Error, "not scanned") {
 		t.Fatalf("result.Targets = %#v", result.Targets)
+	}
+	if result.TargetCount != 2 || result.CompletedTargetCount != 1 || result.FailedTargetCount != 1 {
+		t.Fatalf("target counts = %d/%d/%d", result.TargetCount, result.CompletedTargetCount, result.FailedTargetCount)
 	}
 	if !hasDiagnosticCode(result.Diagnostics, "max_findings_exceeded") {
 		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)

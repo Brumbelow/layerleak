@@ -30,9 +30,12 @@ type Request struct {
 	// ConfiguredCredential; the API never sets it, so a caller-named registry
 	// can never obtain the operator's credential. Zero means none.
 	Credential registry.Credential
-	Logger     *slog.Logger
-	Progress   jobs.ProgressFunc
-	BeforeSave BeforeSaveFunc
+	// ScannerVersion is reported in the result's scanner block; empty means
+	// the build version of this binary.
+	ScannerVersion string
+	Logger         *slog.Logger
+	Progress       jobs.ProgressFunc
+	BeforeSave     BeforeSaveFunc
 }
 
 type ErrorPhase string
@@ -109,6 +112,8 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		Registry:             registryClient,
 		Detectors:            s.detectors,
 		Logger:               request.Logger,
+		ScannerVersion:       request.ScannerVersion,
+		Now:                  s.now,
 		MaxFileBytes:         s.config.MaxFileBytes,
 		MaxLayerBytes:        s.config.MaxLayerBytes,
 		MaxLayerEntries:      s.config.MaxLayerEntries,

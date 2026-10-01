@@ -151,11 +151,17 @@ Useful scan flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--format summary|json` | Human summary or stable JSON result. |
-| `--platform os[/arch[/variant]]` | Select platforms from a multi-platform image; omitted parts match anything and `linux/arm64/v8` is equivalent to `linux/arm64`. Defaults to every `linux` manifest. A single-manifest image that does not match fails with `platform_not_found`. |
+| `--format summary|json|sarif` | Human summary (counts, per-target table and the first 50 findings), the stable JSON result (`result_schema_version` 2, schema at `web/docs/schemas/result-v2.schema.json`), or a SARIF 2.1.0 log. |
+| `--output <file>` | Write the formatted output to a file instead of stdout; `-` is stdout. Created with mode `0600`. |
+| `--output-dir <dir>` | Directory for the scan record. Overrides `LAYERLEAK_FINDINGS_DIR`; the default is `./findings` under the working directory. |
+| `--no-artifacts` | Do not write a scan record. |
+| `--no-db` | Ignore `LAYERLEAK_DATABASE_URL` and run a purely local scan. |
+| `--fail-on low|medium|high|none` | Lowest confidence of an actionable finding that produces exit code `2`. `low` (default) is every actionable finding; `none` reports without failing. |
+| `--allow-partial` | Accept usable incomplete coverage (exit `0` or `2` instead of `3`) while preserving `status`, coverage, and diagnostics. |
+| `--platform os[/arch[/variant]]` | Select platforms from a multi-platform image; omitted parts match anything, so `--platform linux` selects every Linux manifest and `linux/arm64/v8` is equivalent to `linux/arm64`. Defaults to every `linux` manifest. A single-manifest image that does not match fails with `platform_not_found`. |
+| `--username <name>` / `--password-stdin` | Authenticate to a private registry for this scan; see "Private registries" below. |
 | `--all-tags` | Enumerate every public tag for a bare repository. |
-| `--allow-partial` | Accept usable incomplete coverage while preserving `status`, coverage, and diagnostics. |
-| `--progress auto|tty|plain|off` | Select interactive, log-safe, or disabled progress output. |
+| `--progress auto|tty|plain|off` | Select interactive, log-safe, or disabled progress output. `auto` uses plain lines when `LAYERLEAK_LOG_LEVEL=debug`, `TERM=dumb` or `CI=true`. |
 | `--tag-page-size` | Override the tag-list page size for `--all-tags`. |
 | `--max-repository-tags` | Override the tag enumeration bound for `--all-tags`; `0` disables it. |
 | `--max-repository-targets` | Override the distinct target bound for `--all-tags`; `0` disables it. |
@@ -164,49 +170,106 @@ Exit codes are stable for automation:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Complete scan with no actionable findings, or an accepted usable partial scan with none. |
-| `1` | Invalid input, operational failure, persistence failure, cancellation, or unaccepted incomplete coverage. |
-| `2` | One or more actionable findings. |
+| `0` | Complete scan with no blocking findings, or an accepted (`--allow-partial`) usable partial scan with none. |
+| `1` | Invalid input, operational failure (registry, network, authentication), persistence failure, or cancellation (`LAYERLEAK_SCAN_TIMEOUT`, SIGINT, SIGTERM). |
+| `2` | One or more actionable findings at or above `--fail-on`. Findings take precedence over incomplete coverage. |
+| `3` | The scan finished with usable but incomplete coverage and `--allow-partial` was not given. |
+
+Scripts that treat any non-zero status as failure keep working; scripts that
+retry on `1` should treat `3` as "investigate coverage" rather than retry.
+A second SIGINT or SIGTERM after the first terminates the process immediately.
 
 Every result has a top-level `status` (`completed`, `partial`, or `failed`), a
-coverage object, per-target and per-platform status, and diagnostics. Likely
-test, fixture, example, and demo placeholders are retained separately as
-suppressed findings and do not drive exit code `2`.
+coverage object, per-target, per-platform and per-tag status, and
+diagnostics. `--format json` prints the result for failed scans too (exit code
+`1`), so automation can read the diagnostics; cancellation is the only silent
+path. Likely test, fixture, example, and demo placeholders are retained
+separately as suppressed findings and do not drive exit code `2`.
+
+### SARIF
+
+`--format sarif` writes one SARIF 2.1.0 run per scan: every detector in the
+default catalog appears under `tool.driver.rules`, each finding is a result
+with `level` derived from its confidence, a `partialFingerprints` entry
+(`layerleak/fingerprint/v1`, the stable sha256 of the raw value), the image
+reference as the `IMAGE` URI base, and suppressed findings carry a
+`suppressions` entry. Only redacted values are written. Upload it to GitHub
+code scanning from a workflow:
+
+```yaml
+- run: layerleak scan ghcr.io/${{ github.repository }}:${{ github.sha }} --format sarif --output layerleak.sarif --fail-on none --no-artifacts
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: layerleak.sarif
+```
+
+### Private registries
+
+Pass a per-scan credential with `--username <name> --password-stdin`; the
+password or token is read from standard input to EOF and exactly one trailing
+newline is removed. Both flags are required together and there is no
+`--password` flag (it would land in process listings and shell history):
+
+```bash
+printf '%s' "$REGISTRY_TOKEN" | layerleak scan ghcr.io/org/private-app:1.2 --username robot --password-stdin
+```
+
+Without the flags, the `LAYERLEAK_REGISTRY_USERNAME`/`LAYERLEAK_REGISTRY_PASSWORD`
+pair applies to the registry of the reference on the command line, and a
+Docker `config.json` named by `LAYERLEAK_DOCKER_CONFIG` supplies credentials by
+registry host (`auths` entries only; credential helpers are not invoked). A
+credential is bound to the one registry host it was given for, is only ever
+sent over `https` (a plain-`http` private registry is refused), and never
+appears in logs, output, scan records or the database. A `401` or `403` from
+the registry exits `1` with `authentication to <registry host> failed`.
 
 ## Results and secret handling
 
-For each usable scan result, Layerleak writes two JSON artifacts with the same
-generated basename under `LAYERLEAK_FINDINGS_DIR`. If it is unset, the CLI uses
-`findings/` beside the nearest `go.mod`, then falls back to the current
-directory.
+Every scan that produced a result (completed, partial, or failed) writes
+exactly one scan record,
+`<dir>/<utc-timestamp>-<reference-token>-<random>.json`, unless
+`--no-artifacts` is given. `<dir>` is `--output-dir`, otherwise
+`LAYERLEAK_FINDINGS_DIR` (a relative value resolves against the working
+directory), otherwise `./findings` under the working directory. The CLI no
+longer looks for a surrounding `go.mod`.
 
-- `findings/<basename>.json` remains the compatible findings array.
-- `findings/scans/<basename>.json` is a versioned, always-redacted scan record
-  containing image identity, status, coverage, diagnostics, counts, creation
-  time, and the PostgreSQL persistence outcome.
+The record (`record_schema_version` 2, schema at
+`web/docs/schemas/scan-record-v2.schema.json`) contains:
 
-The two files are published independently. If either write fails, Layerleak
-reports an operational error and retains an artifact that was already
-published. A database-save failure also returns exit code `1`, records a
-neutral `storage_unavailable` persistence error, and still attempts to publish
-available redacted results locally. No scan ID is recorded unless persistence
-succeeded.
+- `result`: the same redacted result as `--format json`, with real,
+  control-character-sanitised error and diagnostic messages;
+- `findings`: every finding (actionable first, then suppressed) with detector,
+  confidence, disposition and suppression reason, redacted value and redacted
+  context, manifest, platform, file, layer, line and `source_location`
+  provenance, and whether the occurrence survives in the final filesystem;
+- `persistence`: `disabled`, `saved` (with `scan_run_id`), or `failed` with the
+  neutral `storage_unavailable` code;
+- `created_at`.
 
-Finding records include:
+Directory and file handling is deliberately conservative. A missing directory
+is created with mode `0700`; an existing directory is never `chmod`-ed and a
+symbolic link in its place is refused, so pointing the CLI at a shared
+directory cannot change that directory's permissions. The CLI warns once when
+an existing directory is readable by other users. Records are written `0600`,
+published without ever overwriting an existing file (falling back from a hard
+link to an exclusive create on filesystems without hard links), and the full
+path is printed quoted on stderr (`Scan record: "..."`). If the record cannot
+be written the scan still prints its result and exits `1`.
 
-- detector, confidence, disposition, and suppression reason;
-- redacted value and redacted context;
-- manifest, platform, file, layer, line, and source-location provenance;
-- whether the occurrence survives in the final filesystem;
-- deduplicated occurrence counts.
-
-Raw values and raw context snippets are omitted unless
-`LAYERLEAK_PERSIST_RAW_SECRETS=1`. That setting increases breach impact and
+Raw secret values and raw context snippets are never written locally: the
+record, `--format json` and `--format sarif` are always redacted, and the
+local redaction shape reveals at most the first three characters of a value
+followed by a fixed-length mask. Raw persistence exists only in PostgreSQL
+with `LAYERLEAK_PERSIST_RAW_SECRETS=1`, which increases breach impact and
 should normally remain disabled. API responses and the `scan_runs` snapshot
-remain redacted even when raw storage is enabled, as does the companion scan
-record. Turning the setting back off prevents new raw writes but does not erase
-historical raw material; use the confirmation-gated purge command below for
-that explicit operation.
+remain redacted even when raw storage is enabled. Turning the setting back off
+prevents new raw writes but does not erase historical raw material; use the
+confirmation-gated purge command below for that explicit operation.
+
+A database-save failure returns exit code `1`, records the neutral
+`storage_unavailable` persistence outcome in the scan record, and still prints
+the result. No scan ID is recorded unless persistence succeeded. `--no-db`
+skips PostgreSQL entirely for one run.
 
 ## Configuration
 
@@ -231,7 +294,7 @@ variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LAYERLEAK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` (case-insensitive); any other spelling is rejected. |
-| `LAYERLEAK_FINDINGS_DIR` | auto | CLI only. Directory for saved scan records. |
+| `LAYERLEAK_FINDINGS_DIR` | `./findings` | CLI only. Directory for scan records (one JSON file per scan); relative values resolve against the working directory. `--output-dir` overrides it, `--no-artifacts` skips it. |
 | `LAYERLEAK_PERSIST_RAW_SECRETS` | `0` | Boolean. Unsafe opt-in for raw values and snippets. |
 | `LAYERLEAK_HTTP_TIMEOUT` | `30s` | Per-attempt deadline for manifest, config, tag, and auth requests and for the response headers of blob requests; also bounds dial and TLS handshake. |
 | `LAYERLEAK_BLOB_TIMEOUT` | `10m` | Layer blob transfer deadline. |

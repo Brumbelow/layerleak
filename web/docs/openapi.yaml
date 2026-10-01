@@ -846,7 +846,15 @@ components:
 
     ScanResult:
       type: object
-      description: Stable redacted result schema. Additive result fields may be introduced within API v1.
+      description: >-
+        Stable redacted result schema. Additive result fields may be
+        introduced within API v1. `GET /api/v1/scans/{id}` returns the stored
+        result as it was produced, so only the fields every
+        `result_schema_version` carries are required here; the fields that
+        version 2 added (`scanned_at`, `scanner`, the always-present
+        `tags_*` and `suppressed_*` counters) are optional in this schema and
+        guaranteed, with the stricter shape, by `schemas/result-v2.schema.json`
+        for results whose `result_schema_version` is 2.
       additionalProperties: false
       required:
         - result_schema_version
@@ -870,6 +878,31 @@ components:
         result_schema_version:
           type: integer
           minimum: 1
+          description: >-
+            Version of the result shape. Stored scans return the version they
+            were produced with; consumers branch on it. Version 2 (3.0.0)
+            added `scanned_at`, `scanner`, typed `tag_results.status`,
+            always-present counters and omitted empty `platform` objects. The
+            full schema is published at `schemas/result-v2.schema.json`.
+        scanned_at:
+          type: string
+          format: date-time
+          description: >-
+            UTC time the scan started, RFC 3339. Present when
+            `result_schema_version` is 2 or later.
+        scanner:
+          type: object
+          description: >-
+            The scanner that produced the result. Present when
+            `result_schema_version` is 2 or later.
+          additionalProperties: false
+          required: [name, version]
+          properties:
+            name:
+              type: string
+              enum: [layerleak]
+            version:
+              type: string
         status:
           $ref: "#/components/schemas/ResultStatus"
         requested_reference:
@@ -886,12 +919,18 @@ components:
         tags_enumerated:
           type: integer
           minimum: 0
+          description: >-
+            Tags listed by a repository sweep. Always present when
+            `result_schema_version` is 2 or later; version 1 omitted the
+            `tags_*` counters when they were zero.
         tags_resolved:
           type: integer
           minimum: 0
+          description: Tags resolved to a digest; see `tags_enumerated` for presence.
         tags_failed:
           type: integer
           minimum: 0
+          description: Tags that failed to resolve; see `tags_enumerated` for presence.
         target_count:
           type: integer
           minimum: 0
@@ -938,9 +977,14 @@ components:
         suppressed_findings_count:
           type: integer
           minimum: 0
+          description: >-
+            Suppressed finding occurrences. Always present when
+            `result_schema_version` is 2 or later; version 1 omitted the
+            `suppressed_*` counters when they were zero.
         suppressed_unique_fingerprints:
           type: integer
           minimum: 0
+          description: Distinct suppressed fingerprints; see `suppressed_findings_count` for presence.
         coverage:
           $ref: "#/components/schemas/Coverage"
         diagnostics:
@@ -965,10 +1009,13 @@ components:
         status:
           type: string
           description: >-
-            `scanned` when the tag's manifest was scanned, `resolved` when it
-            shared a digest with another tag that was scanned, `failed` when
-            it could not be resolved or scanned.
-          enum: [scanned, resolved, failed]
+            `scanned` when every selected manifest of the tag's target
+            completed, `partial` when some did, `failed` when the tag could
+            not be resolved or its target failed, `skipped` when the sweep
+            stopped before reaching the tag's target, and `resolved` when the
+            tag resolved to a digest the sweep had not scanned yet (only in
+            results of sweeps that stopped during resolution).
+          enum: [scanned, partial, failed, skipped, resolved]
         error:
           $ref: "#/components/schemas/SanitizedError"
     TargetResult:
@@ -1317,12 +1364,18 @@ components:
         tags_enumerated:
           type: integer
           minimum: 0
+          description: >-
+            Tags listed by a repository sweep. Always present when
+            `result_schema_version` is 2 or later; version 1 omitted the
+            `tags_*` counters when they were zero.
         tags_resolved:
           type: integer
           minimum: 0
+          description: Tags resolved to a digest; see `tags_enumerated` for presence.
         tags_failed:
           type: integer
           minimum: 0
+          description: Tags that failed to resolve; see `tags_enumerated` for presence.
         target_count:
           type: integer
           minimum: 0

@@ -592,7 +592,7 @@ them directly.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LAYERLEAK_IMAGE` | `ghcr.io/brumbelow/layerleak:latest` | Image used by the `api`, `migrate`, and `purge-raw-secrets` services. |
+| `LAYERLEAK_IMAGE` | `ghcr.io/brumbelow/layerleak:latest` | Image used by the `api`, `migrate`, and `purge-raw-secrets` services. `latest` moves with every stable release; in production pin a release tag such as `ghcr.io/brumbelow/layerleak:v3.0.0` or the digest recorded in that release's `release-manifest.json`. |
 | `LAYERLEAK_API_HOST` | `127.0.0.1` | Host interface the API port is published on. |
 | `LAYERLEAK_API_PORT` | `8080` | Host port published for the API. |
 | `LAYERLEAK_DB_NAME` | `layerleak` | Database created by the `db` service. |
@@ -644,7 +644,7 @@ The container bundles the same native command:
 docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
   --entrypoint /usr/local/bin/layerleak-migrate-up \
-  ghcr.io/brumbelow/layerleak:latest
+  ghcr.io/brumbelow/layerleak:v3.0.0
 ```
 
 To irreversibly remove opt-in raw material while retaining redacted findings,
@@ -658,12 +658,12 @@ can store raw material again after the purge completes.
 docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
   --entrypoint /usr/local/bin/layerleak-purge-raw-secrets \
-  ghcr.io/brumbelow/layerleak:latest \
+  ghcr.io/brumbelow/layerleak:v3.0.0 \
   --dry-run
 docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
   --entrypoint /usr/local/bin/layerleak-purge-raw-secrets \
-  ghcr.io/brumbelow/layerleak:latest \
+  ghcr.io/brumbelow/layerleak:v3.0.0 \
   --confirm
 ```
 
@@ -845,17 +845,20 @@ server stops within `LAYERLEAK_API_SHUTDOWN_TIMEOUT`, exiting 0.
 The published API image supports `linux/amd64` and `linux/arm64`. It is a
 shell-free, non-root image containing only CA roots, four static Layerleak
 binaries, and migrations. The image healthcheck probes `/readyz` with a hard
-two-second deadline.
+two-second deadline. The examples pin the `v3.0.0` release tag; for production,
+pin the image digest recorded in the release's `release-manifest.json`
+(`ghcr.io/brumbelow/layerleak@sha256:<digest>`) so a deployment cannot drift
+from the release whose signatures you verified.
 
 ```bash
-docker pull ghcr.io/brumbelow/layerleak:latest
+docker pull ghcr.io/brumbelow/layerleak:v3.0.0
 docker run --rm \
   -p 8080:8080 \
   -v /path/to/postgres-ca.pem:/etc/layerleak/postgres-ca.pem:ro \
   -e LAYERLEAK_DATABASE_URL='postgres://<user>:<password>@<host>:5432/layerleak?sslmode=verify-full&sslrootcert=/etc/layerleak/postgres-ca.pem' \
   --read-only --tmpfs /tmp:mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges \
-  ghcr.io/brumbelow/layerleak:latest
+  ghcr.io/brumbelow/layerleak:v3.0.0
 ```
 
 Mount the CA certificate that signed the PostgreSQL server certificate and keep

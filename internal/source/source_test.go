@@ -695,3 +695,79 @@ func TestLayoutSelectsBuildxStyleRefNames(t *testing.T) {
 		t.Fatalf("tag results = %+v", result.TagResults)
 	}
 }
+
+// sweepLayoutBuilder holds a buildx-style tagged image with a secret, a clean
+// plain-tagged image, two images sharing an ambiguous tag and an untagged one.
+func sweepLayoutBuilder(t *testing.T) (*layoutBuilder, manifest.Descriptor, manifest.Descriptor) {
+	t.Helper()
+	builder := newLayoutBuilder()
+	app := builder.addImage(t, buildxRefName, linuxAMD64, configJSON(t, linuxAMD64, "A=b"), secretLayer(t, "app/.env"))
+	stable := builder.addImage(t, "stable", linuxAMD64, configJSON(t, linuxAMD64, "C=d"))
+	builder.addImage(t, "dup", linuxAMD64, configJSON(t, linuxAMD64, "E=f"))
+	builder.addImage(t, "dup", linuxAMD64, configJSON(t, linuxAMD64, "G=h"))
+	builder.addImage(t, "", linuxAMD64, configJSON(t, linuxAMD64, "I=j"))
+	return builder, app, stable
+}
+
+// assertLayoutSweep checks a sweep over sweepLayoutBuilder's layout: the
+// ambiguous tag fails to resolve, which makes the sweep partial (err is the
+// coverage error, as for a registry sweep) without stopping the other
+// targets from being scanned.
+func assertLayoutSweep(t *testing.T, repository string, result jobs.Result, err error, app, stable manifest.Descriptor) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "coverage is partial") {
+		t.Fatalf("sweep error = %v", err)
+	}
+	if result.Mode != "repository" || result.Status != jobs.ResultStatusPartial {
+		t.Fatalf("mode=%s status=%s diagnostics=%+v", result.Mode, result.Status, result.Diagnostics)
+	}
+	if result.TagsEnumerated != 3 || result.TagsResolved != 2 || result.TagsFailed != 1 || result.TargetCount != 2 || result.CompletedTargetCount != 2 || result.TotalFindings != 1 {
+		t.Fatalf("tags=%d/%d failed=%d targets=%d/%d findings=%d", result.TagsEnumerated, result.TagsResolved, result.TagsFailed, result.TargetCount, result.CompletedTargetCount, result.TotalFindings)
+	}
+	if result.Repository != repository || result.ResolvedReference != repository {
+		t.Fatalf("repository=%q resolved=%q", result.Repository, result.ResolvedReference)
+	}
+	byTag := make(map[string]jobs.TagResult, len(result.TagResults))
+	for _, tagResult := range result.TagResults {
+		byTag[tagResult.Tag] = tagResult
+	}
+	if got := byTag[buildxRefName]; got.Status != jobs.TagStatusScanned || got.RootDigest != app.Digest || got.TargetReference != repository+"@"+app.Digest {
+		t.Fatalf("buildx tag result = %+v", got)
+	}
+	if got := byTag["stable"]; got.Status != jobs.TagStatusScanned || got.RootDigest != stable.Digest || got.TargetReference != repository+"@"+stable.Digest {
+		t.Fatalf("stable tag result = %+v", got)
+	}
+	if got := byTag["dup"]; got.Status != jobs.TagStatusFailed || !strings.Contains(got.Error, `tags 2 images "dup"`) {
+		t.Fatalf("ambiguous tag result = %+v", got)
+	}
+	for _, target := range result.Targets {
+		if !strings.HasPrefix(target.Reference, repository+"@sha256:") || target.Status != jobs.ResultStatusCompleted {
+			t.Fatalf("target = %+v", target)
+		}
+	}
+}
+
+func TestLayoutDirectorySweepEnumeratesRefNames(t *testing.T) {
+	dir := t.TempDir()
+	builder, app, stable := sweepLayoutBuilder(t)
+	builder.writeDir(t, dir)
+
+	result, err := scanLocal(t, "oci:"+dir, true)
+	assertLayoutSweep(t, "oci:"+dir, result, err, app, stable)
+}
+
+func TestOCIArchiveSweepEnumeratesRefNames(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "app.tar")
+	builder, app, stable := sweepLayoutBuilder(t)
+	builder.writeArchive(t, archive, "")
+
+	result, err := scanLocal(t, "oci-archive:"+archive, true)
+	assertLayoutSweep(t, "oci-archive:"+archive, result, err, app, stable)
+
+	// The README flow: buildx -t app:1.2 -o type=oci,dest=app.tar, then
+	// select the image by the name given to buildx.
+	single, err := scanLocal(t, "oci-archive:"+archive+":app:1.2", false)
+	if err != nil || single.TotalFindings != 1 || single.ResolvedReference != "oci-archive:"+archive+"@"+app.Digest {
+		t.Fatalf("Scan(:app:1.2) = findings=%d resolved=%q, %v", single.TotalFindings, single.ResolvedReference, err)
+	}
+}

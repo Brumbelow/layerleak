@@ -74,12 +74,40 @@ type Store interface {
 	Name() string
 }
 
+// ReadStore serves the API's read endpoints. Each list method pages either by
+// offset or, when the cursor argument is non-nil, by keyset: the page then
+// holds the rows strictly after the cursor in the endpoint's total ordering,
+// so deep pages cost no more than the first. Offset still applies on top of a
+// cursor and callers normally pass zero with one.
 type ReadStore interface {
-	ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error)
-	ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int) ([]ScanRunSummary, error)
-	ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error)
+	ListRepositories(ctx context.Context, limit, offset int, after *RepositoryCursor) ([]RepositorySummary, error)
+	ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int, after *ScanRunCursor) ([]ScanRunSummary, error)
+	ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int, after *FindingCursor) ([]FindingSummary, error)
 	GetScanRun(ctx context.Context, id int64) (ScanRunDetail, error)
 	GetFinding(ctx context.Context, id int64) (FindingDetail, error)
+}
+
+// RepositoryCursor is a keyset position in ListRepositories, whose ordering is
+// last_seen_at DESC, repository ASC, registry ASC: the next page starts
+// strictly after the row with these values. (registry, repository) is unique.
+type RepositoryCursor struct {
+	LastSeenAt time.Time
+	Repository string
+	Registry   string
+}
+
+// ScanRunCursor is a keyset position in ListRepositoryScans, whose ordering
+// is scanned_at DESC, id DESC.
+type ScanRunCursor struct {
+	ScannedAt time.Time
+	ID        int64
+}
+
+// FindingCursor is a keyset position in ListRepositoryFindings, whose ordering
+// is last_seen_at DESC, id DESC.
+type FindingCursor struct {
+	LastSeenAt time.Time
+	ID         int64
 }
 
 type RepositorySummary struct {

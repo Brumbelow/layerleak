@@ -1,5 +1,6 @@
 {
   "limit": 2,
+  "next_cursor": "eyJrIjoicyIsInQiOjE3ODgyNDk2MDAwMDAwMDAsImlkIjo0MH0",
   "offset": 0,
   "registry": "docker.io",
   "repository": "library/example",

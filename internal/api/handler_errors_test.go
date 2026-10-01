@@ -281,7 +281,7 @@ type panickingStore struct {
 	value any
 }
 
-func (s *panickingStore) ListRepositories(_ context.Context, _, _ int) ([]storage.RepositorySummary, error) {
+func (s *panickingStore) ListRepositories(_ context.Context, _, _ int, _ *storage.RepositoryCursor) ([]storage.RepositorySummary, error) {
 	panic(s.value)
 }
 

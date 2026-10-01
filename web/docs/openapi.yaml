@@ -200,7 +200,7 @@ paths:
     get:
       tags: [Repositories]
       summary: List persisted repositories
-      description: Returns repositories with persisted scan history using offset-based pagination.
+      description: Returns repositories with persisted scan history, paged by offset or by keyset cursor.
       operationId: listRepositories
       security:
         - {}
@@ -208,6 +208,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Paginated repositories.
@@ -247,6 +248,7 @@ paths:
         - $ref: "#/components/parameters/Registry"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Paginated scan summaries.
@@ -287,6 +289,7 @@ paths:
         - $ref: "#/components/parameters/Disposition"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Paginated redacted finding summaries.
@@ -465,6 +468,21 @@ components:
         type: integer
         minimum: 0
         default: 0
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque keyset position copied from a previous response's `next_cursor`
+        on the same endpoint. The page starts strictly after that position in
+        the endpoint's total ordering, so deep pages cost no more than the
+        first. A cursor belongs to one endpoint: a value from another listing,
+        a malformed value, or a cursor combined with a non-zero `offset` is
+        400 `invalid_request`. `limit` applies as usual.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
     Disposition:
       name: disposition
       in: query
@@ -1182,10 +1200,18 @@ components:
         present_in_final_image:
           type: boolean
 
+    NextCursor:
+      type: string
+      description: >-
+        Opaque keyset cursor for the page after this one, to be passed as
+        `cursor`. Present as a non-empty string whenever the page was full
+        (`limit` items); the empty string means the page was short and the
+        listing is exhausted. A full final page therefore yields one more,
+        empty page.
     RepositoriesResponse:
       type: object
       additionalProperties: false
-      required: [repositories, limit, offset]
+      required: [repositories, limit, offset, next_cursor]
       properties:
         repositories:
           type: array
@@ -1195,6 +1221,8 @@ components:
           type: integer
         offset:
           type: integer
+        next_cursor:
+          $ref: "#/components/schemas/NextCursor"
     Repository:
       type: object
       additionalProperties: false
@@ -1214,7 +1242,7 @@ components:
     RepositoryScansResponse:
       type: object
       additionalProperties: false
-      required: [registry, repository, scans, limit, offset]
+      required: [registry, repository, scans, limit, offset, next_cursor]
       properties:
         registry:
           type: string
@@ -1229,6 +1257,8 @@ components:
           type: integer
         offset:
           type: integer
+        next_cursor:
+          $ref: "#/components/schemas/NextCursor"
     ScanSummary:
       description: One persisted scan run as listed in repository history; closed to fields beyond ScanRunFields.
       allOf:
@@ -1349,7 +1379,7 @@ components:
     RepositoryFindingsResponse:
       type: object
       additionalProperties: false
-      required: [registry, repository, findings, disposition, limit, offset]
+      required: [registry, repository, findings, disposition, limit, offset, next_cursor]
       properties:
         registry:
           type: string
@@ -1367,6 +1397,8 @@ components:
           type: integer
         offset:
           type: integer
+        next_cursor:
+          $ref: "#/components/schemas/NextCursor"
     FindingSummary:
       description: One deduplicated finding as listed for a repository; closed to fields beyond FindingFields.
       allOf:

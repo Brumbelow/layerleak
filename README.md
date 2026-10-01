@@ -431,6 +431,12 @@ repository sweep:
 
 List endpoints accept `limit` and `offset`; `limit` defaults to 50 and values
 above 200 are clamped to 200 (the response reports the effective `limit`).
+Every list response also returns `next_cursor`: an opaque keyset position for
+the following page whenever the page was full, or `""` when the listing is
+exhausted. Pass it back as `cursor` to continue from that position; deep pages
+then cost the same as the first, unlike `offset`, which re-sorts everything it
+skips. A cursor is tied to one endpoint and cannot be combined with a non-zero
+`offset`; a foreign, malformed or combined cursor is 400 `invalid_request`.
 Repository scan and finding endpoints accept `registry` as `host` or
 `host:port` (default `docker.io`; `index.docker.io` and `registry-1.docker.io`
 normalise to `docker.io`; anything else is 400) and echo the normalised value

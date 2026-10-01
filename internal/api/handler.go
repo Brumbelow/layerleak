@@ -127,10 +127,14 @@ type scanResponse struct {
 	Error     *errorResponse  `json:"error,omitempty"`
 }
 
+// List responses carry next_cursor: an opaque keyset position for the page
+// after this one whenever the page was full, "" when the listing is known to
+// be exhausted. It is additive beside limit and offset.
 type repositoriesResponse struct {
 	Repositories []repositoryItem `json:"repositories"`
 	Limit        int              `json:"limit"`
 	Offset       int              `json:"offset"`
+	NextCursor   string           `json:"next_cursor"`
 }
 
 type repositoryScansResponse struct {
@@ -139,6 +143,7 @@ type repositoryScansResponse struct {
 	Scans      []scanSummaryItem `json:"scans"`
 	Limit      int               `json:"limit"`
 	Offset     int               `json:"offset"`
+	NextCursor string            `json:"next_cursor"`
 }
 
 type repositoryItem struct {
@@ -155,6 +160,7 @@ type repositoryFindingsResponse struct {
 	Disposition string               `json:"disposition"`
 	Limit       int                  `json:"limit"`
 	Offset      int                  `json:"offset"`
+	NextCursor  string               `json:"next_cursor"`
 }
 
 type findingSummaryItem struct {
@@ -489,10 +495,15 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindRepository, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositories(ctx, limit, offset)
+	items, err := h.store.ListRepositories(ctx, limit, offset, repositoryCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repositories", err)
 		return
@@ -502,6 +513,7 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		Repositories: make([]repositoryItem, 0, len(items)),
 		Limit:        limit,
 		Offset:       offset,
+		NextCursor:   nextRepositoryCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Repositories = append(response.Repositories, repositoryItem{
@@ -553,9 +565,14 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindScan, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset)
+	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset, scanRunCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository scans", err)
 		return
@@ -567,6 +584,7 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		Scans:      make([]scanSummaryItem, 0, len(items)),
 		Limit:      limit,
 		Offset:     offset,
+		NextCursor: nextScanRunCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Scans = append(response.Scans, mapScanRunSummary(item))
@@ -602,9 +620,14 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindFinding, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset)
+	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset, findingCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository findings", err)
 		return
@@ -617,6 +640,7 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		Disposition: string(disposition),
 		Limit:       limit,
 		Offset:      offset,
+		NextCursor:  nextFindingCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Findings = append(response.Findings, mapFindingSummary(item))

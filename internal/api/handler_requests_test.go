@@ -19,15 +19,15 @@ type failingStore struct {
 	err error
 }
 
-func (s *failingStore) ListRepositories(context.Context, int, int) ([]storage.RepositorySummary, error) {
+func (s *failingStore) ListRepositories(context.Context, int, int, *storage.RepositoryCursor) ([]storage.RepositorySummary, error) {
 	return nil, s.err
 }
 
-func (s *failingStore) ListRepositoryScans(context.Context, string, string, int, int) ([]storage.ScanRunSummary, error) {
+func (s *failingStore) ListRepositoryScans(context.Context, string, string, int, int, *storage.ScanRunCursor) ([]storage.ScanRunSummary, error) {
 	return nil, s.err
 }
 
-func (s *failingStore) ListRepositoryFindings(context.Context, string, string, storage.FindingDispositionFilter, int, int) ([]storage.FindingSummary, error) {
+func (s *failingStore) ListRepositoryFindings(context.Context, string, string, storage.FindingDispositionFilter, int, int, *storage.FindingCursor) ([]storage.FindingSummary, error) {
 	return nil, s.err
 }
 

@@ -21,7 +21,7 @@ func TestPostgresStoreBareConfigRetainsIdleConnections(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	for index := 0; index < 3; index++ {
-		if _, err := store.ListRepositories(context.Background(), 10, 0); err != nil {
+		if _, err := store.ListRepositories(context.Background(), 10, 0, nil); err != nil {
 			t.Fatalf("ListRepositories() error = %v", err)
 		}
 	}
@@ -111,7 +111,7 @@ func TestPostgresStoreAcceptsAlternativeDSNGrammars(t *testing.T) {
 			if err := store.Ready(context.Background()); err != nil {
 				t.Fatalf("Ready() error = %v", err)
 			}
-			repositories, err := store.ListRepositories(context.Background(), 10, 0)
+			repositories, err := store.ListRepositories(context.Background(), 10, 0, nil)
 			if err != nil || len(repositories) != 0 {
 				t.Fatalf("ListRepositories() = %v, %v", repositories, err)
 			}

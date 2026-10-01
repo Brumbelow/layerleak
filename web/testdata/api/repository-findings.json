@@ -17,6 +17,7 @@
     }
   ],
   "limit": 50,
+  "next_cursor": "",
   "offset": 0,
   "registry": "docker.io",
   "repository": "library/example"

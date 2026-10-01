@@ -13,7 +13,6 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/findings"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
-	"github.com/brumbelow/layerleak/v3/internal/registry"
 	"github.com/brumbelow/layerleak/v3/internal/scanner"
 	"github.com/brumbelow/layerleak/v3/internal/version"
 )
@@ -29,7 +28,10 @@ const ScannerName = "layerleak"
 type Request struct {
 	Reference manifest.Reference
 	Platform  string
-	Registry  *registry.Client
+	// Registry is the BlobSource every target of the scan is read from: a
+	// *registry.Client, or a local reader for an oci:, oci-archive: or
+	// docker-archive: reference.
+	Registry  scanner.BlobSource
 	Detectors detectors.Set
 	Logger    *slog.Logger
 	// ScannerVersion is reported as scanner.version; empty means the build
@@ -672,11 +674,18 @@ func targetResultFromScanResult(reference manifest.Reference, scanResult scanner
 	}
 }
 
+// scannedTags is the tag a reference scan reports in tag_results: none for a
+// digest reference, and none for a local source selected without a tag (its
+// only image has no tag to report).
 func scannedTags(reference manifest.Reference) []string {
 	if strings.TrimSpace(reference.Digest) != "" {
 		return nil
 	}
-	return []string{reference.Identifier()}
+	identifier := reference.Identifier()
+	if identifier == "" {
+		return nil
+	}
+	return []string{identifier}
 }
 
 func firstTag(tags []string) string {

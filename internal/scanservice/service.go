@@ -14,6 +14,8 @@ import (
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/source"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
@@ -101,15 +103,15 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	registryClient, err := s.registryClient(request.Reference, request)
+	blobSource, closeSource, err := s.blobSource(request)
 	if err != nil {
-		configErr := fmt.Errorf("configure registry client: %w", err)
-		return Outcome{ScanError: configErr}, wrapScanError(configErr)
+		return Outcome{ScanError: err}, wrapScanError(err)
 	}
+	defer closeSource()
 	result, scanErr := jobs.Scan(ctx, jobs.Request{
 		Reference:            request.Reference,
 		Platform:             request.Platform,
-		Registry:             registryClient,
+		Registry:             blobSource,
 		Detectors:            s.detectors,
 		Logger:               request.Logger,
 		ScannerVersion:       request.ScannerVersion,
@@ -183,6 +185,31 @@ func (s *Service) saveTimeout() time.Duration {
 		return s.config.DatabaseWriteTimeout
 	}
 	return storage.DefaultWriteTimeout
+}
+
+// ErrCredentialForLocalSource is returned when a registry credential is given
+// for a local image source, where it could never be used.
+var ErrCredentialForLocalSource = errors.New("registry credentials do not apply to a local image source (oci:, oci-archive:, docker-archive:)")
+
+// blobSource opens what the scan reads from: a local layout or archive for a
+// local reference, otherwise a registry client for the reference's registry.
+// The returned function releases the source after the scan.
+func (s *Service) blobSource(request Request) (scanner.BlobSource, func(), error) {
+	if request.Reference.IsLocal() {
+		if !request.Credential.IsZero() {
+			return nil, nil, ErrCredentialForLocalSource
+		}
+		local, err := source.Open(request.Reference, source.Options{MaxManifestBytes: s.config.MaxManifestBytes})
+		if err != nil {
+			return nil, nil, fmt.Errorf("open local image source: %w", err)
+		}
+		return local, func() { _ = local.Close() }, nil
+	}
+	registryClient, err := s.registryClient(request.Reference, request)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure registry client: %w", err)
+	}
+	return registryClient, func() {}, nil
 }
 
 func (s *Service) registryClient(ref manifest.Reference, request Request) (*registry.Client, error) {

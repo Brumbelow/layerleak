@@ -13,11 +13,16 @@ import (
 const DockerHubRegistry = "docker.io"
 
 type Reference struct {
-	Original    string
-	Registry    string
-	Repository  string
-	Tag         string
-	Digest      string
+	Original   string
+	Registry   string
+	Repository string
+	Tag        string
+	Digest     string
+	// Scheme is the local source scheme (oci, oci-archive, docker-archive)
+	// of a reference parsed by ParseLocalReference; it is empty for every
+	// registry reference. A local Repository already carries the scheme
+	// (`oci:/srv/images/app`) and renders without a registry prefix.
+	Scheme      string
 	TagExplicit bool
 }
 
@@ -30,6 +35,9 @@ func ParseReference(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("image reference must not include surrounding whitespace")
 	}
 
+	if LocalScheme(value) != "" {
+		return Reference{}, ErrLocalSourceNotSupported
+	}
 	if strings.Contains(value, "://") {
 		return Reference{}, fmt.Errorf("image reference must not include a scheme")
 	}
@@ -100,11 +108,18 @@ func ValidateDigest(value string) error {
 	}
 }
 
+// Identifier is the tag or digest the source is asked for: the digest when
+// set, otherwise the tag, otherwise "latest" for a registry reference. A
+// local reference without a tag or digest yields "" and the local source
+// selects the only image it holds.
 func (r Reference) Identifier() string {
 	if r.Digest != "" {
 		return r.Digest
 	}
 	if r.Tag == "" {
+		if r.IsLocal() {
+			return ""
+		}
 		return "latest"
 	}
 
@@ -112,7 +127,7 @@ func (r Reference) Identifier() string {
 }
 
 func (r Reference) CanonicalString(digest string) string {
-	value := r.Registry + "/" + r.Repository
+	value := r.RepositoryString()
 	if strings.TrimSpace(digest) != "" {
 		return value + "@" + strings.TrimSpace(digest)
 	}
@@ -125,7 +140,12 @@ func (r Reference) CanonicalString(digest string) string {
 	return value
 }
 
+// RepositoryString is the registry-qualified repository, or the scheme and
+// path of a local source.
 func (r Reference) RepositoryString() string {
+	if r.IsLocal() {
+		return r.Repository
+	}
 	return r.Registry + "/" + r.Repository
 }
 
@@ -135,9 +155,10 @@ func (r Reference) IsRepositoryOnly() bool {
 
 func (r Reference) WithTag(tag string) Reference {
 	return Reference{
-		Original:    r.Registry + "/" + r.Repository + ":" + strings.TrimSpace(tag),
+		Original:    r.RepositoryString() + ":" + strings.TrimSpace(tag),
 		Registry:    r.Registry,
 		Repository:  r.Repository,
+		Scheme:      r.Scheme,
 		Tag:         strings.TrimSpace(tag),
 		TagExplicit: true,
 	}
@@ -145,9 +166,10 @@ func (r Reference) WithTag(tag string) Reference {
 
 func (r Reference) WithDigest(digest string) Reference {
 	return Reference{
-		Original:   r.Registry + "/" + r.Repository + "@" + strings.TrimSpace(digest),
+		Original:   r.RepositoryString() + "@" + strings.TrimSpace(digest),
 		Registry:   r.Registry,
 		Repository: r.Repository,
+		Scheme:     r.Scheme,
 		Digest:     strings.TrimSpace(digest),
 	}
 }
@@ -157,7 +179,7 @@ func (r Reference) RepositoryScope() string {
 }
 
 func (r Reference) String() string {
-	value := r.Registry + "/" + r.Repository
+	value := r.RepositoryString()
 	if r.Tag != "" {
 		value += ":" + r.Tag
 	}

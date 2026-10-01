@@ -48,8 +48,24 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 
 	cmd := &cobra.Command{
 		Use:   "scan <image-ref>",
-		Short: "Scan a public OCI image reference from any supported registry",
-		Args:  cobra.ExactArgs(1),
+		Short: "Scan an OCI image from a registry, an OCI layout or a docker save archive",
+		Long: `Scan an OCI image for likely secrets.
+
+<image-ref> is a registry reference (alpine:3.20, ghcr.io/org/app@sha256:...)
+or a local image source:
+
+  oci:<dir>[:<tag>][@<digest>]                 OCI image layout directory
+  oci-archive:<file.tar>[:<tag>][@<digest>]    tar archive of an OCI image layout
+  docker-archive:<file.tar>[:<repo>[:<tag>]][@<digest>]   docker save archive
+
+The path ends at the first colon (a Windows drive letter stays in the path).
+A local source that holds one image needs no tag; one that holds several
+needs a tag (an index.json ref.name such as 1.2 or docker.io/library/app:1.2,
+or a docker save RepoTags name such as app:1.2) or a digest. --all-tags
+enumerates the tags a local source holds. Registry credentials
+(--username/--password-stdin, LAYERLEAK_REGISTRY_USERNAME) are refused for
+local sources.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			outputFormat, err := parseOutputFormat(format)
 			if err != nil {
@@ -63,7 +79,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err != nil {
 				return err
 			}
-			ref, err := manifest.ParseReference(args[0])
+			ref, err := manifest.ParseImageReference(args[0])
 			if err != nil {
 				return err
 			}
@@ -82,6 +98,9 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err != nil {
 				return err
 			}
+			if ref.IsLocal() && !credential.IsZero() {
+				return fmt.Errorf("--username/--password-stdin do not apply to the local image source %s: %w", ref.Repository, scanservice.ErrCredentialForLocalSource)
+			}
 
 			cfg, err := config.Load()
 			if err != nil {
@@ -93,6 +112,9 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			// only ever sent over https.
 			if credential.IsZero() {
 				credential = scanservice.ConfiguredCredential(cfg)
+			}
+			if ref.IsLocal() && !credential.IsZero() {
+				return fmt.Errorf("LAYERLEAK_REGISTRY_USERNAME/LAYERLEAK_REGISTRY_PASSWORD do not apply to the local image source %s: %w", ref.Repository, scanservice.ErrCredentialForLocalSource)
 			}
 			if err := applyScanScopeFlags(cmd, &cfg, tagPageSize, maxRepositoryTags, maxRepositoryTargets); err != nil {
 				return err
@@ -114,7 +136,9 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				defer cancel()
 			}
 
-			if allTags {
+			// A local source holds a known, finite set of tags; the warning is
+			// about registry sweeps.
+			if allTags && !ref.IsLocal() {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), repositorySweepWarning); err != nil {
 					logger.Debug("progress update failed")
 				}
@@ -122,7 +146,10 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 
 			progress := newProgressRendererWithMode(cmd.ErrOrStderr(), progressMode)
 			startingMessage := "Preparing scan"
-			if allTags {
+			switch {
+			case allTags && ref.IsLocal():
+				startingMessage = "Preparing sweep across every tag of the local image source"
+			case allTags:
 				startingMessage = "Preparing repository sweep across every public tag"
 			}
 			if err := progress.Start(progressSnapshot{

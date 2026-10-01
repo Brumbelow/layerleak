@@ -19,9 +19,12 @@ import (
 )
 
 type Request struct {
-	Reference          manifest.Reference
-	Platform           string
-	Registry           *registry.Client
+	Reference manifest.Reference
+	Platform  string
+	// Registry is the BlobSource the image is read from: a *registry.Client
+	// for a registry reference or a local reader for an oci:, oci-archive:
+	// or docker-archive: reference.
+	Registry           BlobSource
 	Detectors          detectors.Set
 	Logger             *slog.Logger
 	MaxFileBytes       int64

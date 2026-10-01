@@ -815,6 +815,12 @@ components:
         reference:
           type: string
           minLength: 1
+          description: >-
+            Registry image reference: a repository with an optional tag or
+            digest, Docker Hub when no registry is named. Local image sources
+            (`oci:`, `oci-archive:`, `docker-archive:`) are CLI-only; the API
+            never reads the server's filesystem and answers a local scheme
+            with 400 `invalid_request`.
           examples: [alpine:3.20]
         platform:
           type: string

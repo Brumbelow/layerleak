@@ -149,6 +149,10 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64,
 	if err := validateScanRecord(record); err != nil {
 		return 0, err
 	}
+	record, err := sanitizeScanRecord(record)
+	if err != nil {
+		return 0, err
+	}
 	ctx, cancel := withTimeout(ctx, s.writeTimeout)
 	defer cancel()
 

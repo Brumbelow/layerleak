@@ -322,7 +322,7 @@ func Redact(value string) string {
 		return strings.Repeat("*", len(runes))
 	}
 
-	return string(runes[:3]) + strings.Repeat("*", len(runes)-5) + string(runes[len(runes)-2:])
+	return SanitizeControlCharacters(string(runes[:3]) + strings.Repeat("*", len(runes)-5) + string(runes[len(runes)-2:]))
 }
 
 func Fingerprint(value string) string {
@@ -410,7 +410,7 @@ func (n *DetailedNormalizer) contextSnippet(match detectors.Match) string {
 		cursor = span.end
 	}
 	builder.WriteString(content[cursor:end])
-	return strings.TrimSpace(builder.String())
+	return SanitizeControlCharacters(strings.TrimSpace(builder.String()))
 }
 
 func (n *DetailedNormalizer) lineNumber(offset int) int {
@@ -578,7 +578,7 @@ func sanitizedProvenance(value string, provenanceMatches, contentMatches []detec
 		cursor = span.end
 	}
 	builder.WriteString(value[cursor:])
-	redacted := strings.ToValidUTF8(builder.String(), "\uFFFD")
+	redacted := SanitizeControlCharacters(strings.ToValidUTF8(builder.String(), "\uFFFD"))
 	if len(redacted) <= MaxPublicProvenanceBytes {
 		return redacted
 	}
@@ -617,8 +617,35 @@ func exactValueSpans(value string, matches []detectors.Match) []sensitiveSpan {
 	return spans
 }
 
+// SanitizeControlCharacters replaces U+0000, the other C0 control characters
+// and DEL with U+FFFD, keeping horizontal tabs, line feeds and carriage returns.
+// It is the one policy shared by public provenance (keys, file paths, source
+// locations, context snippets, redacted values), the live API JSON and the
+// PostgreSQL rows, so all three agree: PostgreSQL TEXT rejects NUL and JSONB
+// rejects \u0000, and a hostile image config must not be able to abort
+// persistence of a whole scan by embedding one in an Env or Label key.
+func SanitizeControlCharacters(value string) string {
+	if !strings.ContainsFunc(value, isDisallowedControlCharacter) {
+		return value
+	}
+	return strings.Map(func(character rune) rune {
+		if isDisallowedControlCharacter(character) {
+			return '\uFFFD'
+		}
+		return character
+	}, value)
+}
+
+func isDisallowedControlCharacter(character rune) bool {
+	switch character {
+	case '\t', '\n', '\r':
+		return false
+	}
+	return character < 0x20 || character == 0x7F
+}
+
 func boundedSanitizedProvenance(value string) string {
-	value = strings.ToValidUTF8(value, "\uFFFD")
+	value = SanitizeControlCharacters(strings.ToValidUTF8(value, "\uFFFD"))
 	if len(value) <= MaxPublicProvenanceBytes {
 		return value
 	}

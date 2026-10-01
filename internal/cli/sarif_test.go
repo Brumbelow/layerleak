@@ -42,7 +42,7 @@ func TestSARIFRulesAndEncodingExactOutput(t *testing.T) {
 		Coverage: scanner.Coverage{Complete: true, LayersSeen: 1, LayersCompleted: 1, MetadataValuesScanned: 1},
 	}
 	var output bytes.Buffer
-	if err := sarif.Encode(&output, sarif.FromResult(result, sarif.Options{ToolVersion: "v3.0.0-test", Rules: sarifRules([]string{"aws_access_key_id", "github_token"})})); err != nil {
+	if err := sarif.Encode(&output, sarif.FromResult(result, sarif.Options{ToolVersion: "v3.0.0-test", Rules: sarifRules([]detectors.Info{{ID: "aws_access_key_id", Description: "AWS access key id (AKIA, ASIA, ABIA or ACCA prefix)."}, {ID: "github_token"}})})); err != nil {
 		t.Fatal(err)
 	}
 	const want = `{
@@ -61,7 +61,7 @@ func TestSARIFRulesAndEncodingExactOutput(t *testing.T) {
               "id": "aws_access_key_id",
               "name": "aws_access_key_id",
               "shortDescription": {
-                "text": "Likely secret matched by the aws_access_key_id detector."
+                "text": "AWS access key id (AKIA, ASIA, ABIA or ACCA prefix)."
               },
               "helpUri": "https://github.com/Brumbelow/layerleak",
               "defaultConfiguration": {

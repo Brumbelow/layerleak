@@ -387,19 +387,20 @@ func parseOutputFormat(value string) (string, error) {
 }
 
 // renderSARIF writes the result as a SARIF 2.1.0 log. The rule list comes
-// from the default detector catalog so every detector is described even when
-// it produced no result, and tool.driver.version is this binary's version.
+// from the default detector catalog so every detector is described (with the
+// catalog description) even when it produced no result, and
+// tool.driver.version is this binary's version.
 func renderSARIF(out io.Writer, result jobs.Result) error {
 	return sarif.Encode(out, sarif.FromResult(result, sarif.Options{
 		ToolVersion: effectiveVersion(),
-		Rules:       sarifRules(detectors.Default().Catalog()),
+		Rules:       sarifRules(detectors.Default().Describe()),
 	}))
 }
 
-func sarifRules(catalog []string) []sarif.Rule {
+func sarifRules(catalog []detectors.Info) []sarif.Rule {
 	rules := make([]sarif.Rule, 0, len(catalog))
-	for _, id := range catalog {
-		rules = append(rules, sarif.Rule{ID: id})
+	for _, info := range catalog {
+		rules = append(rules, sarif.Rule{ID: info.ID, Description: info.Description})
 	}
 	return rules
 }

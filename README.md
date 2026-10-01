@@ -290,6 +290,21 @@ code scanning from a workflow:
     sarif_file: layerleak.sarif
 ```
 
+### Detector catalog
+
+`layerleak detectors list` prints every detector identifier a finding can
+carry in `detector_name` (and SARIF `ruleId`) with the confidence tier a match
+starts from, the matching strategy and a one-line description;
+`--format json` prints the same rows as JSON. The catalog is compiled in and
+read-only: there is no rule file or custom-rule syntax by design. The same
+data generates [docs/detectors.md](docs/detectors.md), and a test keeps that
+page and the code in step.
+
+```bash
+layerleak detectors list
+layerleak detectors list --format json | jq -r '.detectors[] | select(.confidence == "high") | .id'
+```
+
 ### Private registries
 
 Pass a per-scan credential with `--username <name> --password-stdin`; the

@@ -1,7 +1,8 @@
 package api
 
 import (
-	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -138,9 +139,20 @@ func (m *metrics) scanFinished() {
 }
 
 // write renders the exposition. Families and label sets are emitted in sorted
-// order so two scrapes of the same state are byte-identical.
+// order so two scrapes of the same state are byte-identical. The whole page is
+// rendered into memory under the mutex and written to the destination only
+// after the mutex is released: a scrape client that stops reading must stall
+// its own handler, never the observeRequest call every API request makes.
+// The page size is bounded by route-pattern and error-code cardinality.
 func (m *metrics) write(destination io.Writer) error {
-	writer := bufio.NewWriter(destination)
+	page := m.render()
+	_, err := destination.Write(page.Bytes())
+	return err
+}
+
+// render snapshots the registry into one exposition page under the mutex.
+func (m *metrics) render() *bytes.Buffer {
+	writer := &bytes.Buffer{}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -191,7 +203,7 @@ func (m *metrics) write(destination io.Writer) error {
 	writeFamily(writer, "layerleak_scans_in_flight", "gauge", "Scans currently running.")
 	writeSample(writer, "layerleak_scans_in_flight", nil, strconv.FormatInt(m.inFlight.Load(), 10))
 
-	return writer.Flush()
+	return writer
 }
 
 type label struct {
@@ -201,12 +213,12 @@ type label struct {
 
 type labels []label
 
-func writeFamily(writer *bufio.Writer, name, kind, help string) {
+func writeFamily(writer *bytes.Buffer, name, kind, help string) {
 	_, _ = writer.WriteString("# HELP " + name + " " + escapeHelp(help) + "\n")
 	_, _ = writer.WriteString("# TYPE " + name + " " + kind + "\n")
 }
 
-func writeSample(writer *bufio.Writer, name string, set labels, value string) {
+func writeSample(writer *bytes.Buffer, name string, set labels, value string) {
 	_, _ = writer.WriteString(name)
 	if len(set) > 0 {
 		_, _ = writer.WriteString("{")
@@ -255,8 +267,13 @@ func sortedKeys[V any](items map[string]V) []string {
 // MetricsHandler serves the Prometheus exposition at GET /metrics. It is
 // meant for the separate metrics listener (LAYERLEAK_API_METRICS_ADDR) and is
 // never mounted on the API mux, so it carries no bearer-token check of its own.
+// Each response carries the API's response write deadline so a scraper that
+// stops reading is abandoned instead of pinning a handler goroutine.
 func (h *Handler) MetricsHandler() http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if err := http.NewResponseController(writer).SetWriteDeadline(time.Now().Add(h.options.ResponseTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			h.logger.Warn("set metrics response deadline", "error_type", fmt.Sprintf("%T", err))
+		}
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		if request.URL.Path != "/metrics" {

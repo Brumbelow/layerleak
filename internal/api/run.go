@@ -27,7 +27,8 @@ type ServerOptions struct {
 	Addr string
 	// MetricsAddr, when set, is a second host:port on which ListenAndServe
 	// serves GET /metrics (Prometheus text format) with the same timeouts
-	// and drain. Empty disables the metrics listener. It is never the API
+	// (including Handler.ResponseTimeout as the write deadline) and drain.
+	// Empty disables the metrics listener. It is never the API
 	// address: metrics are not exposed on the API port.
 	MetricsAddr       string
 	ReadHeaderTimeout time.Duration
@@ -97,8 +98,12 @@ func NewServer(scanner scanExecutor, store storage.ReadStore, options ServerOpti
 		Handler:           handler.MetricsHandler(),
 		ReadHeaderTimeout: options.ReadHeaderTimeout,
 		ReadTimeout:       options.ReadTimeout,
-		IdleTimeout:       options.IdleTimeout,
-		ErrorLog:          slog.NewLogLogger(options.Logger.Handler(), slog.LevelError),
+		// The API handlers set their own per-response deadline; the metrics
+		// handler does too, and the server-wide timeout backs it so a scraper
+		// that stops reading can never pin a connection for good.
+		WriteTimeout: handler.options.ResponseTimeout,
+		IdleTimeout:  options.IdleTimeout,
+		ErrorLog:     slog.NewLogLogger(options.Logger.Handler(), slog.LevelError),
 	}
 	return &Server{
 		handler:       handler,

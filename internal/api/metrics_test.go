@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -353,5 +355,62 @@ func TestServerListenAndServeReportsMetricsBindFailure(t *testing.T) {
 	}
 	if _, dialErr := net.DialTimeout("tcp", apiAddr, 200*time.Millisecond); dialErr == nil {
 		t.Fatal("API listener was left open after the metrics bind failed")
+	}
+}
+
+// TestMetricsStalledScraperDoesNotBlockObservations: a scrape client that
+// never reads its response must not wedge the API. The exposition is
+// rendered under the metrics mutex, so if the handler wrote to the socket
+// while holding it, every API request's deferred observeRequest would block
+// behind one stalled scraper. The handler also sets a write deadline, so the
+// stalled response is abandoned and the server can drain.
+func TestMetricsStalledScraperDoesNotBlockObservations(t *testing.T) {
+	handler := newHandler(&stubScanner{}, &stubReadStore{}, HandlerOptions{ResponseTimeout: 500 * time.Millisecond, Logger: testLogger(nil)})
+	// Enough routes that a single exposition dwarfs any loopback socket buffer.
+	for index := range 4000 {
+		handler.metrics.observeRequest(fmt.Sprintf("GET /api/v1/route-%04d", index), http.StatusOK, time.Millisecond)
+	}
+
+	server := httptest.NewServer(handler.MetricsHandler())
+	t.Cleanup(server.Close)
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	// Pipeline scrapes without ever reading: the first response fills the
+	// socket buffers and the handler's write stalls.
+	var pipeline strings.Builder
+	for range 40 {
+		pipeline.WriteString("GET /metrics HTTP/1.1\r\nHost: metrics\r\n\r\n")
+	}
+	if _, err := io.WriteString(conn, pipeline.String()); err != nil {
+		t.Fatalf("send pipelined scrapes: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	observed := make(chan struct{})
+	go func() {
+		handler.metrics.observeRequest("GET /health", http.StatusOK, time.Millisecond)
+		close(observed)
+	}()
+	select {
+	case <-observed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("observeRequest blocked for 3s: metrics mutex is held while writing to a stalled scrape client")
+	}
+
+	// The stalled handler hits its write deadline and returns, so closing
+	// the server (which waits for in-flight requests) completes without the
+	// client ever reading.
+	closed := make(chan struct{})
+	go func() {
+		server.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("metrics server could not close: stalled scrape never timed out")
 	}
 }

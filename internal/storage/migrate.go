@@ -85,9 +85,60 @@ type migrationFile struct {
 }
 
 type migrationRow struct {
-	Version  string
-	Name     string
-	Checksum string
+	Version   string
+	Name      string
+	Checksum  string
+	AppliedAt time.Time
+}
+
+// loadValidatedMigrations loads the shipped migration files and checks that
+// they form the contiguous 0001..CurrentSchemaVersion sequence.
+func loadValidatedMigrations(directory string) ([]migrationFile, error) {
+	migrations, err := loadMigrationFiles(directory)
+	if err != nil {
+		return nil, err
+	}
+	if len(migrations) == 0 {
+		return nil, fmt.Errorf("no migration files found in %s", strings.TrimSpace(directory))
+	}
+	for index, migration := range migrations {
+		expected := fmt.Sprintf("%04d", index+1)
+		if migration.Version != expected {
+			return nil, fmt.Errorf("migration sequence is not contiguous: expected %s, found %s", expected, migration.Version)
+		}
+	}
+	if migrations[len(migrations)-1].Version != CurrentSchemaVersion {
+		return nil, fmt.Errorf("migration set ends at %s, expected %s", migrations[len(migrations)-1].Version, CurrentSchemaVersion)
+	}
+	return migrations, nil
+}
+
+// openMigrationConnection opens a single pinned connection, pings it and
+// checks the server version. The caller closes both returned handles.
+func openMigrationConnection(ctx context.Context, databaseURL string) (*sql.DB, *sql.Conn, error) {
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open postgres connection: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("acquire migration connection: %w", err)
+	}
+	if err := connection.PingContext(ctx); err != nil {
+		_ = connection.Close()
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("ping postgres: %w", err)
+	}
+	if err := ensureMinimumPostgresServerVersion(ctx, connection); err != nil {
+		_ = connection.Close()
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return db, connection, nil
 }
 
 // RunMigrations applies all pending up migrations while holding a database-wide
@@ -98,42 +149,17 @@ func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult
 	if err := (PostgresConfig{DatabaseURL: databaseURL}).Validate(); err != nil {
 		return MigrationResult{}, err
 	}
-	migrations, err := loadMigrationFiles(config.Directory)
+	migrations, err := loadValidatedMigrations(config.Directory)
 	if err != nil {
 		return MigrationResult{}, err
 	}
-	if len(migrations) == 0 {
-		return MigrationResult{}, fmt.Errorf("no migration files found in %s", strings.TrimSpace(config.Directory))
-	}
-	for index, migration := range migrations {
-		expected := fmt.Sprintf("%04d", index+1)
-		if migration.Version != expected {
-			return MigrationResult{}, fmt.Errorf("migration sequence is not contiguous: expected %s, found %s", expected, migration.Version)
-		}
-	}
-	if migrations[len(migrations)-1].Version != CurrentSchemaVersion {
-		return MigrationResult{}, fmt.Errorf("migration set ends at %s, expected %s", migrations[len(migrations)-1].Version, CurrentSchemaVersion)
-	}
 
-	db, err := sql.Open("postgres", databaseURL)
+	db, connection, err := openMigrationConnection(ctx, databaseURL)
 	if err != nil {
-		return MigrationResult{}, fmt.Errorf("open postgres connection: %w", err)
+		return MigrationResult{}, err
 	}
 	defer func() { _ = db.Close() }()
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	connection, err := db.Conn(ctx)
-	if err != nil {
-		return MigrationResult{}, fmt.Errorf("acquire migration connection: %w", err)
-	}
 	defer func() { _ = connection.Close() }()
-	if err := connection.PingContext(ctx); err != nil {
-		return MigrationResult{}, fmt.Errorf("ping postgres: %w", err)
-	}
-	if err := ensureMinimumPostgresServerVersion(ctx, connection); err != nil {
-		return MigrationResult{}, err
-	}
 	if _, err := connection.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationAdvisoryKey); err != nil {
 		return MigrationResult{}, fmt.Errorf("acquire migration lock: %w", err)
 	}
@@ -277,7 +303,7 @@ func (l schemaLedger) createSQL() string {
 }
 
 func (l schemaLedger) readSQL() string {
-	return "SELECT version, name, sha256 FROM " + l.table + " ORDER BY version"
+	return "SELECT version, name, sha256, applied_at FROM " + l.table + " ORDER BY version"
 }
 
 func (l schemaLedger) versionsSQL() string {
@@ -300,7 +326,7 @@ func readAppliedMigrations(ctx context.Context, queryer interface {
 	applied := make(map[string]migrationRow)
 	for rows.Next() {
 		var item migrationRow
-		if err := rows.Scan(&item.Version, &item.Name, &item.Checksum); err != nil {
+		if err := rows.Scan(&item.Version, &item.Name, &item.Checksum, &item.AppliedAt); err != nil {
 			return nil, fmt.Errorf("scan schema migration ledger: %w", err)
 		}
 		applied[item.Version] = item

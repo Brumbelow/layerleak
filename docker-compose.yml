@@ -24,6 +24,12 @@ services:
     image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
     environment:
       LAYERLEAK_API_ADDR: 0.0.0.0:8080
+      # Opt-in bearer tokens; prefer a mounted secret file over inline values.
+      LAYERLEAK_API_BEARER_TOKENS: "${LAYERLEAK_API_BEARER_TOKENS:-}"
+      LAYERLEAK_API_BEARER_TOKENS_FILE: "${LAYERLEAK_API_BEARER_TOKENS_FILE:-}"
+      # Optional Prometheus listener, e.g. 0.0.0.0:9090; add a ports: entry to
+      # publish it, preferably on a private interface.
+      LAYERLEAK_API_METRICS_ADDR: "${LAYERLEAK_API_METRICS_ADDR:-}"
       LAYERLEAK_API_IDLE_TIMEOUT: ${LAYERLEAK_API_IDLE_TIMEOUT:-60s}
       LAYERLEAK_API_MAX_CONCURRENT_SCANS: ${LAYERLEAK_API_MAX_CONCURRENT_SCANS:-1}
       LAYERLEAK_API_MAX_REQUEST_BYTES: ${LAYERLEAK_API_MAX_REQUEST_BYTES:-16384}
@@ -137,6 +143,7 @@ services:
       LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
       PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
+      LAYERLEAK_PURGE_TIMEOUT: ${LAYERLEAK_PURGE_TIMEOUT:-30m}
     depends_on:
       db:
         condition: service_healthy

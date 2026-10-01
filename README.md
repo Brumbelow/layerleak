@@ -42,8 +42,10 @@ bounded and fail closed:
   scan.
 
 Layerleak does not verify whether a detected credential is live. The API has no
-built-in authentication or authorization; expose it only on a trusted network
-or behind an authenticated gateway.
+authorization model: it is open by default, and the opt-in
+`LAYERLEAK_API_BEARER_TOKENS` shared-token check is defence in depth for the
+`/api/` paths, not access control. Expose it only on a trusted network or
+behind an authenticated gateway either way.
 
 ## Install the CLI
 
@@ -301,6 +303,9 @@ apply. Hosts matched by `NO_PROXY` are connected directly with address pinning.
 | `LAYERLEAK_API_PRESTOP_DELAY` | `0s` | Drain window after `SIGTERM`/`SIGINT`: `/readyz` answers 503 `not_ready` and new scans are refused with 503 `server_shutting_down` while in-flight requests keep running; when it elapses, in-flight scans are cancelled with 503 `server_shutting_down`. May be `0s`. Keep `LAYERLEAK_API_STOP_GRACE_PERIOD` above this plus `LAYERLEAK_API_SHUTDOWN_TIMEOUT`. |
 | `LAYERLEAK_API_READINESS_TIMEOUT` | `2s` | Database readiness query deadline. |
 | `LAYERLEAK_API_READINESS_CACHE_TTL` | `5s` | How long a `/readyz` result (success or failure) is reused before the ping and schema-contract validation run again; concurrent probes share one check. `0s` validates on every probe. |
+| `LAYERLEAK_API_BEARER_TOKENS` | empty | Opt-in authentication: comma-separated bearer tokens, each at least 32 printable ASCII characters. When set, every `/api/` request needs `Authorization: Bearer <token>` (401 `unauthorized` otherwise); `/health`, `/livez` and `/readyz` stay open. Tokens are kept only as SHA-256 digests and compared in constant time. Mutually exclusive with `LAYERLEAK_API_BEARER_TOKENS_FILE`. |
+| `LAYERLEAK_API_BEARER_TOKENS_FILE` | empty | Path of a file with one bearer token per line (blank lines ignored, at most 64 KiB), read once at startup; the same rules as `LAYERLEAK_API_BEARER_TOKENS` apply. Use it to mount tokens as a secret instead of an environment variable. |
+| `LAYERLEAK_API_METRICS_ADDR` | empty | Optional `host:port` for a second listener that serves Prometheus text-format metrics at `GET /metrics` (request counts and durations by route pattern, scan outcomes and error codes, in-flight scans, process start time). Empty disables it; it must differ from `LAYERLEAK_API_ADDR`, because metrics are never served on the API port. Bind it to a private interface: the endpoint is unauthenticated. |
 | `LAYERLEAK_DATABASE_URL` | empty | PostgreSQL connection URL. The password may be left out of the URL and supplied through `PGPASSWORD` or `PGPASSFILE`; the driver fills any field the URL omits from the standard `PG*` variables. |
 | `LAYERLEAK_DATABASE_MAX_OPEN_CONNS` | `10` | Open connection cap; must be positive. |
 | `LAYERLEAK_DATABASE_MAX_IDLE_CONNS` | `5` | Idle connection cap. |
@@ -338,8 +343,17 @@ go run ./cmd/migrate
 go run ./cmd/migrate
 ```
 
-The second run is intentionally a no-op. The migration command reads three
-variables of its own:
+The second run is intentionally a no-op. Without flags the command applies
+every pending migration. `--status` prints the ledger (each shipped migration
+with its state, applied time and SHA-256, then `current` and `expected`) and
+exits 0 when the database is current, 2 when migrations are pending or a legacy
+schema is waiting to be adopted, and 1 on any error such as checksum drift;
+`--dry-run` lists what a run would adopt and apply, changes nothing, and exits
+0; `--version` prints the build version. Neither `--status` nor `--dry-run`
+creates the ledger, adopts a legacy schema or takes the migration lock. There
+is no `down` command: the shipped `*.down.sql` files are for manual use with
+`psql` and bypass the ledger. The migration command reads three variables of
+its own:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -374,11 +388,33 @@ docker run --rm \
   -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
   --entrypoint /usr/local/bin/layerleak-purge-raw-secrets \
   ghcr.io/brumbelow/layerleak:latest \
+  --dry-run
+docker run --rm \
+  -e LAYERLEAK_DATABASE_URL="$LAYERLEAK_DATABASE_URL" \
+  --entrypoint /usr/local/bin/layerleak-purge-raw-secrets \
+  ghcr.io/brumbelow/layerleak:latest \
   --confirm
 ```
 
-The purge command requires `--confirm`, serializes concurrent purge attempts,
-and clears only `findings.value` and `finding_occurrences.raw_snippet`.
+`--dry-run` prints how many raw finding values and occurrence snippets would
+be cleared and changes nothing. A real purge requires `--confirm`, clears only
+`findings.value` and `finding_occurrences.raw_snippet`, and works in ascending
+id-range batches of `--batch-size` rows (default 5000), one transaction per
+batch: each batch holds the exclusive purge lock only for its own transaction,
+so concurrent scan writers wait for one batch instead of the whole purge, and
+every batch is bounded by `LAYERLEAK_DATABASE_WRITE_TIMEOUT`. Running totals go
+to stderr after each batch; the final counts go to stdout. Batches that already
+committed stay purged if a later one fails, so a failed or timed-out run can
+simply be rerun. The command reads one variable of its own:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LAYERLEAK_PURGE_TIMEOUT` | `30m` | Overall deadline for one run of `layerleak-purge-raw-secrets`; `0` disables it. Each batch is separately bounded by `LAYERLEAK_DATABASE_WRITE_TIMEOUT`. |
+
+An `UPDATE` does not remove the old row versions: raw material lingers in dead
+tuples until autovacuum (or `VACUUM FULL`) rewrites `findings` and
+`finding_occurrences`, and it remains in WAL archives, replicas and backups
+taken before the purge until those are rotated or expired.
 
 ## HTTP API
 
@@ -429,6 +465,12 @@ repository sweep:
 
 List endpoints accept `limit` and `offset`; `limit` defaults to 50 and values
 above 200 are clamped to 200 (the response reports the effective `limit`).
+Every list response also returns `next_cursor`: an opaque keyset position for
+the following page whenever the page was full, or `""` when the listing is
+exhausted. Pass it back as `cursor` to continue from that position; deep pages
+then cost the same as the first, unlike `offset`, which re-sorts everything it
+skips. A cursor is tied to one endpoint and cannot be combined with a non-zero
+`offset`; a foreign, malformed or combined cursor is 400 `invalid_request`.
 Repository scan and finding endpoints accept `registry` as `host` or
 `host:port` (default `docker.io`; `index.docker.io` and `registry-1.docker.io`
 normalise to `docker.io`; anything else is 400) and echo the normalised value
@@ -436,6 +478,23 @@ as `registry`. The `{repository}` segment accepts a literal `/` or `%2F`, is
 decoded once, and must match the OCI repository-name grammar (lowercase; 400
 otherwise). The finding list accepts `disposition=actionable|suppressed|all`
 and defaults to actionable.
+
+Authentication is off by default. Setting `LAYERLEAK_API_BEARER_TOKENS` (or
+`LAYERLEAK_API_BEARER_TOKENS_FILE`) turns on a shared-token check for every
+`/api/` path: requests must send `Authorization: Bearer <token>`, and a missing,
+malformed or unknown token answers 401 `unauthorized` with
+`WWW-Authenticate: Bearer realm="layerleak"` and the usual error envelope. The
+health endpoints never require a token. Tokens are at least 32 characters, are
+held in memory only as SHA-256 digests, are compared in constant time, and never
+reach the logs (a short digest prefix identifies which token was used at debug
+level). The API warns at startup when it listens on a non-loopback address
+without tokens. This is defence in depth, not authorization: keep the gateway.
+
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $LAYERLEAK_API_TOKEN" \
+  http://127.0.0.1:8080/api/v1/repositories
+```
 
 Every response is JSON and carries `X-Request-ID`, `Cache-Control: no-store`
 and `X-Content-Type-Options: nosniff`. A caller-supplied `X-Request-ID` of up
@@ -461,6 +520,7 @@ request bodies are never echoed. Status codes and `code` values:
 | --- | --- | --- | --- |
 | 200 | | every endpoint | the documented response |
 | 400 | `invalid_request` | every endpoint | error envelope |
+| 401 | `unauthorized` | every `/api/` path when `LAYERLEAK_API_BEARER_TOKENS` is set; `WWW-Authenticate: Bearer realm="layerleak"` | error envelope |
 | 404 | `not_found` | reads, unknown paths | error envelope |
 | 404 | `image_not_found` | `POST /api/v1/scans` | envelope, plus `result` when available |
 | 405 | `method_not_allowed` | every endpoint; `Allow` names the accepted method | error envelope |
@@ -494,6 +554,16 @@ response, pagination, and error schemas.
 
 The API logs one JSON record per request (method, route pattern, status,
 bytes, duration, request id, remote address; never the path, query or body).
+Setting `LAYERLEAK_API_METRICS_ADDR` adds a separate listener that serves
+Prometheus text-format metrics at `GET /metrics`, with the same timeouts and
+drain as the API: `layerleak_api_requests_total{route,status_class}`,
+`layerleak_api_request_duration_seconds` (fixed buckets from 5 ms to 30 min, by
+`route`), `layerleak_scans_total{outcome}`, `layerleak_scan_errors_total{code}`,
+`layerleak_scans_in_flight`, `layerleak_process_start_time_seconds` and
+`layerleak_build_info{version}`. Label values are mux route patterns, status
+classes and error codes only; no path, reference or request body ever becomes
+a label. The metrics port is unauthenticated and is never the API port, so
+bind it to a private interface.
 On `SIGTERM` or `SIGINT` it drains: `/readyz` answers 503 and new scans are
 refused for `LAYERLEAK_API_PRESTOP_DELAY` while in-flight requests continue,
 then in-flight scans are cancelled with 503 `server_shutting_down` and the
@@ -554,6 +624,7 @@ scan is killed before it is persisted. Purge raw material only after reviewing
 the command:
 
 ```bash
+docker compose --profile tools run --rm purge-raw-secrets --dry-run
 docker compose --profile tools run --rm purge-raw-secrets --confirm
 ```
 

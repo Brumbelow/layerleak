@@ -601,32 +601,39 @@ type stubReadStore struct {
 	disposition storage.FindingDispositionFilter
 	scanID      int64
 	findingID   int64
+
+	repositoryAfter *storage.RepositoryCursor
+	scanAfter       *storage.ScanRunCursor
+	findingAfter    *storage.FindingCursor
 }
 
 func (s *stubReadStore) Ready(_ context.Context) error {
 	return s.readyErr
 }
 
-func (s *stubReadStore) ListRepositories(_ context.Context, limit, offset int) ([]storage.RepositorySummary, error) {
+func (s *stubReadStore) ListRepositories(_ context.Context, limit, offset int, after *storage.RepositoryCursor) ([]storage.RepositorySummary, error) {
 	s.limit = limit
 	s.offset = offset
+	s.repositoryAfter = after
 	return s.repositories, nil
 }
 
-func (s *stubReadStore) ListRepositoryFindings(_ context.Context, registry, repository string, disposition storage.FindingDispositionFilter, limit, offset int) ([]storage.FindingSummary, error) {
+func (s *stubReadStore) ListRepositoryFindings(_ context.Context, registry, repository string, disposition storage.FindingDispositionFilter, limit, offset int, after *storage.FindingCursor) ([]storage.FindingSummary, error) {
 	s.registry = registry
 	s.repository = repository
 	s.disposition = disposition
 	s.limit = limit
 	s.offset = offset
+	s.findingAfter = after
 	return s.findings, nil
 }
 
-func (s *stubReadStore) ListRepositoryScans(_ context.Context, registry, repository string, limit, offset int) ([]storage.ScanRunSummary, error) {
+func (s *stubReadStore) ListRepositoryScans(_ context.Context, registry, repository string, limit, offset int, after *storage.ScanRunCursor) ([]storage.ScanRunSummary, error) {
 	s.registry = registry
 	s.repository = repository
 	s.limit = limit
 	s.offset = offset
+	s.scanAfter = after
 	return s.scans, nil
 }
 

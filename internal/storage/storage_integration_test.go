@@ -631,7 +631,7 @@ func TestPostgresStorePurgeRawSecrets(t *testing.T) {
 	if err != nil || before.Total() == 0 {
 		t.Fatalf("CountRawSecrets() = %#v, %v", before, err)
 	}
-	purged, err := store.PurgeRawSecrets(context.Background())
+	purged, err := store.PurgeRawSecrets(context.Background(), PurgeOptions{})
 	if err != nil {
 		t.Fatalf("PurgeRawSecrets() error = %v", err)
 	}
@@ -813,7 +813,7 @@ func TestPostgresStoreListRepositoriesOrdersByLastSeenAt(t *testing.T) {
 		t.Fatalf("SaveScan(second) error = %v", err)
 	}
 
-	items, err := store.ListRepositories(context.Background(), 50, 0)
+	items, err := store.ListRepositories(context.Background(), 50, 0, nil)
 	if err != nil {
 		t.Fatalf("ListRepositories() error = %v", err)
 	}
@@ -866,7 +866,7 @@ func TestPostgresStoreListRepositoriesPaginatesTiedRegistries(t *testing.T) {
 		t.Run(fmt.Sprintf("page_size_%d", pageSize), func(t *testing.T) {
 			var got []string
 			for offset := 0; offset <= len(want); offset += pageSize {
-				items, err := store.ListRepositories(context.Background(), pageSize, offset)
+				items, err := store.ListRepositories(context.Background(), pageSize, offset, nil)
 				if err != nil {
 					t.Fatalf("ListRepositories(limit=%d, offset=%d): %v", pageSize, offset, err)
 				}
@@ -906,7 +906,7 @@ func TestPostgresStoreListRepositoryScansOrdersByScannedAt(t *testing.T) {
 		t.Fatalf("SaveScan(second) error = %v", err)
 	}
 
-	items, err := store.ListRepositoryScans(context.Background(), "", "library/app", 50, 0)
+	items, err := store.ListRepositoryScans(context.Background(), "", "library/app", 50, 0, nil)
 	if err != nil {
 		t.Fatalf("ListRepositoryScans() error = %v", err)
 	}
@@ -945,7 +945,7 @@ func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *
 		t.Fatalf("SaveScan() error = %v", err)
 	}
 
-	actionable, err := store.ListRepositoryFindings(context.Background(), "", "library/app", FindingDispositionActionable, 50, 0)
+	actionable, err := store.ListRepositoryFindings(context.Background(), "", "library/app", FindingDispositionActionable, 50, 0, nil)
 	if err != nil {
 		t.Fatalf("ListRepositoryFindings(actionable) error = %v", err)
 	}
@@ -965,7 +965,7 @@ func TestPostgresStoreListRepositoryFindingsAggregatesAndFiltersDispositions(t *
 		t.Fatalf("Detectors = %#v", actionable[0].Detectors)
 	}
 
-	suppressed, err := store.ListRepositoryFindings(context.Background(), "", "library/app", FindingDispositionSuppressed, 50, 0)
+	suppressed, err := store.ListRepositoryFindings(context.Background(), "", "library/app", FindingDispositionSuppressed, 50, 0, nil)
 	if err != nil {
 		t.Fatalf("ListRepositoryFindings(suppressed) error = %v", err)
 	}
@@ -992,7 +992,7 @@ func TestPostgresStoreGetFindingLoadsOccurrenceDetail(t *testing.T) {
 		t.Fatalf("SaveScan() error = %v", err)
 	}
 
-	items, err := store.ListRepositoryFindings(context.Background(), "", "library/app", FindingDispositionAll, 50, 0)
+	items, err := store.ListRepositoryFindings(context.Background(), "", "library/app", FindingDispositionAll, 50, 0, nil)
 	if err != nil {
 		t.Fatalf("ListRepositoryFindings() error = %v", err)
 	}

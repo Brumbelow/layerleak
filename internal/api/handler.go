@@ -59,6 +59,8 @@ type Handler struct {
 	logger    *slog.Logger
 	draining  atomic.Bool
 	serve     http.Handler
+	auth      *bearerAuth
+	metrics   *metrics
 
 	// readiness caches the last store check for ReadinessCacheTTL. The mutex
 	// also serialises probes so one slow check is not run by every prober.
@@ -84,6 +86,11 @@ type HandlerOptions struct {
 	ReadinessCacheTTL time.Duration
 	// Logger receives request and lifecycle logs. Nil uses slog.Default().
 	Logger *slog.Logger
+	// BearerTokenDigests enables bearer-token authentication for every
+	// /api/ path: each entry is the SHA-256 digest of an accepted token.
+	// Empty keeps the API open. A digest of the wrong length is a
+	// programming error and panics at construction.
+	BearerTokenDigests [][]byte
 }
 
 const shuttingDownMessage = "the API is shutting down; retry against another instance"
@@ -120,10 +127,14 @@ type scanResponse struct {
 	Error     *errorResponse  `json:"error,omitempty"`
 }
 
+// List responses carry next_cursor: an opaque keyset position for the page
+// after this one whenever the page was full, "" when the listing is known to
+// be exhausted. It is additive beside limit and offset.
 type repositoriesResponse struct {
 	Repositories []repositoryItem `json:"repositories"`
 	Limit        int              `json:"limit"`
 	Offset       int              `json:"offset"`
+	NextCursor   string           `json:"next_cursor"`
 }
 
 type repositoryScansResponse struct {
@@ -132,6 +143,7 @@ type repositoryScansResponse struct {
 	Scans      []scanSummaryItem `json:"scans"`
 	Limit      int               `json:"limit"`
 	Offset     int               `json:"offset"`
+	NextCursor string            `json:"next_cursor"`
 }
 
 type repositoryItem struct {
@@ -148,6 +160,7 @@ type repositoryFindingsResponse struct {
 	Disposition string               `json:"disposition"`
 	Limit       int                  `json:"limit"`
 	Offset      int                  `json:"offset"`
+	NextCursor  string               `json:"next_cursor"`
 }
 
 type findingSummaryItem struct {
@@ -242,6 +255,10 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 
 func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) *Handler {
 	options = options.withDefaults()
+	auth, err := newBearerAuth(options.BearerTokenDigests)
+	if err != nil {
+		panic("api: " + err.Error())
+	}
 	handler := &Handler{
 		scanner:   scanner,
 		store:     store,
@@ -249,6 +266,8 @@ func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOp
 		scanSlots: make(chan struct{}, options.MaxConcurrentScans),
 		requestID: options.RequestID,
 		logger:    options.Logger,
+		auth:      auth,
+		metrics:   newMetrics(version.Effective(), time.Now()),
 	}
 
 	mux := http.NewServeMux()
@@ -417,6 +436,8 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 	select {
 	case h.scanSlots <- struct{}{}:
 		defer func() { <-h.scanSlots }()
+		h.metrics.scanStarted()
+		defer h.metrics.scanFinished()
 	default:
 		writer.Header().Set("Retry-After", "5")
 		writeAPIError(writer, http.StatusTooManyRequests, "scan_capacity_exceeded", "the maximum number of concurrent scans is already running")
@@ -431,6 +452,7 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		AllTags:   body.AllTags,
 		Logger:    slog.Default(),
 	})
+	h.metrics.observeScan(scanOutcomeLabel(outcome.Result.Status, err))
 	resultJSON, marshalErr := marshalScanResult(outcome.Result)
 	if marshalErr != nil {
 		slog.Error("encode scan result", "error_type", fmt.Sprintf("%T", marshalErr), "request_id", requestIDFromWriter(writer))
@@ -473,10 +495,15 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindRepository, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositories(ctx, limit, offset)
+	items, err := h.store.ListRepositories(ctx, limit, offset, repositoryCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repositories", err)
 		return
@@ -486,6 +513,7 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		Repositories: make([]repositoryItem, 0, len(items)),
 		Limit:        limit,
 		Offset:       offset,
+		NextCursor:   nextRepositoryCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Repositories = append(response.Repositories, repositoryItem{
@@ -537,9 +565,14 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindScan, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset)
+	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset, scanRunCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository scans", err)
 		return
@@ -551,6 +584,7 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		Scans:      make([]scanSummaryItem, 0, len(items)),
 		Limit:      limit,
 		Offset:     offset,
+		NextCursor: nextScanRunCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Scans = append(response.Scans, mapScanRunSummary(item))
@@ -586,9 +620,14 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindFinding, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset)
+	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset, findingCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository findings", err)
 		return
@@ -601,6 +640,7 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		Disposition: string(disposition),
 		Limit:       limit,
 		Offset:      offset,
+		NextCursor:  nextFindingCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Findings = append(response.Findings, mapFindingSummary(item))
@@ -702,6 +742,21 @@ func (h *Handler) handleGetFinding(writer http.ResponseWriter, request *http.Req
 	}
 
 	writeJSON(writer, http.StatusOK, response)
+}
+
+// scanOutcomeLabel is the metrics outcome of one scan: the result's own status
+// when the scanner produced one, otherwise failed on error and completed on
+// success. A completed result that could not be stored still counts as a
+// completed scan; the storage_unavailable code is counted separately.
+func scanOutcomeLabel(status jobs.ResultStatus, err error) string {
+	switch status {
+	case jobs.ResultStatusCompleted, jobs.ResultStatusPartial, jobs.ResultStatusFailed:
+		return string(status)
+	}
+	if err != nil {
+		return string(jobs.ResultStatusFailed)
+	}
+	return string(jobs.ResultStatusCompleted)
 }
 
 func mapScanRunSummary(item storage.ScanRunSummary) scanSummaryItem {
@@ -1043,6 +1098,19 @@ type apiResponseWriter struct {
 	wroteHeader  bool
 	status       int
 	bytes        int64
+	// errorCode is the code of the last error envelope written, so the
+	// middleware can count scan failures by code without each return path
+	// reporting itself.
+	errorCode string
+}
+
+// statusCode is the status the client saw: 200 when the handler wrote a body
+// without an explicit WriteHeader, or nothing at all.
+func (w *apiResponseWriter) statusCode() int {
+	if !w.wroteHeader {
+		return http.StatusOK
+	}
+	return w.status
 }
 
 func (w *apiResponseWriter) WriteHeader(statusCode int) {
@@ -1101,6 +1169,7 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 				}
 			}
 			h.logAccess(wrapped, request, started)
+			h.observeRequest(wrapped, request, started)
 		}()
 
 		if h.isDraining() && request.Context().Err() != nil {
@@ -1112,6 +1181,9 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 			h.handleNotFound(wrapped, request)
 			return
 		}
+		if !h.authorize(wrapped, request, requestID) {
+			return
+		}
 		next.ServeHTTP(wrapped, request)
 	})
 }
@@ -1120,19 +1192,29 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 // pattern (request.Pattern), never the path or query, because repository
 // names and reference strings belong to the caller, not the log stream.
 func (h *Handler) logAccess(wrapped *apiResponseWriter, request *http.Request, started time.Time) {
-	status := wrapped.status
-	if !wrapped.wroteHeader {
-		status = http.StatusOK
-	}
 	h.logger.Info("api request",
 		"method", request.Method,
 		"route", request.Pattern,
-		"status", status,
+		"status", wrapped.statusCode(),
 		"bytes", wrapped.bytes,
 		"duration_ms", float64(time.Since(started).Microseconds())/1000,
 		"request_id", wrapped.requestID,
 		"remote_addr", request.RemoteAddr,
 	)
+}
+
+// scanRoutePattern is the mux pattern whose error envelopes are counted as
+// scan errors by code.
+const scanRoutePattern = "POST /api/v1/scans"
+
+// observeRequest feeds the request counters and the duration histogram. The
+// route label is the mux pattern (or "none"), never the path.
+func (h *Handler) observeRequest(wrapped *apiResponseWriter, request *http.Request, started time.Time) {
+	route := routeLabel(request.Pattern)
+	h.metrics.observeRequest(route, wrapped.statusCode(), time.Since(started))
+	if route == scanRoutePattern && wrapped.errorCode != "" {
+		h.metrics.observeScanError(wrapped.errorCode)
+	}
 }
 
 func (h *Handler) methodNotAllowed(allowed string) http.HandlerFunc {
@@ -1152,6 +1234,9 @@ func (h *Handler) writeStorageError(writer http.ResponseWriter, operation string
 }
 
 func newErrorResponse(writer http.ResponseWriter, code, message string) *errorResponse {
+	if wrapped := apiWriterOf(writer); wrapped != nil {
+		wrapped.errorCode = code
+	}
 	return &errorResponse{
 		Code:      code,
 		Message:   message,
@@ -1159,17 +1244,26 @@ func newErrorResponse(writer http.ResponseWriter, code, message string) *errorRe
 	}
 }
 
-func requestIDFromWriter(writer http.ResponseWriter) string {
+// apiWriterOf unwraps to the middleware's response writer, or nil when the
+// handler is served without the middleware (direct unit tests).
+func apiWriterOf(writer http.ResponseWriter) *apiResponseWriter {
 	for {
 		wrapped, ok := writer.(*apiResponseWriter)
 		if !ok {
-			return ""
+			return nil
 		}
 		if wrapped.requestID != "" {
-			return wrapped.requestID
+			return wrapped
 		}
 		writer = wrapped.ResponseWriter
 	}
+}
+
+func requestIDFromWriter(writer http.ResponseWriter) string {
+	if wrapped := apiWriterOf(writer); wrapped != nil {
+		return wrapped.requestID
+	}
+	return ""
 }
 
 func validRequestID(value string) string {

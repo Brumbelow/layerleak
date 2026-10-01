@@ -5,8 +5,15 @@ info:
   summary: PostgreSQL-backed API for redacted OCI image secret-scan results
   description: |
     Layerleak scans public OCI images synchronously and stores redacted results
-    in PostgreSQL. The API has no built-in authentication or authorization.
-    Deploy it only on a private network or behind an authenticated gateway.
+    in PostgreSQL. Authentication is an opt-in shared secret, not authorization:
+    when the operator sets `LAYERLEAK_API_BEARER_TOKENS` (or `_FILE`), every
+    `/api/` request must carry `Authorization: Bearer <token>` and anything
+    else answers 401 `unauthorized` with `WWW-Authenticate: Bearer
+    realm="layerleak"`; `/health`, `/livez` and `/readyz` never require a
+    token. Without configured tokens the API is open. Either way, deploy it
+    only on a private network or behind an authenticated gateway. Operational
+    metrics are served on a separate listener (`LAYERLEAK_API_METRICS_ADDR`),
+    never on the API port.
 
     Every response is JSON and carries `X-Request-ID`, `Cache-Control:
     no-store` and `X-Content-Type-Options: nosniff`. Unknown paths, and paths
@@ -91,6 +98,9 @@ paths:
       summary: Run and persist a synchronous image scan
       description: Resolves and scans an OCI image, then persists and returns the redacted result.
       operationId: createScan
+      security:
+        - {}
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -123,6 +133,8 @@ paths:
                   x-contract-fixture: ../testdata/api/scan-completed.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "404":
@@ -152,6 +164,9 @@ paths:
       summary: Read one persisted scan run
       description: Returns one persisted scan run and its redacted result snapshot by numeric identifier.
       operationId: getScan
+      security:
+        - {}
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -170,6 +185,8 @@ paths:
                   externalValue: ../testdata/api/scan-detail.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "404":
@@ -183,11 +200,15 @@ paths:
     get:
       tags: [Repositories]
       summary: List persisted repositories
-      description: Returns repositories with persisted scan history using offset-based pagination.
+      description: Returns repositories with persisted scan history, paged by offset or by keyset cursor.
       operationId: listRepositories
+      security:
+        - {}
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Paginated repositories.
@@ -204,6 +225,8 @@ paths:
                   externalValue: ../testdata/api/repositories.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "500":
@@ -217,11 +240,15 @@ paths:
       summary: List scan history for one repository
       description: Returns persisted scan summaries for a repository and optional registry host.
       operationId: listRepositoryScans
+      security:
+        - {}
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Repository"
         - $ref: "#/components/parameters/Registry"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Paginated scan summaries.
@@ -238,6 +265,8 @@ paths:
                   externalValue: ../testdata/api/repository-scans.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "500":
@@ -251,12 +280,16 @@ paths:
       summary: List deduplicated findings for one repository
       description: Returns redacted, deduplicated findings for a repository and optional registry host.
       operationId: listRepositoryFindings
+      security:
+        - {}
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Repository"
         - $ref: "#/components/parameters/Registry"
         - $ref: "#/components/parameters/Disposition"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
           description: Paginated redacted finding summaries.
@@ -273,6 +306,8 @@ paths:
                   externalValue: ../testdata/api/repository-findings.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "500":
@@ -286,6 +321,9 @@ paths:
       summary: Read one finding and its redacted occurrences
       description: Returns one persisted finding and its redacted occurrence history by numeric identifier.
       operationId: getFinding
+      security:
+        - {}
+        - bearerAuth: []
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -304,6 +342,8 @@ paths:
                   externalValue: ../testdata/api/finding-detail.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
         "404":
@@ -314,7 +354,33 @@ paths:
           $ref: "#/components/responses/ServiceUnavailable"
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Opt-in shared token. The operator configures one or more tokens of at
+        least 32 printable ASCII characters through
+        `LAYERLEAK_API_BEARER_TOKENS` (comma-separated) or
+        `LAYERLEAK_API_BEARER_TOKENS_FILE` (one per line); the server keeps
+        only SHA-256 digests and compares in constant time. Every operation
+        lists both an empty security requirement and `bearerAuth` because the
+        requirement depends on deployment: with no tokens configured the
+        header is ignored, with tokens configured it is mandatory on every
+        `/api/` path. Tokens never appear in logs; a short digest prefix
+        identifies the token used at debug level.
+
   headers:
+    WWWAuthenticate:
+      description: >-
+        Challenge on every 401: `Bearer realm="layerleak"` when no credentials
+        were sent, with `, error="invalid_token"` appended when a token was
+        presented but malformed or not recognised.
+      schema:
+        type: string
+        enum:
+          - Bearer realm="layerleak"
+          - Bearer realm="layerleak", error="invalid_token"
     RequestID:
       description: >-
         Correlation identifier. A caller-supplied `X-Request-ID` of up to 128
@@ -402,6 +468,21 @@ components:
         type: integer
         minimum: 0
         default: 0
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque keyset position copied from a previous response's `next_cursor`
+        on the same endpoint. The page starts strictly after that position in
+        the endpoint's total ordering, so deep pages cost no more than the
+        first. A cursor belongs to one endpoint: a value from another listing,
+        a malformed value, or a cursor combined with a non-zero `offset` is
+        400 `invalid_request`. `limit` applies as usual.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
     Disposition:
       name: disposition
       in: query
@@ -480,6 +561,33 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: |
+        Bearer-token authentication is enabled and the request carried no
+        `Authorization: Bearer <token>` header, a malformed one, or a token
+        that is not configured (`unauthorized`). Only returned when the
+        operator configured tokens; the message is fixed and never echoes the
+        header.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWWAuthenticate"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            missingToken:
+              value:
+                error:
+                  code: unauthorized
+                  message: a valid bearer token is required
+                  request_id: 0f6d3e8d2c4b4a7a9e1f2b3c4d5e6f72
     RequestTooLarge:
       description: Request exceeded the configured body limit.
       headers:
@@ -1092,10 +1200,18 @@ components:
         present_in_final_image:
           type: boolean
 
+    NextCursor:
+      type: string
+      description: >-
+        Opaque keyset cursor for the page after this one, to be passed as
+        `cursor`. Present as a non-empty string whenever the page was full
+        (`limit` items); the empty string means the page was short and the
+        listing is exhausted. A full final page therefore yields one more,
+        empty page.
     RepositoriesResponse:
       type: object
       additionalProperties: false
-      required: [repositories, limit, offset]
+      required: [repositories, limit, offset, next_cursor]
       properties:
         repositories:
           type: array
@@ -1105,6 +1221,8 @@ components:
           type: integer
         offset:
           type: integer
+        next_cursor:
+          $ref: "#/components/schemas/NextCursor"
     Repository:
       type: object
       additionalProperties: false
@@ -1124,7 +1242,7 @@ components:
     RepositoryScansResponse:
       type: object
       additionalProperties: false
-      required: [registry, repository, scans, limit, offset]
+      required: [registry, repository, scans, limit, offset, next_cursor]
       properties:
         registry:
           type: string
@@ -1139,6 +1257,8 @@ components:
           type: integer
         offset:
           type: integer
+        next_cursor:
+          $ref: "#/components/schemas/NextCursor"
     ScanSummary:
       description: One persisted scan run as listed in repository history; closed to fields beyond ScanRunFields.
       allOf:
@@ -1259,7 +1379,7 @@ components:
     RepositoryFindingsResponse:
       type: object
       additionalProperties: false
-      required: [registry, repository, findings, disposition, limit, offset]
+      required: [registry, repository, findings, disposition, limit, offset, next_cursor]
       properties:
         registry:
           type: string
@@ -1277,6 +1397,8 @@ components:
           type: integer
         offset:
           type: integer
+        next_cursor:
+          $ref: "#/components/schemas/NextCursor"
     FindingSummary:
       description: One deduplicated finding as listed for a repository; closed to fields beyond FindingFields.
       allOf:

@@ -174,7 +174,7 @@ func TestPostgresStoreSaveScanBatchMatchesSerialSemantics(t *testing.T) {
 	}
 	assertCount(t, db, "SELECT COUNT(*) FROM findings WHERE first_seen_at = '2026-09-30T11:00:00Z' AND last_seen_at = '2026-09-30T13:00:00Z' AND redacted_value LIKE 'newval%'", 25)
 
-	summaries, err := store.ListRepositoryFindings(context.Background(), "docker.io", "library/bulk", FindingDispositionAll, 100, 0)
+	summaries, err := store.ListRepositoryFindings(context.Background(), "docker.io", "library/bulk", FindingDispositionAll, 100, 0, nil)
 	if err != nil {
 		t.Fatalf("ListRepositoryFindings() error = %v", err)
 	}

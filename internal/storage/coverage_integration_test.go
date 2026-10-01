@@ -79,7 +79,7 @@ func TestPostgresStoreListRepositoryScansPaginatesTiedScannedAt(t *testing.T) {
 
 	var ids []int64
 	for offset := 0; offset < runs; offset += 3 {
-		page, err := store.ListRepositoryScans(context.Background(), "docker.io", "library/app", 3, offset)
+		page, err := store.ListRepositoryScans(context.Background(), "docker.io", "library/app", 3, offset, nil)
 		if err != nil {
 			t.Fatalf("ListRepositoryScans(offset %d) error = %v", offset, err)
 		}
@@ -126,7 +126,7 @@ func TestPostgresStoreListRepositoryFindingsPaginatesTiedLastSeenAt(t *testing.T
 
 	var ids []int64
 	for offset := 0; offset < count; offset += 3 {
-		page, err := store.ListRepositoryFindings(context.Background(), "docker.io", "library/app", FindingDispositionAll, 3, offset)
+		page, err := store.ListRepositoryFindings(context.Background(), "docker.io", "library/app", FindingDispositionAll, 3, offset, nil)
 		if err != nil {
 			t.Fatalf("ListRepositoryFindings(offset %d) error = %v", offset, err)
 		}
@@ -168,7 +168,7 @@ func TestPostgresStoreGetFindingOrdersTiedOccurrencesBySourceLocation(t *testing
 		t.Fatalf("SaveScan() error = %v", err)
 	}
 
-	summaries, err := store.ListRepositoryFindings(context.Background(), "docker.io", "library/app", FindingDispositionAll, 10, 0)
+	summaries, err := store.ListRepositoryFindings(context.Background(), "docker.io", "library/app", FindingDispositionAll, 10, 0, nil)
 	if err != nil || len(summaries) != 1 {
 		t.Fatalf("ListRepositoryFindings() = %v, %v", summaries, err)
 	}

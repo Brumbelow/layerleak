@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -672,6 +673,37 @@ func TestReplayHandlesFileDirectoryTransitions(t *testing.T) {
 	}
 }
 
+func TestReplayHandlesDeepPathsWithoutRewalkingKnownAncestors(t *testing.T) {
+	// 1024 files under a shared 2040-component (4 KiB) prefix. Re-deriving and
+	// re-hashing every ancestor for every entry cost ~12 ms per entry, i.e.
+	// minutes for a layer within the default entry limits; with the shared
+	// prefix recognised once the whole layer takes milliseconds.
+	const entries = 1024
+	items := make([]tarEntry, 0, entries)
+	for index := 0; index < entries; index++ {
+		items = append(items, tarEntry{name: strings.Repeat("a/", 2040) + fmt.Sprintf("f%04d", index), body: "x"})
+	}
+	layer := gzipLayer(t, items)
+
+	start := time.Now()
+	result, err := replayTestLayers(t, []testLayer{{digest: "sha256:deep", body: layer}}, ReplayOptions{
+		MaxFileBytes:     4096,
+		MaxLayerEntries:  50000,
+		MaxTotalEntries:  250000,
+		MaxRetainedBytes: 1 << 30,
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if len(result.FinalFiles) != entries || result.Coverage.FilesScanned != entries {
+		t.Fatalf("result = %d files, coverage %#v", len(result.FinalFiles), result.Coverage)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("Replay() of %d deep-path entries took %v", entries, elapsed)
+	}
+}
+
 func TestReplayHandlesHighCardinalityDirectoryPrefixChurn(t *testing.T) {
 	const (
 		unrelatedDirectories = 10000
@@ -1171,6 +1203,348 @@ func TestReplayHardlinksToNonFilesDoNotCountAsFiles(t *testing.T) {
 	}
 }
 
+func TestReplayArchiveEntryFixtures(t *testing.T) {
+	paths := func(items []Artifact) []string {
+		result := make([]string, 0, len(items))
+		for _, item := range items {
+			result = append(result, item.Path)
+		}
+		return result
+	}
+	tests := []struct {
+		name    string
+		layers  [][]byte
+		options ReplayOptions
+		check   func(t *testing.T, result ReplayResult)
+	}{
+		{
+			name: "device and fifo entries replaced by a regular file",
+			layers: [][]byte{
+				gzipLayer(t, []tarEntry{
+					{name: "dev/console", typeflag: tar.TypeChar},
+					{name: "dev/fifo", typeflag: tar.TypeFifo},
+					{name: "dev/disk", typeflag: tar.TypeBlock},
+				}),
+				gzipLayer(t, []tarEntry{{name: "dev/console", body: "now a file"}}),
+			},
+			check: func(t *testing.T, result ReplayResult) {
+				if got := paths(result.FinalFiles); strings.Join(got, ",") != "dev/console" {
+					t.Fatalf("FinalFiles = %v", got)
+				}
+				if len(result.DeletedArtifacts) != 0 || result.Coverage.FilesSeen != 1 || result.Coverage.EntriesSkippedUnsafe != 0 {
+					t.Fatalf("result = %#v", result)
+				}
+			},
+		},
+		{
+			name: "symlinked directory does not write through",
+			layers: [][]byte{
+				gzipLayer(t, []tarEntry{{name: "app", typeflag: tar.TypeSymlink, linkname: "/etc"}}),
+				gzipLayer(t, []tarEntry{{name: "app/secret", body: "value"}}),
+			},
+			check: func(t *testing.T, result ReplayResult) {
+				if got := paths(result.FinalFiles); strings.Join(got, ",") != "app/secret" {
+					t.Fatalf("FinalFiles = %v", got)
+				}
+				if len(result.DeletedArtifacts) != 0 {
+					t.Fatalf("DeletedArtifacts = %#v", result.DeletedArtifacts)
+				}
+			},
+		},
+		{
+			name: "whiteout of a symlink",
+			layers: [][]byte{
+				gzipLayer(t, []tarEntry{{name: "link", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"}}),
+				gzipLayer(t, []tarEntry{{name: ".wh.link"}}),
+			},
+			check: func(t *testing.T, result ReplayResult) {
+				if len(result.FinalFiles) != 0 || len(result.DeletedArtifacts) != 0 || result.Coverage.EntriesSkippedUnsafe != 0 {
+					t.Fatalf("result = %#v", result)
+				}
+			},
+		},
+		{
+			name: "opaque whiteout at the archive root",
+			layers: [][]byte{
+				gzipLayer(t, []tarEntry{{name: "a", body: "a"}, {name: "d/b", body: "b"}}),
+				gzipLayer(t, []tarEntry{{name: ".wh..wh..opq"}, {name: "c", body: "c"}}),
+			},
+			check: func(t *testing.T, result ReplayResult) {
+				if got := paths(result.FinalFiles); strings.Join(got, ",") != "c" {
+					t.Fatalf("FinalFiles = %v", got)
+				}
+				if got := paths(result.DeletedArtifacts); strings.Join(got, ",") != "a,d/b" {
+					t.Fatalf("DeletedArtifacts = %v", got)
+				}
+			},
+		},
+		{
+			name: "max file bytes boundary",
+			layers: [][]byte{gzipLayer(t, []tarEntry{
+				{name: "exact", body: "1234"},
+				{name: "over", body: "12345"},
+			})},
+			options: ReplayOptions{MaxFileBytes: 4},
+			check: func(t *testing.T, result ReplayResult) {
+				classes := map[string]Artifact{}
+				for _, item := range result.FinalFiles {
+					classes[item.Path] = item
+				}
+				if exact := classes["exact"]; !exact.Scannable || exact.ContentClass != ContentClassText || string(exact.Content) != "1234" {
+					t.Fatalf("exact = %#v", exact)
+				}
+				if over := classes["over"]; over.Scannable || over.ContentClass != ContentClassOversize || len(over.Content) != 0 || over.Size != 5 {
+					t.Fatalf("over = %#v", over)
+				}
+				if result.Coverage.FilesSkippedOversize != 1 || result.Coverage.FilesScanned != 1 {
+					t.Fatalf("Coverage = %#v", result.Coverage)
+				}
+			},
+		},
+		{
+			name: "crlf and latin-1 bodies stay text",
+			layers: [][]byte{gzipLayer(t, []tarEntry{
+				{name: "crlf.txt", body: "first line\r\nsecond line\r\n"},
+				{name: "latin1.txt", body: "caf\xe9 au lait, cr\xe8me br\xfbl\xe9e\n"},
+			})},
+			check: func(t *testing.T, result ReplayResult) {
+				for _, item := range result.FinalFiles {
+					if item.ContentClass != ContentClassText || !item.Scannable {
+						t.Fatalf("%s = %#v", item.Path, item)
+					}
+				}
+				if result.Coverage.FilesScanned != 2 {
+					t.Fatalf("Coverage = %#v", result.Coverage)
+				}
+			},
+		},
+		{
+			name: "archive truncated at a block boundary is a clean end",
+			layers: [][]byte{func() []byte {
+				archive := tarArchive(t, []tarEntry{{name: "app/last", body: "value"}})
+				return gzipBytes(t, archive[:len(archive)-1024]) // drop the end-of-archive marker
+			}()},
+			check: func(t *testing.T, result ReplayResult) {
+				if got := paths(result.FinalFiles); strings.Join(got, ",") != "app/last" {
+					t.Fatalf("FinalFiles = %v", got)
+				}
+				if result.Coverage.LayersCompleted != 1 {
+					t.Fatalf("Coverage = %#v", result.Coverage)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			layers := make([]testLayer, 0, len(test.layers))
+			for index, body := range test.layers {
+				layers = append(layers, testLayer{digest: fmt.Sprintf("sha256:fixture-%d", index), body: body})
+			}
+			options := test.options
+			if options.MaxFileBytes == 0 {
+				options.MaxFileBytes = 1 << 20
+			}
+			result, err := replayTestLayers(t, layers, options)
+			if err != nil {
+				t.Fatalf("Replay() error = %v", err)
+			}
+			test.check(t, result)
+		})
+	}
+}
+
+func TestReplaySupportsZstdSkippableAndMultipleFrames(t *testing.T) {
+	archive := tarArchive(t, []tarEntry{{name: "app/a", body: "a"}, {name: "app/b", body: "b"}})
+	split := len(archive) / 2
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatalf("zstd.NewWriter() error = %v", err)
+	}
+	defer func() { _ = encoder.Close() }()
+	// Skippable frame: magic 0x184D2A50, 4-byte little-endian size, payload.
+	layer := []byte{0x50, 0x2a, 0x4d, 0x18, 0x04, 0x00, 0x00, 0x00, 'm', 'e', 't', 'a'}
+	layer = encoder.EncodeAll(archive[:split], layer)
+	layer = encoder.EncodeAll(archive[split:], layer)
+
+	result, err := Replay(context.Background(), []manifest.Descriptor{{Digest: "sha256:zstd-frames", MediaType: manifest.MediaTypeOCIImageLayerZstd}}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(context.Context, manifest.Descriptor) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(layer)), nil
+	}))
+	if err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+	if len(result.FinalFiles) != 2 || result.FinalFiles[0].Path != "app/a" || result.FinalFiles[1].Path != "app/b" {
+		t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+	}
+}
+
+func TestReplayRepeatedLayerDigestIsDeterministic(t *testing.T) {
+	layerA := gzipLayer(t, []tarEntry{{name: "shared", body: "from-a"}, {name: "only-a", body: "a"}})
+	layerB := gzipLayer(t, []tarEntry{{name: ".wh.shared"}, {name: "only-b", body: "b"}})
+	run := func() (ReplayResult, int) {
+		opened := 0
+		result, err := Replay(context.Background(), []manifest.Descriptor{
+			{Digest: "sha256:a", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+			{Digest: "sha256:b", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+			{Digest: "sha256:a", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+		}, ReplayOptions{MaxFileBytes: 1 << 20}, OpenFunc(func(_ context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+			opened++
+			if descriptor.Digest == "sha256:a" {
+				return io.NopCloser(bytes.NewReader(layerA)), nil
+			}
+			return io.NopCloser(bytes.NewReader(layerB)), nil
+		}))
+		if err != nil {
+			t.Fatalf("Replay() error = %v", err)
+		}
+		return result, opened
+	}
+	first, opened := run()
+	second, _ := run()
+	if opened != 3 {
+		t.Fatalf("opened %d layers, want 3", opened)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("repeated digests replayed non-deterministically:\n%#v\n%#v", first, second)
+	}
+	final := map[string]Artifact{}
+	for _, item := range first.FinalFiles {
+		final[item.Path] = item
+	}
+	if len(final) != 3 || string(final["shared"].Content) != "from-a" || final["shared"].LayerDigest != "sha256:a" {
+		t.Fatalf("first.FinalFiles = %#v", first.FinalFiles)
+	}
+	if len(first.DeletedArtifacts) != 2 {
+		t.Fatalf("first.DeletedArtifacts = %#v", first.DeletedArtifacts)
+	}
+	if first.Coverage.LayersSeen != 3 || first.Coverage.LayersCompleted != 3 {
+		t.Fatalf("first.Coverage = %#v", first.Coverage)
+	}
+}
+
+// recomputedRetainedBytes derives the retention total from the state's
+// contents so the fuzz target can check the incremental accounting.
+func recomputedRetainedBytes(state *State) int64 {
+	var total int64
+	for _, artifact := range state.final {
+		total += retainedFinalArtifactBytes(artifact)
+	}
+	for _, artifact := range state.deleted {
+		total += retainedDeletedArtifactBytes(artifact)
+	}
+	for directory := range state.dirs {
+		total += retainedMapStringBytes(directory)
+	}
+	return total
+}
+
+// FuzzApplyLayer feeds arbitrary bytes to the tar replay as an uncompressed
+// layer on top of a fixed base layer and checks the engine's invariants: no
+// panic, retained-byte accounting matches the recorded state, a failed layer
+// leaves the base state untouched, layer counters stay ordered and the result
+// is deterministic. Run it longer with
+// `go test -run=^$ -fuzz=FuzzApplyLayer -fuzztime=60s ./internal/layers`.
+func FuzzApplyLayer(f *testing.F) {
+	seeds := [][]byte{
+		tarArchive(f, []tarEntry{
+			{name: "app/.env", body: "TOKEN=aaaaaaaaaaaaaaaaaaaaaaaa"},
+			{name: "app/dir", typeflag: tar.TypeDir},
+			{name: "app/link", typeflag: tar.TypeSymlink, linkname: "/etc/passwd"},
+			{name: "app/hard", typeflag: tar.TypeLink, linkname: "app/.env"},
+			{name: "base/.wh.keep"},
+			{name: "base/.wh..wh..opq"},
+			{name: "dev/null", typeflag: tar.TypeChar},
+		}),
+		tarArchive(f, []tarEntry{{name: "./", typeflag: tar.TypeDir}, {name: "./base", body: "replaced"}, {name: "."}}),
+		tarArchive(f, []tarEntry{{name: "meta", typeflag: tar.TypeXGlobalHeader, paxRecords: map[string]string{"comment": "x"}}, {name: "app/x", body: "x"}}),
+		tarArchive(f, []tarEntry{{name: strings.Repeat("p", maxArchivePathBytes+1)}, {name: "../escape", body: "escape"}}),
+		sparseArchive(f, "app/sparse", 64<<10),
+		append(tarArchive(f, []tarEntry{{name: "app/trailing", body: "x"}}), []byte("trailing")...),
+		tarArchive(f, []tarEntry{{name: "app/last", body: "value"}})[:1024],
+		{},
+		[]byte("not a tar archive at all"),
+	}
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
+
+	base := tarArchive(f, []tarEntry{
+		{name: "base/keep", body: "keep"},
+		{name: "base/replaced", body: "old"},
+		{name: "base/dir", typeflag: tar.TypeDir},
+		{name: "base", body: "file-then-dir"},
+	})
+	options := ReplayOptions{
+		MaxFileBytes:     4096,
+		MaxLayerBytes:    1 << 20,
+		MaxLayerEntries:  256,
+		MaxTotalBytes:    2 << 20,
+		MaxTotalEntries:  512,
+		MaxRetainedBytes: 1 << 20,
+	}
+	baseDescriptor := manifest.Descriptor{Digest: "sha256:base", MediaType: manifest.MediaTypeOCIImageLayer}
+	fuzzDescriptor := manifest.Descriptor{Digest: "sha256:fuzz", MediaType: manifest.MediaTypeOCIImageLayer}
+
+	f.Fuzz(func(t *testing.T, layer []byte) {
+		// Mirror Replay's per-layer bookkeeping so the counters are meaningful.
+		apply := func(state *State, descriptor manifest.Descriptor, body []byte) error {
+			state.coverage.LayersSeen++
+			err := state.applyLayer(context.Background(), descriptor, bytes.NewReader(body), options)
+			if err == nil {
+				state.coverage.LayersCompleted++
+			}
+			return err
+		}
+		run := func() (snapshot, result ReplayResult, recomputed int64, err error) {
+			state := NewState()
+			if err := apply(state, baseDescriptor, base); err != nil {
+				t.Fatalf("base applyLayer() error = %v", err)
+			}
+			snapshot = state.Result()
+			err = apply(state, fuzzDescriptor, layer)
+			return snapshot, state.Result(), recomputedRetainedBytes(state), err
+		}
+		snapshot, result, recomputed, err := run()
+		_, again, _, errAgain := run()
+
+		if !reflect.DeepEqual(result, again) || (err == nil) != (errAgain == nil) || (err != nil && err.Error() != errAgain.Error()) {
+			t.Fatalf("non-deterministic replay: %v vs %v", err, errAgain)
+		}
+		coverage := result.Coverage
+		if coverage.RetainedBytes < 0 || coverage.RetainedBytes != recomputed {
+			t.Fatalf("RetainedBytes = %d, recomputed %d", coverage.RetainedBytes, recomputed)
+		}
+		if coverage.LayersCompleted > coverage.LayersSeen || coverage.LayersSeen != 2 {
+			t.Fatalf("LayersCompleted %d, LayersSeen %d", coverage.LayersCompleted, coverage.LayersSeen)
+		}
+		if coverage.ExpandedBytes < snapshot.Coverage.ExpandedBytes {
+			t.Fatalf("ExpandedBytes decreased from %d to %d", snapshot.Coverage.ExpandedBytes, coverage.ExpandedBytes)
+		}
+		if err != nil {
+			if !reflect.DeepEqual(result.FinalFiles, snapshot.FinalFiles) || !reflect.DeepEqual(result.DeletedArtifacts, snapshot.DeletedArtifacts) {
+				t.Fatalf("failed layer leaked state: %v", err)
+			}
+			if coverage.RetainedBytes != snapshot.Coverage.RetainedBytes {
+				t.Fatalf("failed layer changed RetainedBytes from %d to %d", snapshot.Coverage.RetainedBytes, coverage.RetainedBytes)
+			}
+			return
+		}
+		for _, artifact := range result.FinalFiles {
+			if artifact.Type != ArtifactTypeRegularFile && artifact.Type != ArtifactTypeHardlink {
+				t.Fatalf("FinalFiles contains %s artifact %q", artifact.Type, artifact.Path)
+			}
+			if artifact.Scannable && artifact.ContentClass != ContentClassText {
+				t.Fatalf("scannable artifact %q has class %q", artifact.Path, artifact.ContentClass)
+			}
+			if int64(len(artifact.Content)) > options.MaxFileBytes {
+				t.Fatalf("artifact %q retained %d bytes above MaxFileBytes", artifact.Path, len(artifact.Content))
+			}
+			if _, err := normalizePath(artifact.Path); err != nil || artifact.Path != strings.Trim(artifact.Path, "/") {
+				t.Fatalf("artifact path %q is not normalised: %v", artifact.Path, err)
+			}
+		}
+	})
+}
+
 func TestReplaySkipsUnsafeArchivePathsAndReportsIncompleteCoverage(t *testing.T) {
 	layer := gzipLayer(t, []tarEntry{
 		{name: "../../etc/passwd", body: "escape"},
@@ -1306,6 +1680,13 @@ func tarArchive(t testing.TB, entries []tarEntry) []byte {
 
 func gzipSparseLayer(t testing.TB, name string, logicalSize int64) []byte {
 	t.Helper()
+	return gzipBytes(t, sparseArchive(t, name, logicalSize))
+}
+
+// sparseArchive writes a PAX sparse entry whose only data fragment is the last
+// byte of a logicalSize-byte file; everything before it is a hole.
+func sparseArchive(t testing.TB, name string, logicalSize int64) []byte {
+	t.Helper()
 
 	var tarBuffer bytes.Buffer
 	tarWriter := tar.NewWriter(&tarBuffer)
@@ -1335,16 +1716,7 @@ func gzipSparseLayer(t testing.TB, name string, logicalSize int64) []byte {
 	if bytes.Contains(archive, []byte("TST.sparse.")) {
 		t.Fatal("failed to rewrite sparse PAX records")
 	}
-
-	var buffer bytes.Buffer
-	gzipWriter := gzip.NewWriter(&buffer)
-	if _, err := gzipWriter.Write(archive); err != nil {
-		t.Fatalf("gzipWriter.Write() error = %v", err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		t.Fatalf("gzipWriter.Close() error = %v", err)
-	}
-	return buffer.Bytes()
+	return archive
 }
 
 func zstdLayer(t *testing.T, entries []tarEntry) []byte {

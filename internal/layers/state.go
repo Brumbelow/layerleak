@@ -719,6 +719,16 @@ func (s *State) removeDirectory(target string) {
 
 func (s *State) preparePath(target string, directory bool, deletedBy string, budget *retentionBudget) error {
 	for ancestor := path.Dir(target); ancestor != "." && ancestor != ""; ancestor = path.Dir(ancestor) {
+		if _, ok := s.dirs[ancestor]; ok {
+			// Directories are prefix-closed: every ancestor of a known directory
+			// is itself a known directory and never an artifact (this loop clears
+			// files on the way up and file-over-directory transitions purge the
+			// subtree). Stopping here keeps the cost per entry proportional to
+			// the new directories it introduces; walking the whole chain costs
+			// O(depth) hashes per entry, which a hostile layer of 4 KiB-deep
+			// paths turns into minutes of CPU within the default entry limits.
+			break
+		}
 		if _, ok := s.final[ancestor]; ok {
 			s.deletePath(ancestor, deletedBy)
 		}

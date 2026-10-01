@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1466,6 +1467,106 @@ func TestScanContinuesDetectionWhenRawRetentionBudgetIsExhausted(t *testing.T) {
 		if platform.Status != ResultStatusCompleted || platform.FindingsCount != 2 {
 			t.Fatalf("platform result = %#v", platform)
 		}
+	}
+}
+
+// cancellingBody serves a prefix of a blob, cancels the scan context and then
+// fails every further read, simulating an operator interrupt mid-layer.
+type cancellingBody struct {
+	reader *bytes.Reader
+	cancel context.CancelFunc
+	ctx    context.Context
+	served bool
+}
+
+func (b *cancellingBody) Read(p []byte) (int, error) {
+	if b.served {
+		<-b.ctx.Done()
+		return 0, b.ctx.Err()
+	}
+	b.served = true
+	if len(p) > 16 {
+		p = p[:16]
+	}
+	n, err := b.reader.Read(p)
+	b.cancel()
+	return n, err
+}
+
+func (b *cancellingBody) Close() error { return nil }
+
+func TestScanCancellationMidLayerYieldsScanCanceledAndKeepsCompletedFindings(t *testing.T) {
+	f := newRegistryFixture()
+	clean := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{{name: "app/.env", body: "GH=" + syntheticGitHubToken}}))
+	slowLayer := gzipLayer(t, []tarEntry{{name: "app/other", body: "other"}})
+	slow := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, slowLayer)
+	amd64 := f.imageManifest(t, configBlob(t, f, "linux", "amd64"), []manifest.Descriptor{clean}, manifest.Platform{OS: "linux", Architecture: "amd64"})
+	arm64 := f.imageManifest(t, configBlob(t, f, "linux", "arm64"), []manifest.Descriptor{slow}, manifest.Platform{OS: "linux", Architecture: "arm64"})
+	f.setIndex(t, amd64, arm64)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inner := f.transport()
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/v2/library/app/blobs/"+slow.Digest && request.Header.Get("Authorization") == "Bearer test-token" {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{manifest.MediaTypeDockerSchema2LayerGzip}},
+				Body:          &cancellingBody{reader: bytes.NewReader(slowLayer), cancel: cancel, ctx: ctx},
+				ContentLength: -1,
+			}, nil
+		}
+		return inner(request)
+	})
+	request := f.request(t, "")
+	request.Registry = registry.NewClient(registry.Options{
+		BaseURL:           "https://registry.test",
+		AllowPrivateHosts: true,
+		RequestAttempts:   1,
+		HTTPClient:        &http.Client{Transport: transport},
+	})
+
+	result, err := Scan(ctx, request)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusPartial || result.CompletedManifestCount != 1 || result.FailedManifestCount != 1 {
+		t.Fatalf("result = status %q, completed %d, failed %d", result.Status, result.CompletedManifestCount, result.FailedManifestCount)
+	}
+	if result.TotalFindings == 0 {
+		t.Fatal("findings from the completed platform were lost")
+	}
+	if _, ok := findDiagnostic(result.Diagnostics, "scan_canceled", arm64.Digest); !ok {
+		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)
+	}
+	for _, platform := range result.PlatformResults {
+		if platform.ManifestDigest == arm64.Digest && (platform.Status != ResultStatusFailed || platform.Coverage.LayersCompleted != 0) {
+			t.Fatalf("cancelled platform = %#v", platform)
+		}
+	}
+}
+
+func TestScanManifestWithRepeatedLayerDigestIsDeterministic(t *testing.T) {
+	f := newRegistryFixture()
+	layer := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{{name: "app/.env", body: "GH=" + syntheticGitHubToken}}))
+	f.setRootManifest(t, configBlob(t, f, "linux", "amd64"), []manifest.Descriptor{layer, layer})
+
+	first, err := Scan(context.Background(), f.request(t, ""))
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if f.requests["/v2/library/app/blobs/"+layer.Digest] != 2 {
+		t.Fatalf("layer blob requested %d times, want 2", f.requests["/v2/library/app/blobs/"+layer.Digest])
+	}
+	second, err := Scan(context.Background(), f.request(t, ""))
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if first.Status != ResultStatusCompleted || first.TotalFindings == 0 || first.Coverage.LayersCompleted != 2 {
+		t.Fatalf("first = %#v", first)
+	}
+	if !reflect.DeepEqual(first.Findings, second.Findings) || !reflect.DeepEqual(first.Coverage, second.Coverage) || !reflect.DeepEqual(first.Diagnostics, second.Diagnostics) {
+		t.Fatalf("repeated layer digest scanned non-deterministically:\n%#v\n%#v", first, second)
 	}
 }
 

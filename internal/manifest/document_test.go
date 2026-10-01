@@ -1,9 +1,67 @@
 package manifest
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+// FuzzImageConfig drives the image-config and manifest-document parsers with
+// arbitrary bytes. Both consume registry responses that are hostile by
+// assumption, so they must never panic, must return typed JSON errors for
+// unparsable input, and whatever parses must validate with typed integrity
+// errors only. Run it longer with
+// `go test -run=^$ -fuzz=FuzzImageConfig -fuzztime=60s ./internal/manifest`.
+func FuzzImageConfig(f *testing.F) {
+	for _, seed := range []string{
+		`{"architecture":"amd64","os":"linux","config":{"Env":["A=b"],"Labels":{"k":"v"},"ExposedPorts":{"80/tcp":{}}},"history":[{"created_by":"RUN x"}]}`,
+		`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:` + strings.Repeat("a", 64) + `","size":1},"layers":[]}`,
+		`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.in-toto+json","digest":"sha256:` + strings.Repeat("b", 64) + `","size":1}]}`,
+		`{"manifests":[{"platform":{"os":"linux\n"}}]}`,
+		`{"config":{"Env":"not-a-list"}}`,
+		`{}`, `[]`, `null`, `"string"`, `{"architecture":`, "\xff\xfe", "",
+	} {
+		f.Add([]byte(seed))
+	}
+	f.Fuzz(func(t *testing.T, body []byte) {
+		if len(body) > 1<<20 {
+			t.Skip("bounded by MaxConfigBytes/MaxManifestBytes in production")
+		}
+		config, err := ParseImageConfig(body)
+		if err != nil {
+			var syntaxErr *json.SyntaxError
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &syntaxErr) && !errors.As(err, &typeErr) {
+				t.Fatalf("ParseImageConfig() returned an untyped error: %v", err)
+			}
+		} else {
+			_ = ConfigFields(config)
+			_ = ValidatePlatform(Platform{OS: config.OS, Architecture: config.Architecture, Variant: config.Variant}, false)
+		}
+
+		for _, mediaType := range []string{MediaTypeOCIImageManifest, MediaTypeOCIImageIndex, MediaTypeDockerSchema2Manifest, ""} {
+			document, err := ParseDocument(mediaType, body)
+			if err != nil {
+				continue
+			}
+			if err := ValidateDocument(document); err != nil {
+				if !IsIntegrityError(err) {
+					t.Fatalf("ValidateDocument() returned an untyped error: %v", err)
+				}
+				continue
+			}
+			if document.Kind == DocumentKindIndex {
+				// Selection may legitimately find nothing; it must not panic and
+				// must not report an integrity failure for a validated index
+				// unless descriptors conflict.
+				if _, err := SelectManifests(document.Index, ""); err != nil && IsIntegrityError(err) && !strings.Contains(err.Error(), "conflicting descriptors") {
+					t.Fatalf("SelectManifests() error = %v", err)
+				}
+			}
+		}
+	})
+}
 
 func TestParseDocumentIndex(t *testing.T) {
 	body := []byte(`{

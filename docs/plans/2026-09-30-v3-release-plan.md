@@ -200,6 +200,15 @@ No 3.x minor release is planned, so nothing is "deferred": an item is either in
 - Custom YAML detector rules, webhooks, scheduling, Helm chart, OpenTelemetry,
   pgx migration while lib/pq stays current (DB-11, CFG-21), devcontainer,
   CODEOWNERS, release-please, `/api/v2`, a v1.0.1 deprecation pointer release.
+- Small items the implementation waves left out deliberately, each recorded in
+  the wave reports: `docker-archive:-` (archives on stdin) because the readers
+  serve blobs as random-access sections of a file and stdin would need an
+  unbounded buffer or a spooled temp file; the legacy Firebase/FCM server-key
+  shape and the bare `oauth:` Twitch IRC token form, whose shapes could not be
+  verified against a vendor source; `windows/arm64` CLI archives (one matrix
+  entry away); exit code 130 for SIGINT (Decision 8 keeps 1); and the CLI-17
+  consolidation of the error taxonomy shared by the CLI, API and scan service,
+  a refactor with no user-visible effect.
 
 ### W10. Additional scope folded into 3.0.0
 

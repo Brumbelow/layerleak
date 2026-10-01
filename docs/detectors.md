@@ -5,9 +5,9 @@
      Do not edit by hand; the test fails when this file and the catalog disagree. -->
 
 This is the list of identifiers a finding can carry in `detector_name`
-(and SARIF `ruleId`), as printed by `layerleak detectors list` and returned by
-`GET /api/v1/detectors`. `layerleak detectors list --format json` prints the same
-rows as JSON.
+(and SARIF `ruleId`), as printed by `layerleak detectors list` and emitted as
+SARIF `tool.driver.rules` by `--format sarif`. `layerleak detectors list --format json`
+prints the same rows as JSON.
 
 **Confidence** is the tier a match carries before path and key context adjust
 it: a value under a test or example path can be lowered, one assigned to a

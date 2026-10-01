@@ -8,6 +8,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -112,6 +113,33 @@ func TestDetectorsDocMatchesCatalog(t *testing.T) {
 	}
 	if !bytes.Equal(committed, rendered.Bytes()) {
 		t.Fatalf("%s is out of date with the detector catalog; review the change, then run `go test ./internal/cli -run TestDetectorsDocMatchesCatalog -update-docs`", path)
+	}
+}
+
+// TestDetectorsDocMentionsOnlyDocumentedAPIPaths guards the prose around the
+// catalog: every /api/v1 path docs/detectors.md refers to must be a path the
+// OpenAPI document declares, so the generated file cannot advertise an
+// endpoint the API does not serve.
+func TestDetectorsDocMentionsOnlyDocumentedAPIPaths(t *testing.T) {
+	var rendered bytes.Buffer
+	if err := renderDetectorsMarkdown(&rendered, detectors.Default().Describe()); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := os.ReadFile(filepath.Join("..", "..", "web", "docs", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := map[string]bool{}
+	for _, match := range regexp.MustCompile(`(?m)^  (/\S+):`).FindAllStringSubmatch(string(spec), -1) {
+		declared[match[1]] = true
+	}
+	if len(declared) == 0 {
+		t.Fatal("no paths parsed from web/docs/openapi.yaml")
+	}
+	for _, path := range regexp.MustCompile(`/api/v1/[A-Za-z0-9_{}/-]*`).FindAllString(rendered.String(), -1) {
+		if !declared[path] {
+			t.Errorf("docs/detectors.md mentions %s, which web/docs/openapi.yaml does not declare", path)
+		}
 	}
 }
 

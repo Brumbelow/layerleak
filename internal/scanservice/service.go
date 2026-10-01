@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/config"
@@ -19,9 +20,16 @@ import (
 type BeforeSaveFunc func(result jobs.Result) error
 
 type Request struct {
-	Reference  manifest.Reference
-	Platform   string
-	AllTags    bool
+	Reference manifest.Reference
+	Platform  string
+	AllTags   bool
+	// Credential is a username and password the caller vouches for: it belongs
+	// to the registry of this scan and is bound to the host the client will
+	// contact (the reference's registry, or the LAYERLEAK_REGISTRY_BASE_URL
+	// override). The CLI sets it from its flags or from
+	// ConfiguredCredential; the API never sets it, so a caller-named registry
+	// can never obtain the operator's credential. Zero means none.
+	Credential registry.Credential
 	Logger     *slog.Logger
 	Progress   jobs.ProgressFunc
 	BeforeSave BeforeSaveFunc
@@ -90,7 +98,7 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	registryClient, err := s.registryClient(request.Reference)
+	registryClient, err := s.registryClient(request.Reference, request)
 	if err != nil {
 		configErr := fmt.Errorf("configure registry client: %w", err)
 		return Outcome{ScanError: configErr}, wrapScanError(configErr)
@@ -172,7 +180,7 @@ func (s *Service) saveTimeout() time.Duration {
 	return storage.DefaultWriteTimeout
 }
 
-func (s *Service) registryClient(ref manifest.Reference) (*registry.Client, error) {
+func (s *Service) registryClient(ref manifest.Reference, request Request) (*registry.Client, error) {
 	baseURL := s.config.RegistryBaseURL
 	if baseURL == "" {
 		baseURL = registry.BaseURLForRegistry(ref.Registry)
@@ -189,11 +197,59 @@ func (s *Service) registryClient(ref manifest.Reference) (*registry.Client, erro
 		AllowedPrivateAuthHosts:     s.config.AllowedPrivateAuthHosts,
 		RequestAttempts:             s.config.RegistryRequestAttempts,
 		MaxManifestBytes:            s.config.MaxManifestBytes,
+		Credentials:                 s.credentialSource(baseURL, request.Credential),
 	}
 	if s.newRegistryClient != nil {
 		return s.newRegistryClient(options)
 	}
 	return registry.NewClient(options)
+}
+
+// ConfiguredCredential returns the LAYERLEAK_REGISTRY_USERNAME/PASSWORD pair
+// as a credential for Request.Credential, or the zero Credential when the
+// pair is not set. The CLI uses it to apply the configured pair to the
+// registry of the reference it was given on the command line.
+func ConfiguredCredential(cfg config.Config) registry.Credential {
+	if cfg.RegistryUsername == "" && cfg.RegistryPassword == "" {
+		return registry.Credential{}
+	}
+	return registry.Credential{Username: cfg.RegistryUsername, Password: string(cfg.RegistryPassword)}
+}
+
+// credentialSource builds the credential chain for one scan: a static
+// credential bound to the registry host the client will contact, then the
+// Docker config.json when one is configured. It returns nil, and the client
+// stays anonymous, when neither applies.
+//
+// The static credential is the caller's Request.Credential when set.
+// Otherwise the configured LAYERLEAK_REGISTRY_USERNAME/PASSWORD pair is used
+// only when LAYERLEAK_REGISTRY_BASE_URL pins the host: in that case every scan
+// of the process goes to the operator's registry, so the pair cannot leave it.
+// Without the pin the host is whatever reference the caller submitted, and in
+// server mode that caller is an unauthenticated API client whose registry can
+// advertise an arbitrary token realm; binding the pair there would hand the
+// operator's password to any host a caller names. Docker config entries are
+// keyed by host and stay available either way.
+func (s *Service) credentialSource(baseURL string, requested registry.Credential) registry.CredentialSource {
+	sources := make([]registry.CredentialSource, 0, 2)
+	credential := requested
+	if credential.IsZero() && s.config.RegistryBaseURL != "" {
+		credential = ConfiguredCredential(s.config)
+	}
+	if !credential.IsZero() {
+		host := baseURL
+		if parsed, err := url.Parse(baseURL); err == nil && parsed.Host != "" {
+			host = parsed.Host
+		}
+		sources = append(sources, registry.StaticCredentials(host, credential.Username, credential.Password))
+	}
+	if s.config.DockerConfigPath != "" {
+		sources = append(sources, registry.DockerConfigCredentials(s.config.DockerConfigPath))
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return registry.ChainCredentials(sources...)
 }
 
 func wrapScanError(err error) error {

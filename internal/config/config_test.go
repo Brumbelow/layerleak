@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +17,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_API_ADDR", "")
 	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "")
 	t.Setenv("LAYERLEAK_REGISTRY_AUTH_URL", "")
+	t.Setenv("LAYERLEAK_REGISTRY_USERNAME", "")
+	t.Setenv("LAYERLEAK_REGISTRY_PASSWORD", "")
+	t.Setenv("LAYERLEAK_DOCKER_CONFIG", "")
 	t.Setenv("LAYERLEAK_HTTP_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_SCAN_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_MAX_REQUEST_BYTES", "")
@@ -91,6 +95,9 @@ func TestLoadDefaults(t *testing.T) {
 
 	if cfg.RegistryAuthURL != "" {
 		t.Fatalf("cfg.RegistryAuthURL = %q", cfg.RegistryAuthURL)
+	}
+	if cfg.RegistryUsername != "" || cfg.RegistryPassword != "" || cfg.DockerConfigPath != "" {
+		t.Fatalf("registry credential defaults = (%q, set=%v, %q)", cfg.RegistryUsername, cfg.RegistryPassword != "", cfg.DockerConfigPath)
 	}
 
 	if cfg.HTTPTimeout != 30*time.Second {
@@ -742,5 +749,106 @@ func TestLoadValidatesRegistryEndpointOverrides(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLoadRegistryCredentials(t *testing.T) {
+	const password = "synthetic-password-not-real-0001"
+	t.Run("pair", func(t *testing.T) {
+		clearLayerleakEnv(t)
+		t.Setenv("LAYERLEAK_REGISTRY_USERNAME", "  scanner-bot  ")
+		t.Setenv("LAYERLEAK_REGISTRY_PASSWORD", password)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.RegistryUsername != "scanner-bot" || string(cfg.RegistryPassword) != password {
+			t.Fatalf("credentials = (%q, match=%v)", cfg.RegistryUsername, string(cfg.RegistryPassword) == password)
+		}
+	})
+	t.Run("password keeps surrounding whitespace", func(t *testing.T) {
+		clearLayerleakEnv(t)
+		t.Setenv("LAYERLEAK_REGISTRY_USERNAME", "scanner-bot")
+		t.Setenv("LAYERLEAK_REGISTRY_PASSWORD", " "+password+" ")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if string(cfg.RegistryPassword) != " "+password+" " {
+			t.Fatal("password was trimmed")
+		}
+	})
+	for name, env := range map[string]map[string]string{
+		"username only":            {"LAYERLEAK_REGISTRY_USERNAME": "scanner-bot"},
+		"password only":            {"LAYERLEAK_REGISTRY_PASSWORD": password},
+		"blank username, password": {"LAYERLEAK_REGISTRY_USERNAME": "   ", "LAYERLEAK_REGISTRY_PASSWORD": password},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			for key, value := range env {
+				t.Setenv(key, value)
+			}
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "LAYERLEAK_REGISTRY_USERNAME") || !strings.Contains(err.Error(), "LAYERLEAK_REGISTRY_PASSWORD") {
+				t.Fatalf("Load() error = %v, want both variable names", err)
+			}
+			if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "scanner-bot") {
+				t.Fatalf("Load() error echoes a credential: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadValidatesDockerConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"auths":{}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Run("regular file", func(t *testing.T) {
+		clearLayerleakEnv(t)
+		t.Setenv("LAYERLEAK_DOCKER_CONFIG", " "+path+" ")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.DockerConfigPath != path {
+			t.Fatalf("DockerConfigPath = %q, want %q", cfg.DockerConfigPath, path)
+		}
+	})
+	for name, value := range map[string]string{
+		"missing file": filepath.Join(dir, "absent.json"),
+		"directory":    dir,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_DOCKER_CONFIG", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_DOCKER_CONFIG") {
+				t.Fatalf("Load() error = %v, want LAYERLEAK_DOCKER_CONFIG rejection", err)
+			}
+		})
+	}
+}
+
+func TestSecretFormattingRedacts(t *testing.T) {
+	const password = "synthetic-password-not-real-0001"
+	cfg := Config{RegistryUsername: "scanner-bot", RegistryPassword: Secret(password)}
+	for _, text := range []string{
+		fmt.Sprint(cfg.RegistryPassword),
+		fmt.Sprintf("%v", cfg),
+		fmt.Sprintf("%+v", cfg),
+		fmt.Sprintf("%#v", cfg),
+		fmt.Sprintf("%s %q", cfg.RegistryPassword, cfg.RegistryPassword),
+	} {
+		if strings.Contains(text, password) {
+			t.Fatalf("formatted config reveals the password: %q", text)
+		}
+	}
+	if string(cfg.RegistryPassword) != password {
+		t.Fatal("string(Secret) must return the value")
+	}
+	if fmt.Sprint(Secret("")) != "<redacted>" {
+		t.Fatalf("empty secret formats as %q", fmt.Sprint(Secret("")))
 	}
 }

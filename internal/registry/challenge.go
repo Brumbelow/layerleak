@@ -45,6 +45,24 @@ func parseBearerChallenges(headers []string) (bearerChallenge, error) {
 	return bearerChallenge{}, fmt.Errorf("unsupported registry auth challenge")
 }
 
+// offersBasicChallenge reports whether any WWW-Authenticate header carries a
+// Basic challenge. It is consulted only after no Bearer challenge was found,
+// so a registry that offers both still goes through the token flow.
+func offersBasicChallenge(headers []string) bool {
+	for _, header := range headers {
+		challenges, err := parseAuthChallenges(header)
+		if err != nil {
+			continue
+		}
+		for _, challenge := range challenges {
+			if strings.EqualFold(challenge.Scheme, "basic") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // parseAuthChallenges tokenizes a WWW-Authenticate field value: a comma
 // separated list of challenges, each `scheme` followed by `name=value` pairs
 // (token or quoted-string with backslash escapes). A token that is not followed

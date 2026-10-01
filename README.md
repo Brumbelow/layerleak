@@ -241,6 +241,9 @@ variables accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`.
 | `LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS` | empty | Comma-separated exact private auth `host[:port]` allowlist. |
 | `LAYERLEAK_REGISTRY_BASE_URL` | empty | Registry endpoint override for a pull-through mirror or alternate registry; validated at startup. Use `HTTPS_PROXY` for forward proxies. |
 | `LAYERLEAK_REGISTRY_AUTH_URL` | empty | Token endpoint override matching the registry override; validated at startup. |
+| `LAYERLEAK_REGISTRY_USERNAME` | empty | Username for the registry pinned by `LAYERLEAK_REGISTRY_BASE_URL`; requires `LAYERLEAK_REGISTRY_PASSWORD`. Sent only to that host, over https. Without the endpoint pin the pair is not applied: the API never sends it to a registry a caller names, and CLI scans use the per-scan credential flags. |
+| `LAYERLEAK_REGISTRY_PASSWORD` | empty | Password or access token paired with `LAYERLEAK_REGISTRY_USERNAME`; never logged, persisted, or sent to any other host. |
+| `LAYERLEAK_DOCKER_CONFIG` | empty | Path to a Docker `config.json` whose `auths` entries supply credentials by registry host (`auth` or `username`/`password` fields; Docker Hub aliases resolve). Credential helpers are not invoked. Must be a regular file; blank skips Docker configuration. |
 
 Private destination allowlists are an explicit trust decision. Entries accept
 an exact DNS hostname or IPv4 address, optionally with a port, or bracketed

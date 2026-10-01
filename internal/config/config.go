@@ -11,6 +11,22 @@ import (
 	"time"
 )
 
+// Secret is a configuration value that must not be printed. Its String and
+// GoString methods redact it, so formatting a Config with %v, %+v or %#v (for
+// example in a test failure or a debug log) never reveals it. Convert with
+// string(secret) at the single point of use.
+type Secret string
+
+// String redacts the secret.
+func (Secret) String() string {
+	return "<redacted>"
+}
+
+// GoString redacts the secret for %#v.
+func (s Secret) GoString() string {
+	return s.String()
+}
+
 type Config struct {
 	LogLevel                    string
 	APIAddr                     string
@@ -27,6 +43,9 @@ type Config struct {
 	APIReadinessCacheTTL        time.Duration
 	RegistryBaseURL             string
 	RegistryAuthURL             string
+	RegistryUsername            string
+	RegistryPassword            Secret
+	DockerConfigPath            string
 	AllowedPrivateRegistryHosts []string
 	AllowedPrivateAuthHosts     []string
 	RegistryMaxRedirects        int
@@ -76,6 +95,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	registryAuthURL, err := endpointURLFromEnv("LAYERLEAK_REGISTRY_AUTH_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	registryUsername, registryPassword, err := registryCredentialsFromEnv("LAYERLEAK_REGISTRY_USERNAME", "LAYERLEAK_REGISTRY_PASSWORD")
+	if err != nil {
+		return Config{}, err
+	}
+	dockerConfigPath, err := regularFilePathFromEnv("LAYERLEAK_DOCKER_CONFIG")
 	if err != nil {
 		return Config{}, err
 	}
@@ -267,6 +294,9 @@ func Load() (Config, error) {
 		APIReadinessCacheTTL:        apiReadinessCacheTTL,
 		RegistryBaseURL:             registryBaseURL,
 		RegistryAuthURL:             registryAuthURL,
+		RegistryUsername:            registryUsername,
+		RegistryPassword:            registryPassword,
+		DockerConfigPath:            dockerConfigPath,
 		AllowedPrivateRegistryHosts: allowedPrivateRegistryHosts,
 		AllowedPrivateAuthHosts:     allowedPrivateAuthHosts,
 		RegistryMaxRedirects:        registryMaxRedirects,
@@ -342,6 +372,46 @@ func endpointURLFromEnv(key string) (string, error) {
 		if err := validatePort(port); err != nil {
 			return "", fmt.Errorf("parse %s: %w", key, err)
 		}
+	}
+	return value, nil
+}
+
+// registryCredentialsFromEnv reads the optional RegistryUsername and
+// RegistryPassword pair, which authenticates to the registry host of the
+// scanned reference (or the configured registry endpoint) only. Either both
+// are set or both are empty: a lone value is a configuration mistake that
+// would otherwise surface only as an opaque 401 from the registry. The
+// username is trimmed; the password is taken verbatim because surrounding
+// whitespace may be part of it. Errors never include the values.
+func registryCredentialsFromEnv(usernameKey, passwordKey string) (string, Secret, error) {
+	username := strings.TrimSpace(os.Getenv(usernameKey))
+	password := os.Getenv(passwordKey)
+	switch {
+	case username == "" && password == "":
+		return "", "", nil
+	case username == "":
+		return "", "", fmt.Errorf("%s is set but %s is empty", passwordKey, usernameKey)
+	case password == "":
+		return "", "", fmt.Errorf("%s is set but %s is empty", usernameKey, passwordKey)
+	}
+	return username, Secret(password), nil
+}
+
+// regularFilePathFromEnv validates an optional file path (DockerConfigPath)
+// at load time: when set it must name an existing regular file, so a typo in
+// a credential file path fails at startup rather than at the first 401. Empty
+// means the file is not consulted; there is no implicit default location.
+func regularFilePathFromEnv(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", nil
+	}
+	info, err := os.Stat(value) //nolint:gosec // the path is operator configuration and is only inspected here
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", key, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("parse %s: %s is not a regular file", key, value)
 	}
 	return value, nil
 }

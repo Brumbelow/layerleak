@@ -70,12 +70,21 @@ type Artifact struct {
 	// was transcoded to UTF-8 (UTF-16 with or without a byte-order mark).
 	// Offsets and line numbers of findings refer to the transcoded Content.
 	SourceEncoding TextEncoding
+	// Nested holds the entries expanded one level deep out of an archive
+	// (zip family, gzip, tar) stored at Path. Each has the provenance path
+	// `Path!inner/path`, its own content and classification, and shares the
+	// outer artifact's fate: it is deleted or overwritten with it.
+	Nested []Artifact
 }
 
 type ReplayResult struct {
 	FinalFiles       []Artifact
 	DeletedArtifacts []Artifact
 	Coverage         Coverage
+	// NestedSkips lists, in replay order, every bounded skip while expanding
+	// nested archives (capped at maxNestedSkipRecords; the rest are counted in
+	// Coverage.NestedSkipsDropped).
+	NestedSkips []NestedSkip
 }
 
 type ReplayOptions struct {
@@ -85,6 +94,17 @@ type ReplayOptions struct {
 	MaxTotalBytes    int64
 	MaxTotalEntries  int
 	MaxRetainedBytes int64
+	// MaxNestedArchiveBytes bounds both the stored size of an archive that is
+	// buffered for one-level expansion and the decompressed bytes read out of
+	// it. 0 disables nested expansion.
+	MaxNestedArchiveBytes int64
+	// MaxNestedArchiveEntries bounds the entries examined per nested archive;
+	// 0 leaves only the layer and image entry budgets.
+	MaxNestedArchiveEntries int
+	// NestedKeepPath decides whether a nested entry that is not scannable text
+	// (binary, oversize or itself an archive) is kept as a path-only artifact.
+	// Nil keeps none; the scanner passes its path-only detectors.
+	NestedKeepPath func(path string) bool
 }
 
 type Coverage struct {
@@ -100,6 +120,17 @@ type Coverage struct {
 	FilesTranscodedUTF16 int
 	ExpandedBytes        int64
 	RetainedBytes        int64
+	// NestedArchivesExpanded counts archives stored in layers that were opened
+	// one level deep; NestedEntriesScanned counts the regular files inside them
+	// that were classified (scanned by content or checked by path).
+	NestedArchivesExpanded int
+	NestedEntriesScanned   int
+	// NestedEntriesSeen and NestedBytesExpanded are the image-wide charges of
+	// nested expansion against the entry and byte budgets; NestedSkipsDropped
+	// counts skip records beyond the retained maximum.
+	NestedEntriesSeen   int
+	NestedBytesExpanded int64
+	NestedSkipsDropped  int
 }
 
 // UnsupportedLayerError reports a manifest that cannot be replayed because one
@@ -166,6 +197,7 @@ type State struct {
 	artifactChildren  map[string]map[string]struct{}
 	entries           int
 	coverage          Coverage
+	nestedSkips       []NestedSkip
 }
 
 func NewState() *State {
@@ -219,6 +251,7 @@ func (s *State) Result() ReplayResult {
 		FinalFiles:       s.FinalFiles(),
 		DeletedArtifacts: s.DeletedArtifacts(),
 		Coverage:         s.coverage,
+		NestedSkips:      append([]NestedSkip(nil), s.nestedSkips...),
 	}
 }
 
@@ -269,13 +302,19 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		artifactChildren:  clonePathIndex(s.artifactChildren),
 		entries:           s.entries,
 		coverage:          s.coverage,
+		nestedSkips:       s.nestedSkips,
 	}
 	retention := retentionBudget{maxBytes: options.MaxRetainedBytes}
+	nested := newNestedExpander(descriptor.Digest, options, s.coverage)
 	committed := false
 	defer func() {
 		if committed {
 			return
 		}
+		// Nested expansion counters and skips are observations like the file
+		// counters: a failed layer keeps them.
+		nested.flush(working)
+		s.nestedSkips = working.nestedSkips
 		observed := working.coverage
 		observed.ExpandedBytes = expandedBytesAfterLayer(s.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
 		observed.RetainedBytes = s.coverage.RetainedBytes
@@ -466,9 +505,17 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 					return err
 				}
 			}
-			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, entryReader, header.Size, options.MaxFileBytes)
+			artifact, err := buildRegularArtifact(entryPath, descriptor.Digest, entryReader, header.Size, options, nested)
 			if err != nil {
 				return err
+			}
+			if len(artifact.Nested) > 0 {
+				// Nested entries never fail a layer: when retaining them would
+				// exceed the retained-bytes limit they are dropped and reported.
+				if err := retention.ensure(working, retainedFinalArtifactBytes(artifact)); err != nil {
+					nested.skip(entryPath, NestedSkipRetainedBytes, int64(len(artifact.Nested)), options.MaxRetainedBytes)
+					artifact.Nested = nil
+				}
 			}
 			if err := working.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
 				return err
@@ -529,6 +576,7 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		working.deleteLowerPath(base, target, descriptor.Digest, currentPaths)
 	}
 	working.coverage.ExpandedBytes = expandedBytesAfterLayer(s.coverage.ExpandedBytes, limitedReader.readBytes, logicalBudget.bytes)
+	nested.flush(working)
 	s.final = working.final
 	s.deleted = working.deleted
 	s.dirs = working.dirs
@@ -536,8 +584,32 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 	s.artifactChildren = working.artifactChildren
 	s.entries = s.entries + entryCount
 	s.coverage = working.coverage
+	s.nestedSkips = working.nestedSkips
 	committed = true
 	return nil
+}
+
+// flush adds the expander's observations to the state's coverage and skip
+// records. It is idempotent so both the commit and the failure path can call it.
+func (e *nestedExpander) flush(state *State) {
+	if e == nil || e.flushed {
+		return
+	}
+	e.flushed = true
+	state.coverage.NestedArchivesExpanded += e.archivesExpanded
+	state.coverage.NestedEntriesScanned += e.entriesScanned
+	state.coverage.NestedEntriesSeen += e.entriesSeen
+	state.coverage.NestedBytesExpanded += e.bytesExpanded
+	room := maxNestedSkipRecords - len(state.nestedSkips)
+	if room < 0 {
+		room = 0
+	}
+	if len(e.skips) > room {
+		state.coverage.NestedSkipsDropped += len(e.skips) - room
+		e.skips = e.skips[:room]
+	}
+	state.coverage.NestedSkipsDropped += e.skipsDropped
+	state.nestedSkips = append(append([]NestedSkip(nil), state.nestedSkips...), e.skips...)
 }
 
 // classifyDrainError names bytes left after the archive's end-of-archive
@@ -667,11 +739,11 @@ func retainedFinalArtifactBaseBytes(artifactPath, linkname string) int64 {
 }
 
 func retainedFinalArtifactBytes(artifact Artifact) int64 {
-	return retainedFinalArtifactBaseBytes(artifact.Path, artifact.Linkname) + int64(len(artifact.Content))
+	return retainedFinalArtifactBaseBytes(artifact.Path, artifact.Linkname) + int64(len(artifact.Content)) + nestedRetainedBytes(artifact.Nested)
 }
 
 func retainedDeletedArtifactBytes(artifact Artifact) int64 {
-	return retainedArtifactMetadataBytes + int64(len(artifact.Path)) + int64(len(artifact.Linkname)) + int64(len(artifact.Content))
+	return retainedArtifactMetadataBytes + int64(len(artifact.Path)) + int64(len(artifact.Linkname)) + int64(len(artifact.Content)) + nestedRetainedBytes(artifact.Nested)
 }
 
 func retainedMapStringBytes(value string) int64 {
@@ -942,13 +1014,58 @@ func (s *State) deleteDirectoryPrefix(target string) {
 	}
 }
 
-func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size, maxFileBytes int64) (Artifact, error) {
+func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size int64, options ReplayOptions, nested *nestedExpander) (Artifact, error) {
+	maxFileBytes := options.MaxFileBytes
 	limited := io.LimitReader(reader, limits.OverflowProbeLimit(maxFileBytes))
 	content, err := io.ReadAll(limited)
 	if err != nil {
 		return Artifact{}, fmt.Errorf("read layer file %q: %w", boundedPathForError(entryPath), err)
 	}
 
+	var expanded []Artifact
+	if nested.isCandidate(content) {
+		archive := content
+		if int64(len(content)) > maxFileBytes {
+			// The file is too large to scan as a whole but may still be an
+			// archive worth opening: buffer it up to the nested limit. The
+			// declared size is checked first so a huge archive is not read at
+			// all, and the read itself is capped in case the size lies.
+			archive = nil
+			if size <= options.MaxNestedArchiveBytes {
+				more, err := io.ReadAll(io.LimitReader(reader, limits.OverflowProbeLimit(options.MaxNestedArchiveBytes)-int64(len(content))))
+				if err != nil {
+					return Artifact{}, fmt.Errorf("read layer file %q: %w", boundedPathForError(entryPath), err)
+				}
+				archive = append(content, more...)
+				if int64(len(archive)) > options.MaxNestedArchiveBytes {
+					nested.skip(entryPath, NestedSkipOversize, int64(len(archive)), options.MaxNestedArchiveBytes)
+					archive = nil
+				}
+			} else {
+				nested.skip(entryPath, NestedSkipOversize, size, options.MaxNestedArchiveBytes)
+			}
+			if archive != nil {
+				content = archive[:len(content)]
+			}
+		}
+		if archive != nil {
+			expanded = nested.expand(entryPath, archive)
+		}
+	}
+
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return Artifact{}, fmt.Errorf("discard remaining file bytes for %q: %w", boundedPathForError(entryPath), err)
+	}
+
+	artifact := classifyRegularContent(entryPath, layerDigest, content, size, maxFileBytes)
+	artifact.Nested = expanded
+	return artifact, nil
+}
+
+// classifyRegularContent builds the artifact for a regular file whose first
+// maxFileBytes+1 bytes are content: oversize files keep no content, UTF-16
+// text is transcoded, and only text is scannable.
+func classifyRegularContent(entryPath, layerDigest string, content []byte, size, maxFileBytes int64) Artifact {
 	var contentClass ContentClass
 	var encoding TextEncoding
 	scannable := int64(len(content)) <= maxFileBytes
@@ -973,10 +1090,6 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 		}
 	}
 
-	if _, err := io.Copy(io.Discard, reader); err != nil {
-		return Artifact{}, fmt.Errorf("discard remaining file bytes for %q: %w", boundedPathForError(entryPath), err)
-	}
-
 	return Artifact{
 		Path:           entryPath,
 		LayerDigest:    layerDigest,
@@ -986,7 +1099,7 @@ func buildRegularArtifact(entryPath, layerDigest string, reader io.Reader, size,
 		ContentClass:   contentClass,
 		Scannable:      scannable,
 		SourceEncoding: encoding,
-	}, nil
+	}
 }
 
 // transcodeTextContent returns content in UTF-8 for classification. UTF-16

@@ -427,6 +427,8 @@ apply. Hosts matched by `NO_PROXY` are connected directly with address pinning.
 | `LAYERLEAK_MAX_IMAGE_LAYER_BYTES` | `4294967296` | Aggregate advertised compressed and expanded layer bytes. |
 | `LAYERLEAK_MAX_IMAGE_ARTIFACTS` | `250000` | Aggregate tar entry count across all selected layers, including directories, links, whiteouts, and device nodes. |
 | `LAYERLEAK_MAX_RETAINED_BYTES` | `1073741824` | Bytes retained while reconstructing final state. |
+| `LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES` | `67108864` | Per archive stored in a layer (zip/jar/war/whl/egg, gzip, tar): the largest archive buffered for one-level expansion and the most decompressed bytes read out of it. Entries are scanned under `outer/path!inner/path`; expansion also stays within the layer and image byte and entry budgets. Anything beyond a bound is skipped and reported with a `nested_archive_skipped` diagnostic while coverage stays complete. `0` disables nested archive expansion entirely. |
+| `LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES` | `10000` | Maximum entries examined per nested archive; the rest are skipped and reported. `0` disables this bound (the layer and image entry budgets still apply). |
 | `LAYERLEAK_MAX_MANIFEST_BYTES` | `8388608` | Maximum manifest response size. |
 | `LAYERLEAK_MAX_CONFIG_BYTES` | `8388608` | Maximum image config response size. |
 | `LAYERLEAK_MAX_TAG_RESPONSE_BYTES` | `8388608` | Maximum tag-list response page size. |

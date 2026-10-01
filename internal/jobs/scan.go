@@ -36,26 +36,30 @@ type Request struct {
 	// version of this binary.
 	ScannerVersion string
 	// Now supplies scanned_at; nil means time.Now.
-	Now                  func() time.Time
-	MaxFileBytes         int64
-	MaxLayerBytes        int64
-	MaxLayerEntries      int
-	MaxConfigBytes       int64
-	MaxImageLayers       int
-	MaxImageManifests    int
-	MaxImageLayerBytes   int64
-	MaxImageArtifacts    int
-	MaxRetainedBytes     int64
-	MaxFindings          int
-	RetainRawSecrets     bool
-	MaxRawFindingBytes   int64
-	ConfigTimeout        time.Duration
-	BlobTimeout          time.Duration
-	TagPageSize          int
-	MaxRepositoryTags    int
-	MaxRepositoryTargets int
-	AllTags              bool
-	Progress             ProgressFunc
+	Now                func() time.Time
+	MaxFileBytes       int64
+	MaxLayerBytes      int64
+	MaxLayerEntries    int
+	MaxConfigBytes     int64
+	MaxImageLayers     int
+	MaxImageManifests  int
+	MaxImageLayerBytes int64
+	MaxImageArtifacts  int
+	MaxRetainedBytes   int64
+	// MaxNestedArchiveBytes and MaxNestedArchiveEntries bound the one-level
+	// expansion of archives stored in layers.
+	MaxNestedArchiveBytes   int64
+	MaxNestedArchiveEntries int
+	MaxFindings             int
+	RetainRawSecrets        bool
+	MaxRawFindingBytes      int64
+	ConfigTimeout           time.Duration
+	BlobTimeout             time.Duration
+	TagPageSize             int
+	MaxRepositoryTags       int
+	MaxRepositoryTargets    int
+	AllTags                 bool
+	Progress                ProgressFunc
 }
 
 type ResultStatus string
@@ -619,6 +623,10 @@ func scanTarget(ctx context.Context, request Request, reference manifest.Referen
 		MaxImageLayerBytes: request.MaxImageLayerBytes,
 		MaxImageArtifacts:  request.MaxImageArtifacts,
 		MaxRetainedBytes:   request.MaxRetainedBytes,
+
+		MaxNestedArchiveBytes:   request.MaxNestedArchiveBytes,
+		MaxNestedArchiveEntries: request.MaxNestedArchiveEntries,
+
 		MaxFindings:        request.MaxFindings,
 		ExistingFindings:   state.findingsRetained,
 		RetainRawSecrets:   request.RetainRawSecrets,
@@ -771,6 +779,8 @@ func mergeCoverage(left, right scanner.Coverage) scanner.Coverage {
 		RetainedBytes:             left.RetainedBytes + right.RetainedBytes,
 		DetectorInputBytesScanned: left.DetectorInputBytesScanned + right.DetectorInputBytesScanned,
 		FilesTranscodedUTF16:      left.FilesTranscodedUTF16 + right.FilesTranscodedUTF16,
+		NestedArchivesExpanded:    left.NestedArchivesExpanded + right.NestedArchivesExpanded,
+		NestedEntriesScanned:      left.NestedEntriesScanned + right.NestedEntriesScanned,
 	}
 }
 

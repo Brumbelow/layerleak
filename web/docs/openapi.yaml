@@ -1111,6 +1111,8 @@ components:
         - retained_bytes
         - detector_input_bytes_scanned
         - files_transcoded_utf16
+        - nested_archives_expanded
+        - nested_entries_scanned
       properties:
         complete:
           type: boolean
@@ -1156,6 +1158,18 @@ components:
           description: >-
             Scanned files whose UTF-16 content (byte-order mark or
             alternating-NUL shape) was transcoded to UTF-8 before detection.
+        nested_archives_expanded:
+          type: integer
+          minimum: 0
+          description: >-
+            Archives stored in layers (zip family, gzip, tar) that were opened
+            one level deep; their entries are scanned under `outer!inner` paths.
+        nested_entries_scanned:
+          type: integer
+          minimum: 0
+          description: >-
+            Regular files inside nested archives that were classified and
+            scanned by content or checked by path.
 
     SanitizedError:
       type: string

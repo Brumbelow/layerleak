@@ -20,6 +20,8 @@
       "layers_completed": 1,
       "layers_seen": 2,
       "metadata_values_scanned": 1,
+      "nested_archives_expanded": 0,
+      "nested_entries_scanned": 0,
       "retained_bytes": 64
     },
     "diagnostics": [

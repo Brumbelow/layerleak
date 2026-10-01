@@ -177,7 +177,7 @@ func normalizeImageName(name string) string {
 
 // selectImage resolves an identifier to a manifest.json entry: the only entry
 // for "", the entry carrying the image name, or the entry whose synthesised
-// manifest has the digest.
+// manifest has the digest (images over a configured limit are skipped).
 func (d *dockerArchive) selectImage(ctx context.Context, identifier string) (*dockerImage, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
@@ -187,14 +187,27 @@ func (d *dockerArchive) selectImage(ctx context.Context, identifier string) (*do
 		return d.image(ctx, 0)
 	}
 	if manifest.ValidateDigest(identifier) == nil {
+		// An image over a configured limit has no synthesised manifest and so
+		// no digest; skip it so an unrelated oversize image cannot make the
+		// others unselectable, and report the limit only when nothing matches.
+		var skipped error
 		for index := range d.entries {
 			image, err := d.image(ctx, index)
 			if err != nil {
+				if limits.IsExceeded(err) {
+					if skipped == nil {
+						skipped = err
+					}
+					continue
+				}
 				return nil, err
 			}
 			if image.digest == identifier {
 				return image, nil
 			}
+		}
+		if skipped != nil {
+			return nil, fmt.Errorf("docker archive %s has no in-limit image with digest %s: %w", d.location, identifier, skipped)
 		}
 		return nil, fmt.Errorf("docker archive %s has no image with digest %s", d.location, identifier)
 	}

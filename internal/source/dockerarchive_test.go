@@ -169,3 +169,40 @@ func TestDockerArchiveBoundsTheSynthesisedManifest(t *testing.T) {
 		t.Fatalf("FetchManifest() with an oversize synthesised manifest error = %v", err)
 	}
 }
+
+// Selecting by digest skips an image of the archive that is over a limit, so
+// an unrelated oversize image does not make an in-limit image unselectable;
+// asking for a digest no in-limit image has still reports the limit.
+func TestDockerArchiveDigestSelectionSkipsAnOverLimitImage(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "two.tar")
+	writeFile(t, archive, tarBytes(t, []tarFile{
+		{name: "one.json", body: configJSON(t, linuxAMD64, "IMAGE=one")},
+		{name: "two.json", body: configJSON(t, linuxAMD64, "IMAGE=two")},
+		{name: "a.tar", body: []byte(strings.Repeat("a", 1024))},
+		{name: "b.tar", body: []byte(strings.Repeat("b", 1024))},
+		{name: dockerManifestName, body: mustJSON(t, []dockerManifestEntry{
+			{Config: "one.json", RepoTags: []string{"app:one"}, Layers: []string{"a.tar", "a.tar", "a.tar"}},
+			{Config: "two.json", RepoTags: []string{"app:two"}, Layers: []string{"b.tar"}},
+		})},
+	}))
+	ctx := context.Background()
+
+	byName, err := openSource(t, "docker-archive:"+archive, Options{MaxImageLayers: 2}).FetchManifest(ctx, "", "app:two")
+	if err != nil {
+		t.Fatalf("FetchManifest(app:two) error = %v", err)
+	}
+	byDigest, err := openSource(t, "docker-archive:"+archive, Options{MaxImageLayers: 2}).FetchManifest(ctx, "", byName.Digest)
+	if err != nil {
+		t.Fatalf("FetchManifest(@digest) with an over-limit sibling error = %v", err)
+	}
+	if byDigest.Digest != byName.Digest {
+		t.Fatalf("FetchManifest(@digest) digest = %s, want %s", byDigest.Digest, byName.Digest)
+	}
+
+	missing := "sha256:" + strings.Repeat("0", 64)
+	_, err = openSource(t, "docker-archive:"+archive, Options{MaxImageLayers: 2}).FetchManifest(ctx, "", missing)
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok || exceeded.Kind != limits.Kind("image_layers") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("FetchManifest(@unknown digest) with an over-limit image error = %v", err)
+	}
+}

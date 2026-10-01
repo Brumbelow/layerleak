@@ -8,8 +8,14 @@ info:
     in PostgreSQL. The API has no built-in authentication or authorization.
     Deploy it only on a private network or behind an authenticated gateway.
 
-    Every response includes `X-Request-ID`. Findings and result snapshots stay
-    redacted even when the scanner has been configured to persist raw material.
+    Every response is JSON and carries `X-Request-ID`, `Cache-Control:
+    no-store` and `X-Content-Type-Options: nosniff`. Unknown paths, and paths
+    that are not in canonical form (repeated slashes, dot segments), answer
+    404 `not_found`; a known path with the wrong method answers 405
+    `method_not_allowed` with an `Allow` header. No redirect is ever issued.
+    Error `message` values are fixed neutral strings. Findings and result
+    snapshots stay redacted even when the scanner has been configured to
+    persist raw material.
   license:
     name: MIT
     identifier: MIT
@@ -33,11 +39,13 @@ paths:
     get:
       tags: [Health]
       summary: Check process liveness
-      description: Returns success while the API process is running, without checking PostgreSQL readiness.
+      description: Returns success and the build version while the API process is running, without checking PostgreSQL readiness.
       operationId: getHealth
       responses:
         "200":
           $ref: "#/components/responses/Liveness"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
   /livez:
     get:
       tags: [Health]
@@ -47,11 +55,20 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Liveness"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
   /readyz:
     get:
       tags: [Health]
       summary: Check database and schema readiness
-      description: Returns success only when PostgreSQL responds and the installed schema is exactly version 0004.
+      description: |
+        Returns success only when PostgreSQL responds and the installed schema
+        is exactly version 0004. The result is reused for
+        `LAYERLEAK_API_READINESS_CACHE_TTL` (5 s by default) so frequent probes
+        do not re-run the catalog validation. Reports 503 `not_ready` while
+        the process drains before shutdown (`LAYERLEAK_API_PRESTOP_DELAY`), so
+        load balancers stop routing to it before in-flight requests are
+        cancelled.
       operationId: getReadiness
       responses:
         "200":
@@ -63,6 +80,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
@@ -104,6 +123,10 @@ paths:
                   x-contract-fixture: ../testdata/api/scan-completed.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "404":
+          $ref: "#/components/responses/ImageNotFound"
         "408":
           $ref: "#/components/responses/RequestTimeout"
         "413":
@@ -141,8 +164,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ScanDetailResponse"
+              examples:
+                completed:
+                  summary: Persisted completed scan with its redacted result
+                  externalValue: ../testdata/api/scan-detail.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -169,8 +198,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepositoriesResponse"
+              examples:
+                page:
+                  summary: First page of repositories
+                  externalValue: ../testdata/api/repositories.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -197,8 +232,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepositoryScansResponse"
+              examples:
+                history:
+                  summary: A completed reference scan and a failed repository sweep
+                  externalValue: ../testdata/api/repository-scans.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -226,8 +267,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RepositoryFindingsResponse"
+              examples:
+                all:
+                  summary: Deduplicated findings with the all disposition
+                  externalValue: ../testdata/api/repository-findings.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -251,8 +298,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FindingDetailResponse"
+              examples:
+                detail:
+                  summary: One finding with an actionable and an example occurrence
+                  externalValue: ../testdata/api/finding-detail.json
         "400":
           $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -263,10 +316,29 @@ paths:
 components:
   headers:
     RequestID:
-      description: Correlation identifier generated by or accepted from the request.
+      description: >-
+        Correlation identifier. A caller-supplied `X-Request-ID` of up to 128
+        characters from `A-Z a-z 0-9 - _ .` is echoed; anything else is
+        replaced by a generated identifier. Present on every response.
       schema:
         type: string
         minLength: 1
+        maxLength: 128
+    CacheControl:
+      description: Always `no-store`; present on every response.
+      schema:
+        type: string
+        enum: [no-store]
+    ContentTypeOptions:
+      description: Always `nosniff`; present on every response.
+      schema:
+        type: string
+        enum: [nosniff]
+    Allow:
+      description: The one method the path accepts.
+      schema:
+        type: string
+        enum: [GET, POST]
 
   parameters:
     ID:
@@ -281,31 +353,51 @@ components:
       name: repository
       in: path
       required: true
-      description: Repository path, for example `library/alpine`. Percent-encode path separators as `%2F` in request URLs.
+      description: |
+        Repository path such as `library/alpine`, without the registry host.
+        A literal `/` and a percent-encoded `%2F` are both accepted and
+        decoded exactly once; `%252F` is rejected. The name must match the
+        OCI distribution grammar (lowercase components joined by `.`, `_`,
+        `__` or `-`), otherwise the response is 400 `invalid_request`. The
+        `/scans` and `/findings` suffixes must be separate path segments:
+        `/api/v1/repositories/scans` is 404 `not_found`.
       schema:
         type: string
         minLength: 1
+        maxLength: 255
+        pattern: '^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$'
     Registry:
       name: registry
       in: query
       required: false
-      description: OCI registry host. Defaults to docker.io.
+      description: |
+        OCI registry host as `host` or `host:port` (hostname, IPv4 or bracketed
+        IPv6 literal). Case-insensitive; `index.docker.io` and
+        `registry-1.docker.io` normalise to `docker.io`, which is also the
+        default. Anything else (schemes, paths, credentials, invalid ports)
+        is 400 `invalid_request`. The normalised value is echoed as
+        `registry` in the response.
       schema:
         type: string
         default: docker.io
+        examples: [ghcr.io, "localhost:5000"]
     Limit:
       name: limit
       in: query
       required: false
+      description: >-
+        Page size. Values above 200 are clamped to 200 rather than rejected;
+        the response's `limit` reports the effective value. Zero, negative and
+        non-integer values are 400 `invalid_request`.
       schema:
         type: integer
         minimum: 1
-        maximum: 200
         default: 50
     Offset:
       name: offset
       in: query
       required: false
+      description: Number of items to skip. Negative and non-integer values are 400 `invalid_request`.
       schema:
         type: integer
         minimum: 0
@@ -325,10 +417,60 @@ components:
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Health"
+    MethodNotAllowed:
+      description: The path exists but does not accept this method (`method_not_allowed`). `Allow` names the accepted method.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Allow:
+          $ref: "#/components/headers/Allow"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            wrongMethod:
+              value:
+                error:
+                  code: method_not_allowed
+                  message: method is not allowed for this endpoint
+                  request_id: 0f6d3e8d2c4b4a7a9e1f2b3c4d5e6f70
+    UnknownRoute:
+      description: |
+        Any path outside this document, including a documented path whose
+        form is not canonical (`//`, `.` or `..` segments) or that carries a
+        trailing slash, answers `not_found`. This response is not attached to
+        an operation because it applies to the paths that have none.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Cache-Control:
+          $ref: "#/components/headers/CacheControl"
+        X-Content-Type-Options:
+          $ref: "#/components/headers/ContentTypeOptions"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            unknownPath:
+              value:
+                error:
+                  code: not_found
+                  message: endpoint not found
+                  request_id: 0f6d3e8d2c4b4a7a9e1f2b3c4d5e6f71
     BadRequest:
       description: Invalid path, query, reference, platform, or JSON body.
       headers:
@@ -348,7 +490,10 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     RequestTimeout:
-      description: The request was canceled before the bounded scan completed.
+      description: |
+        The request context ended (the client closed the connection) before the
+        bounded scan completed (`scan_canceled`). Timeouts inside the scan are
+        reported as 502 `scan_failed`; the API's own deadline as 504.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -370,7 +515,9 @@ components:
         The scan exceeded a configured resource limit (`scan_limit_exceeded`)
         or could not cover every selected manifest (`scan_incomplete`). When
         useful work completed, `scan_run_id` and a persisted redacted `result`
-        accompany the error.
+        accompany the error. A `scan_limit_exceeded` message has the fixed
+        form `the scan exceeded the configured <kind> limit of <limit>` and
+        the error object carries `limit_kind` and `limit`.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -398,7 +545,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     NotFound:
-      description: The requested stored resource was not found.
+      description: The requested stored resource was not found (`not_found`).
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -416,7 +563,11 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     ServiceUnavailable:
-      description: Database/schema readiness or another required service is unavailable.
+      description: |
+        A dependency is unavailable. `not_ready`: PostgreSQL or the schema is
+        not ready, or the process is draining before shutdown.
+        `storage_unavailable`: a database read failed. `server_shutting_down`:
+        the drain cancelled this request before it completed.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -424,11 +575,35 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
-    ScanStorageUnavailable:
-      description: The scan returned a redacted result, but it could not be persisted.
+    ImageNotFound:
+      description: |
+        The registry answered 404 for the requested repository, tag or manifest
+        (`image_not_found`). A redacted failed `result` is included when the
+        scan recorded one. Stored-resource lookups use `not_found` instead.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ScanResponse"
+    ScanStorageUnavailable:
+      description: |
+        A dependency was unavailable. `storage_unavailable`: the scan returned
+        a redacted `result`, but it could not be persisted; no `scan_run_id` is
+        invented. `registry_rate_limited`: the registry or its token endpoint
+        answered 429 after the client's bounded retries; `Retry-After` carries
+        a suggested back-off in seconds. `server_shutting_down`: the process is
+        draining; new scans are refused and an in-flight scan was cancelled when
+        the drain window elapsed. Retry against another instance.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Retry-After:
+          description: Suggested retry delay in seconds (`registry_rate_limited` only).
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:
@@ -439,7 +614,10 @@ components:
               externalValue: ../testdata/api/scan-storage-error.json
               x-contract-fixture: ../testdata/api/scan-storage-error.json
     Timeout:
-      description: The bounded API scan exceeded its deadline.
+      description: |
+        The API's own scan deadline (`LAYERLEAK_API_SCAN_TIMEOUT`) expired
+        (`scan_timeout`). A timeout inside a registry request is an upstream
+        failure and reports 502 `scan_failed` instead.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -448,7 +626,12 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     BadGateway:
-      description: The upstream registry scan failed. A redacted failed result is included when available.
+      description: |
+        The upstream registry scan failed. `scan_failed` covers transport
+        errors, registry 5xx responses and timeouts inside the scan;
+        `registry_unauthorized` means the registry or its token endpoint
+        answered 401 or 403. A redacted failed `result` is included when
+        available.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -466,11 +649,17 @@ components:
     Health:
       type: object
       additionalProperties: false
-      required: [status]
+      required: [status, version]
       properties:
         status:
           type: string
           enum: [ok, ready]
+        version:
+          type: string
+          description: >-
+            Build version of the serving binary (the release tag for container
+            images, the module version for `go install`, or `dev`).
+          examples: [v3.0.0, dev]
 
     ErrorEnvelope:
       type: object
@@ -489,8 +678,26 @@ components:
           examples: [invalid_request]
         message:
           type: string
+          description: Fixed, neutral text; never upstream error chains, reference strings or request bodies.
         request_id:
           type: string
+        limit_kind:
+          type: string
+          description: >-
+            Present with `scan_limit_exceeded` only: the exceeded bound.
+          enum:
+            - layer_bytes
+            - layer_entries
+            - manifest_bytes
+            - config_bytes
+            - tag_response_bytes
+            - repository_tags
+            - repository_targets
+        limit:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Present with `scan_limit_exceeded` only; the configured value of `limit_kind`.
 
     ScanRequest:
       type: object
@@ -649,8 +856,13 @@ components:
           type: string
         status:
           type: string
+          description: >-
+            `scanned` when the tag's manifest was scanned, `resolved` when it
+            shared a digest with another tag that was scanned, `failed` when
+            it could not be resolved or scanned.
+          enum: [scanned, resolved, failed]
         error:
-          type: string
+          $ref: "#/components/schemas/SanitizedError"
     TargetResult:
       type: object
       additionalProperties: false
@@ -685,7 +897,7 @@ components:
           type: integer
           minimum: 0
         error:
-          type: string
+          $ref: "#/components/schemas/SanitizedError"
 
     PlatformResult:
       type: object
@@ -702,7 +914,7 @@ components:
           type: integer
           minimum: 0
         error:
-          type: string
+          $ref: "#/components/schemas/SanitizedError"
         coverage:
           $ref: "#/components/schemas/Coverage"
         diagnostics:
@@ -783,6 +995,14 @@ components:
           format: int64
           minimum: 0
 
+    SanitizedError:
+      type: string
+      description: >-
+        Present only when the step failed. The API replaces the stored
+        operational text with this fixed string; the CLI's local output keeps
+        the real message.
+      enum: ["scan step failed"]
+
     Diagnostic:
       type: object
       additionalProperties: false
@@ -790,12 +1010,22 @@ components:
       properties:
         code:
           type: string
+          description: Machine-readable diagnostic code; the stable signal for automation.
         scope:
           type: string
         subject:
           type: string
         message:
           type: string
+          description: >-
+            Fixed neutral text chosen from `code`; the API never returns the
+            scanner's own message. Codes other than the three listed map to
+            `scan step failed`.
+          enum:
+            - one or more files exceeded the configured per-file scan limit
+            - the scan exceeded the configured findings limit
+            - the scan exceeded the configured raw finding byte limit
+            - scan step failed
         limit:
           type: integer
           format: int64
@@ -894,8 +1124,11 @@ components:
     RepositoryScansResponse:
       type: object
       additionalProperties: false
-      required: [repository, scans, limit, offset]
+      required: [registry, repository, scans, limit, offset]
       properties:
+        registry:
+          type: string
+          description: The normalised registry filter that was applied.
         repository:
           type: string
         scans:
@@ -907,36 +1140,111 @@ components:
         offset:
           type: integer
     ScanSummary:
+      description: One persisted scan run as listed in repository history; closed to fields beyond ScanRunFields.
+      allOf:
+        - $ref: "#/components/schemas/ScanRunFields"
+      unevaluatedProperties: false
+    ScanRunFields:
       type: object
-      additionalProperties: true
-      required: [id, requested_reference, mode, status, scanned_at]
+      description: Fields shared by ScanSummary and the scan detail.
+      required:
+        - id
+        - requested_reference
+        - mode
+        - status
+        - scanned_at
+        - tags_enumerated
+        - tags_resolved
+        - tags_failed
+        - target_count
+        - completed_target_count
+        - failed_target_count
+        - partial_target_count
+        - manifest_count
+        - completed_manifest_count
+        - failed_manifest_count
+        - total_findings
+        - unique_fingerprints
+        - suppressed_findings_count
+        - suppressed_unique_fingerprints
       properties:
         id:
           type: integer
           format: int64
+          minimum: 1
         requested_reference:
           type: string
         resolved_reference:
           type: string
+          description: Omitted when the scan never resolved a digest.
         requested_digest:
           type: string
+          description: Omitted when the request carried no digest and none was resolved.
         mode:
           type: string
+          enum: [reference, repository]
         status:
-          type: string
+          $ref: "#/components/schemas/ResultStatus"
         error_message:
           type: string
+          description: >-
+            Present only when an error was recorded, always as this fixed
+            marker; the stored message is never returned by the API.
+          enum: ["scan did not complete successfully"]
         scanned_at:
           type: string
           format: date-time
+        tags_enumerated:
+          type: integer
+          minimum: 0
+        tags_resolved:
+          type: integer
+          minimum: 0
+        tags_failed:
+          type: integer
+          minimum: 0
+        target_count:
+          type: integer
+          minimum: 0
+        completed_target_count:
+          type: integer
+          minimum: 0
+        failed_target_count:
+          type: integer
+          minimum: 0
+        partial_target_count:
+          type: integer
+          minimum: 0
+        manifest_count:
+          type: integer
+          minimum: 0
+        completed_manifest_count:
+          type: integer
+          minimum: 0
+        failed_manifest_count:
+          type: integer
+          minimum: 0
+        total_findings:
+          type: integer
+          minimum: 0
+        unique_fingerprints:
+          type: integer
+          minimum: 0
+        suppressed_findings_count:
+          type: integer
+          minimum: 0
+        suppressed_unique_fingerprints:
+          type: integer
+          minimum: 0
     ScanDetailResponse:
       type: object
       additionalProperties: false
       required: [scan]
       properties:
         scan:
+          description: ScanRunFields plus the registry, repository and stored redacted result. Closed.
           allOf:
-            - $ref: "#/components/schemas/ScanSummary"
+            - $ref: "#/components/schemas/ScanRunFields"
             - type: object
               required: [registry, repository, result]
               properties:
@@ -946,12 +1254,16 @@ components:
                   type: string
                 result:
                   $ref: "#/components/schemas/ScanResult"
+          unevaluatedProperties: false
 
     RepositoryFindingsResponse:
       type: object
       additionalProperties: false
-      required: [repository, findings, disposition, limit, offset]
+      required: [registry, repository, findings, disposition, limit, offset]
       properties:
+        registry:
+          type: string
+          description: The normalised registry filter that was applied.
         repository:
           type: string
         findings:
@@ -966,8 +1278,13 @@ components:
         offset:
           type: integer
     FindingSummary:
+      description: One deduplicated finding as listed for a repository; closed to fields beyond FindingFields.
+      allOf:
+        - $ref: "#/components/schemas/FindingFields"
+      unevaluatedProperties: false
+    FindingFields:
       type: object
-      additionalProperties: false
+      description: Fields shared by FindingSummary and the finding detail.
       required:
         - id
         - manifest_digest
@@ -1014,8 +1331,9 @@ components:
       required: [finding]
       properties:
         finding:
+          description: FindingFields plus the redacted occurrence history. Closed.
           allOf:
-            - $ref: "#/components/schemas/FindingSummary"
+            - $ref: "#/components/schemas/FindingFields"
             - type: object
               required: [occurrences]
               properties:
@@ -1023,6 +1341,7 @@ components:
                   type: array
                   items:
                     $ref: "#/components/schemas/FindingOccurrence"
+          unevaluatedProperties: false
     FindingOccurrence:
       type: object
       additionalProperties: false

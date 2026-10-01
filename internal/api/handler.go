@@ -11,17 +11,25 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
 	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
 	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"github.com/brumbelow/layerleak/v3/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/version"
 )
 
 const (
@@ -33,18 +41,33 @@ const (
 	defaultQueryTimeout       = 10 * time.Second
 	defaultReadinessTimeout   = 2 * time.Second
 	defaultResponseTimeout    = 30 * time.Second
+	defaultReadinessCacheTTL  = 5 * time.Second
 )
 
 type scanExecutor interface {
 	ScanAndSave(rctx context.Context, request scanservice.Request) (scanservice.Outcome, error)
 }
 
+// Handler is the JSON API. It implements http.Handler through the middleware
+// that wraps its mux, and tracks whether the server is draining.
 type Handler struct {
 	scanner   scanExecutor
 	store     storage.ReadStore
 	options   HandlerOptions
 	scanSlots chan struct{}
 	requestID func() string
+	logger    *slog.Logger
+	draining  atomic.Bool
+	serve     http.Handler
+
+	// readiness caches the last store check for ReadinessCacheTTL. The mutex
+	// also serialises probes so one slow check is not run by every prober.
+	readiness struct {
+		sync.Mutex
+		checkedAt time.Time
+		err       error
+		cached    bool
+	}
 }
 
 type HandlerOptions struct {
@@ -55,16 +78,34 @@ type HandlerOptions struct {
 	ReadinessTimeout   time.Duration
 	ResponseTimeout    time.Duration
 	RequestID          func() string
+	// ReadinessCacheTTL is how long a /readyz result is reused before the
+	// store's schema-contract validation runs again. Zero disables the cache
+	// and a negative value selects the 5 s default.
+	ReadinessCacheTTL time.Duration
+	// Logger receives request and lifecycle logs. Nil uses slog.Default().
+	Logger *slog.Logger
 }
+
+const shuttingDownMessage = "the API is shutting down; retry against another instance"
 
 type readinessChecker interface {
 	Ready(context.Context) error
+}
+
+// healthResponse is the body of /health, /livez and a ready /readyz. Version
+// is the build version so operators can tell which build answers.
+type healthResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
 }
 
 type errorResponse struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	RequestID string `json:"request_id,omitempty"`
+	// LimitKind and Limit accompany scan_limit_exceeded only.
+	LimitKind string `json:"limit_kind,omitempty"`
+	Limit     int64  `json:"limit,omitempty"`
 }
 
 type scanRequest struct {
@@ -86,6 +127,7 @@ type repositoriesResponse struct {
 }
 
 type repositoryScansResponse struct {
+	Registry   string            `json:"registry"`
 	Repository string            `json:"repository"`
 	Scans      []scanSummaryItem `json:"scans"`
 	Limit      int               `json:"limit"`
@@ -100,6 +142,7 @@ type repositoryItem struct {
 }
 
 type repositoryFindingsResponse struct {
+	Registry    string               `json:"registry"`
 	Repository  string               `json:"repository"`
 	Findings    []findingSummaryItem `json:"findings"`
 	Disposition string               `json:"disposition"`
@@ -194,6 +237,10 @@ func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
 // NewHandlerWithOptions returns the JSON HTTP API with explicit resource and
 // deadline limits. Zero-valued options use the stable API defaults.
 func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) http.Handler {
+	return newHandler(scanner, store, options)
+}
+
+func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) *Handler {
 	options = options.withDefaults()
 	handler := &Handler{
 		scanner:   scanner,
@@ -201,6 +248,7 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 		options:   options,
 		scanSlots: make(chan struct{}, options.MaxConcurrentScans),
 		requestID: options.RequestID,
+		logger:    options.Logger,
 	}
 
 	mux := http.NewServeMux()
@@ -221,7 +269,24 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 	mux.HandleFunc("/api/v1/repositories/", handler.methodNotAllowed(http.MethodGet))
 	mux.HandleFunc("/api/v1/findings/{id}", handler.methodNotAllowed(http.MethodGet))
 	mux.HandleFunc("/", handler.handleNotFound)
-	return handler.middleware(mux)
+	handler.serve = handler.middleware(mux)
+	return handler
+}
+
+// ServeHTTP serves the API through its middleware and mux.
+func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	h.serve.ServeHTTP(writer, request)
+}
+
+// startDraining marks the server as shutting down: /readyz reports 503
+// not_ready, new scans are refused with 503 server_shutting_down, and
+// requests whose contexts the drain cancels report the same code.
+func (h *Handler) startDraining() {
+	h.draining.Store(true)
+}
+
+func (h *Handler) isDraining() bool {
+	return h.draining.Load()
 }
 
 func (options HandlerOptions) withDefaults() HandlerOptions {
@@ -243,35 +308,67 @@ func (options HandlerOptions) withDefaults() HandlerOptions {
 	if options.ResponseTimeout <= 0 {
 		options.ResponseTimeout = defaultResponseTimeout
 	}
+	if options.ReadinessCacheTTL < 0 {
+		options.ReadinessCacheTTL = defaultReadinessCacheTTL
+	}
 	if options.RequestID == nil {
 		options.RequestID = newRequestID
+	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
 	}
 	return options
 }
 
 func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(writer, http.StatusOK, healthResponse{Status: "ok", Version: version.Effective()})
 }
 
-func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request) {
+func (h *Handler) handleReady(writer http.ResponseWriter, _ *http.Request) {
+	if h.isDraining() {
+		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "the API is draining before shutdown")
+		return
+	}
 	checker, ok := h.store.(readinessChecker)
 	if !ok || checker == nil {
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database readiness check is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), h.options.ReadinessTimeout)
-	defer cancel()
-	if err := checker.Ready(ctx); err != nil {
-		slog.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
+	if err := h.checkReadiness(checker); err != nil {
+		h.logger.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database is not ready")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
+	writeJSON(writer, http.StatusOK, healthResponse{Status: "ready", Version: version.Effective()})
+}
+
+// checkReadiness runs the store's readiness check, reusing the previous
+// result while it is younger than ReadinessCacheTTL. The check runs under
+// its own bounded context rather than the prober's so a probe that hangs up
+// cannot poison the shared result.
+func (h *Handler) checkReadiness(checker readinessChecker) error {
+	h.readiness.Lock()
+	defer h.readiness.Unlock()
+	ttl := h.options.ReadinessCacheTTL
+	if ttl > 0 && h.readiness.cached && time.Since(h.readiness.checkedAt) < ttl {
+		return h.readiness.err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), h.options.ReadinessTimeout)
+	defer cancel()
+	err := checker.Ready(ctx)
+	h.readiness.err = err
+	h.readiness.checkedAt = time.Now()
+	h.readiness.cached = ttl > 0
+	return err
 }
 
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {
 	if h.scanner == nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "scan service is not configured")
+		return
+	}
+	if h.isDraining() {
+		writeAPIError(writer, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
 		return
 	}
 	if !isJSONContentType(request.Header.Get("Content-Type"), request.ContentLength) {
@@ -341,16 +438,21 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	if err != nil {
-		statusCode, code, message := classifyScanError(err)
-		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", code, "status", statusCode, "request_id", requestIDFromWriter(writer))
+		failure := classifyScanError(scanCtx, request.Context(), err, h.isDraining())
+		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", failure.code, "status", failure.status, "request_id", requestIDFromWriter(writer))
 		response := scanResponse{
 			ScanRunID: outcome.ScanRunID,
-			Error:     newErrorResponse(writer, code, message),
+			Error:     newErrorResponse(writer, failure.code, failure.message),
 		}
+		response.Error.LimitKind = failure.limitKind
+		response.Error.Limit = failure.limit
 		if hasResult(outcome.Result) {
 			response.Result = resultJSON
 		}
-		writeJSON(writer, statusCode, response)
+		if failure.retryAfter != "" {
+			writer.Header().Set("Retry-After", failure.retryAfter)
+		}
+		writeJSON(writer, failure.status, response)
 		return
 	}
 
@@ -430,7 +532,11 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry, err := parseRegistryFilter(request.URL.Query().Get("registry"))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
 	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset)
@@ -440,6 +546,7 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 	}
 
 	response := repositoryScansResponse{
+		Registry:   registry,
 		Repository: repository,
 		Scans:      make([]scanSummaryItem, 0, len(items)),
 		Limit:      limit,
@@ -474,7 +581,11 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry, err := parseRegistryFilter(request.URL.Query().Get("registry"))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
 	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset)
@@ -484,6 +595,7 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 	}
 
 	response := repositoryFindingsResponse{
+		Registry:    registry,
 		Repository:  repository,
 		Findings:    make([]findingSummaryItem, 0, len(items)),
 		Disposition: string(disposition),
@@ -638,22 +750,57 @@ func mapFindingSummary(item storage.FindingSummary) findingSummaryItem {
 	}
 }
 
-func repositoryPathValue(path, suffix string) (string, bool, error) {
-	const prefix = "/api/v1/repositories/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+const (
+	repositoriesPrefix      = "/api/v1/repositories/"
+	maxRepositoryNameLength = 255
+)
+
+// repositoryNamePattern is the OCI distribution <name> grammar: lowercase
+// path components joined by single separators (. _ __ or one or more -) and
+// slashes. Registry hosts are never part of the path.
+var repositoryNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$`)
+
+// repositoryPathValue extracts the repository from a subtree path whose final
+// segment is suffix, for example "/scans". requestPath is request.URL.Path,
+// which net/url has already percent-decoded once; it is not decoded again, so
+// "%252F" stays "%2F" and fails validation. ok is false when no repository
+// segment precedes the suffix (a 404); err reports a name outside the
+// distribution grammar (a 400).
+func repositoryPathValue(requestPath, suffix string) (string, bool, error) {
+	rest, hasPrefix := strings.CutPrefix(requestPath, repositoriesPrefix)
+	if !hasPrefix {
 		return "", false, nil
 	}
-
-	rawRepository := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	repository, err := url.PathUnescape(strings.Trim(rawRepository, "/"))
-	if err != nil {
-		return "", false, fmt.Errorf("repository path is invalid")
-	}
-	if strings.TrimSpace(repository) == "" {
+	repository, hasSuffix := strings.CutSuffix(rest, suffix)
+	if !hasSuffix || repository == "" {
 		return "", false, nil
 	}
-
+	if err := validateRepositoryName(repository); err != nil {
+		return "", false, err
+	}
 	return repository, true, nil
+}
+
+func validateRepositoryName(name string) error {
+	if len(name) > maxRepositoryNameLength || !repositoryNamePattern.MatchString(name) {
+		return fmt.Errorf("repository must be a lowercase OCI repository path such as library/alpine")
+	}
+	return nil
+}
+
+// isCleanPath reports whether requestPath is already in the canonical form
+// http.ServeMux would redirect to. Unclean paths (repeated slashes, dot
+// segments) are answered with the JSON 404 before the mux sees them, so the
+// API never emits a text/html redirect.
+func isCleanPath(requestPath string) bool {
+	if requestPath == "" || requestPath[0] != '/' {
+		return false
+	}
+	cleaned := path.Clean(requestPath)
+	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned == requestPath
 }
 
 func parsePagination(values url.Values) (int, int, error) {
@@ -688,6 +835,69 @@ func parsePagination(values url.Values) (int, int, error) {
 	return limit, offset, nil
 }
 
+var errInvalidRegistryFilter = errors.New("registry must be a hostname or IP address, optionally with a port")
+
+// parseRegistryFilter validates the ?registry= query as host[:port] and
+// returns the normalised value the store filters on: trimmed, lowercased,
+// Docker Hub aliases folded to docker.io, and docker.io when empty. The
+// returned value is echoed in the response.
+func parseRegistryFilter(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "docker.io", "index.docker.io", "registry-1.docker.io":
+		return manifest.DockerHubRegistry, nil
+	}
+	if err := validateRegistryHost(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// validateRegistryHost accepts a lowercase hostname, IPv4 literal or bracketed
+// IPv6 literal, each optionally followed by :port, matching the registry
+// grammar manifest.ParseReference applies to image references.
+func validateRegistryHost(value string) error {
+	host := value
+	if strings.HasPrefix(value, "[") {
+		bracketed, port, err := net.SplitHostPort(value)
+		if err != nil || net.ParseIP(bracketed) == nil || !validRegistryPort(port) {
+			return errInvalidRegistryFilter
+		}
+		return nil
+	}
+	if colon := strings.LastIndexByte(value, ':'); colon >= 0 {
+		if strings.Count(value, ":") != 1 || !validRegistryPort(value[colon+1:]) {
+			return errInvalidRegistryFilter
+		}
+		host = value[:colon]
+	}
+	if host == "" {
+		return errInvalidRegistryFilter
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	if len(host) > 253 {
+		return errInvalidRegistryFilter
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return errInvalidRegistryFilter
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return errInvalidRegistryFilter
+			}
+		}
+	}
+	return nil
+}
+
+func validRegistryPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 1 && port <= 65535
+}
+
 func parseDispositionFilter(value string) (storage.FindingDispositionFilter, error) {
 	switch strings.TrimSpace(value) {
 	case "":
@@ -720,30 +930,83 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 	return fmt.Errorf("request body must contain a single JSON object")
 }
 
-func classifyScanError(err error) (int, string, string) {
+// scanFailure is the HTTP mapping of a failed POST /api/v1/scans. Messages are
+// fixed strings: the underlying error chain carries registry hosts, redirect
+// targets and reference strings that must never reach a client.
+type scanFailure struct {
+	status     int
+	code       string
+	message    string
+	retryAfter string
+	limitKind  string
+	limit      int64
+}
+
+// registryRateLimitRetryAfter is the Retry-After hint for 503
+// registry_rate_limited. The registry client has already retried with the
+// upstream Retry-After before giving up, so a longer back-off is suggested.
+const registryRateLimitRetryAfter = "60"
+
+// classifyScanError maps a scan failure to a response. Only the API's own scan
+// deadline (scanCtx) produces 504 and only an ended request context produces
+// 408 (or 503 server_shutting_down when the drain cancelled it): a context
+// error nested inside the scan (the registry client bounds each request with
+// its own timeout) is an upstream failure and reports 502.
+func classifyScanError(scanCtx, requestCtx context.Context, err error, draining bool) scanFailure {
 	switch {
 	case scanservice.IsSaveError(err):
-		return http.StatusServiceUnavailable, "storage_unavailable", "the scan result could not be stored"
+		return scanFailure{status: http.StatusServiceUnavailable, code: "storage_unavailable", message: "the scan result could not be stored"}
+	case requestCtx.Err() != nil && draining:
+		return scanFailure{status: http.StatusServiceUnavailable, code: "server_shutting_down", message: shuttingDownMessage}
+	case requestCtx.Err() != nil:
+		return scanFailure{status: http.StatusRequestTimeout, code: "scan_canceled", message: "the request was canceled before the scan completed"}
+	case errors.Is(scanCtx.Err(), context.DeadlineExceeded):
+		return scanFailure{status: http.StatusGatewayTimeout, code: "scan_timeout", message: "the scan exceeded its configured deadline"}
 	case jobs.IsIncomplete(err):
 		var incomplete *jobs.IncompleteError
 		if errors.As(err, &incomplete) && incomplete != nil {
-			return http.StatusUnprocessableEntity, "scan_incomplete", fmt.Sprintf(
+			return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: fmt.Sprintf(
 				"scan coverage is %s: %d manifest(s) completed, %d failed",
 				incomplete.Status,
 				incomplete.CompletedManifestCount,
 				incomplete.FailedManifestCount,
-			)
+			)}
 		}
-		return http.StatusUnprocessableEntity, "scan_incomplete", "the scan did not cover every selected manifest"
+		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: "the scan did not cover every selected manifest"}
 	case limits.IsExceeded(err):
-		return http.StatusUnprocessableEntity, "scan_limit_exceeded", err.Error()
-	case errors.Is(err, context.DeadlineExceeded):
-		return http.StatusGatewayTimeout, "scan_timeout", "the scan exceeded its configured deadline"
-	case errors.Is(err, context.Canceled):
-		return http.StatusRequestTimeout, "scan_canceled", "the scan was canceled"
+		return limitExceededFailure(err)
+	case registry.IsNotFound(err):
+		return scanFailure{status: http.StatusNotFound, code: "image_not_found", message: "the requested image was not found in the registry"}
+	case registry.IsRateLimited(err):
+		return scanFailure{status: http.StatusServiceUnavailable, code: "registry_rate_limited", message: "the registry rate limited the scan; retry later", retryAfter: registryRateLimitRetryAfter}
+	case registry.IsUnauthorized(err):
+		return scanFailure{status: http.StatusBadGateway, code: "registry_unauthorized", message: "the registry refused access to the requested image"}
 	default:
-		return http.StatusBadGateway, "scan_failed", "the registry scan could not be completed"
+		return scanFailure{status: http.StatusBadGateway, code: "scan_failed", message: "the registry scan could not be completed"}
 	}
+}
+
+// limitExceededFailure builds the scan_limit_exceeded response from the
+// typed limit alone. The wrapped chain names blobs, manifests and repositories
+// and changes with internal wording, so it never reaches the client.
+func limitExceededFailure(err error) scanFailure {
+	failure := scanFailure{
+		status:  http.StatusUnprocessableEntity,
+		code:    "scan_limit_exceeded",
+		message: "the scan exceeded a configured resource limit",
+	}
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok || exceeded == nil {
+		return failure
+	}
+	failure.limitKind = string(exceeded.Kind)
+	failure.limit = exceeded.Limit
+	kind := strings.ReplaceAll(strings.TrimSpace(string(exceeded.Kind)), "_", " ")
+	if kind == "" {
+		kind = "resource"
+	}
+	failure.message = fmt.Sprintf("the scan exceeded the configured %s limit of %d", kind, exceeded.Limit)
+	return failure
 }
 
 func hasResult(result jobs.Result) bool {
@@ -778,6 +1041,8 @@ type apiResponseWriter struct {
 	requestID    string
 	writeTimeout time.Duration
 	wroteHeader  bool
+	status       int
+	bytes        int64
 }
 
 func (w *apiResponseWriter) WriteHeader(statusCode int) {
@@ -785,6 +1050,7 @@ func (w *apiResponseWriter) WriteHeader(statusCode int) {
 		return
 	}
 	w.wroteHeader = true
+	w.status = statusCode
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
@@ -792,7 +1058,9 @@ func (w *apiResponseWriter) Write(body []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	return w.ResponseWriter.Write(body)
+	written, err := w.ResponseWriter.Write(body)
+	w.bytes += int64(written)
+	return written, err
 }
 
 func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
@@ -801,6 +1069,7 @@ func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
 
 func (h *Handler) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
 		requestID := validRequestID(request.Header.Get("X-Request-ID"))
 		if requestID == "" {
 			requestID = h.requestID()
@@ -816,14 +1085,54 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				slog.Error("panic serving api request", "panic_type", fmt.Sprintf("%T", recovered), "request_id", requestID)
+				if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					// net/http's convention: abort the response silently.
+					panic(recovered)
+				}
+				// The stack names frames, never values; the panic value itself may
+				// carry request or upstream detail and is reported by type only.
+				h.logger.Error("panic serving api request",
+					"panic_type", fmt.Sprintf("%T", recovered),
+					"stack", string(debug.Stack()),
+					"request_id", requestID,
+				)
 				if !wrapped.wroteHeader {
 					writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 				}
 			}
+			h.logAccess(wrapped, request, started)
 		}()
+
+		if h.isDraining() && request.Context().Err() != nil {
+			// The drain cancelled the base context before this request ran.
+			writeAPIError(wrapped, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
+			return
+		}
+		if !isCleanPath(request.URL.Path) {
+			h.handleNotFound(wrapped, request)
+			return
+		}
 		next.ServeHTTP(wrapped, request)
 	})
+}
+
+// logAccess records one Info line per request. It logs the matched route
+// pattern (request.Pattern), never the path or query, because repository
+// names and reference strings belong to the caller, not the log stream.
+func (h *Handler) logAccess(wrapped *apiResponseWriter, request *http.Request, started time.Time) {
+	status := wrapped.status
+	if !wrapped.wroteHeader {
+		status = http.StatusOK
+	}
+	h.logger.Info("api request",
+		"method", request.Method,
+		"route", request.Pattern,
+		"status", status,
+		"bytes", wrapped.bytes,
+		"duration_ms", float64(time.Since(started).Microseconds())/1000,
+		"request_id", wrapped.requestID,
+		"remote_addr", request.RemoteAddr,
+	)
 }
 
 func (h *Handler) methodNotAllowed(allowed string) http.HandlerFunc {

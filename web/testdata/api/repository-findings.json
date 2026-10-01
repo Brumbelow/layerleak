@@ -1,0 +1,23 @@
+{
+  "disposition": "all",
+  "findings": [
+    {
+      "actionable_occurrence_count": 1,
+      "detectors": [
+        "github_token"
+      ],
+      "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "first_seen_at": "2026-09-01T08:00:00Z",
+      "id": 7,
+      "last_seen_at": "2026-09-30T17:30:00Z",
+      "manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "occurrence_count": 2,
+      "redacted_value": "ghp********************************56",
+      "suppressed_occurrence_count": 1
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "registry": "docker.io",
+  "repository": "library/example"
+}

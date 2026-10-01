@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 const (
@@ -26,6 +29,46 @@ var migrationFilenamePattern = regexp.MustCompile(`^([0-9]{4})_([a-z0-9][a-z0-9_
 type MigrationConfig struct {
 	DatabaseURL string
 	Directory   string
+	// LockTimeout bounds how long one migration transaction waits for a table
+	// lock (SET LOCAL lock_timeout) before it is rolled back and retried, so a
+	// migration that queues behind an idle-in-transaction reader cannot stall
+	// every later reader indefinitely. Zero selects DefaultMigrationLockTimeout.
+	LockTimeout time.Duration
+	// LockAttempts is how many times a migration is attempted when the only
+	// failure is a lock timeout (SQLSTATE 55P03). Zero selects
+	// DefaultMigrationLockAttempts.
+	LockAttempts int
+	// Progress, when set, receives human-readable progress lines such as
+	// "waiting for lock" notices and applied-migration notes.
+	Progress func(message string)
+}
+
+const (
+	// DefaultMigrationLockTimeout is the per-transaction lock wait bound.
+	DefaultMigrationLockTimeout = 15 * time.Second
+	// DefaultMigrationLockAttempts is the number of attempts per migration
+	// before a lock timeout is reported to the operator.
+	DefaultMigrationLockAttempts = 3
+	// migrationLockRetryDelay is the pause between lock-timeout attempts.
+	migrationLockRetryDelay = time.Second
+	// lockNotAvailableSQLState is PostgreSQL's SQLSTATE for lock_timeout expiry.
+	lockNotAvailableSQLState = "55P03"
+)
+
+func (c MigrationConfig) withDefaults() MigrationConfig {
+	if c.LockTimeout == 0 {
+		c.LockTimeout = DefaultMigrationLockTimeout
+	}
+	if c.LockAttempts == 0 {
+		c.LockAttempts = DefaultMigrationLockAttempts
+	}
+	return c
+}
+
+func (c MigrationConfig) report(format string, args ...any) {
+	if c.Progress != nil {
+		c.Progress(fmt.Sprintf(format, args...))
+	}
 }
 
 type MigrationResult struct {
@@ -50,6 +93,7 @@ type migrationRow struct {
 // RunMigrations applies all pending up migrations while holding a database-wide
 // advisory lock. Each file and its ledger entry commit in the same transaction.
 func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult, error) {
+	config = config.withDefaults()
 	databaseURL := strings.TrimSpace(config.DatabaseURL)
 	if err := (PostgresConfig{DatabaseURL: databaseURL}).Validate(); err != nil {
 		return MigrationResult{}, err
@@ -136,7 +180,8 @@ func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult
 		if _, ok := applied[migration.Version]; ok {
 			continue
 		}
-		if err := applyMigration(ctx, connection, migration); err != nil {
+		config.report("applying migration %s", migration.Name)
+		if err := applyMigrationWithRetry(ctx, connection, migration, config); err != nil {
 			return MigrationResult{}, err
 		}
 		result.Applied = append(result.Applied, migration.Name)
@@ -254,7 +299,53 @@ func validateAppliedMigrations(migrations []migrationFile, applied map[string]mi
 	return nil
 }
 
-func applyMigration(ctx context.Context, connection *sql.Conn, migration migrationFile) error {
+// lockTimeoutStatement renders SET LOCAL lock_timeout for one transaction. SET
+// does not accept bind parameters, so the value is an integer millisecond
+// count formatted by this function, never operator-supplied text.
+func lockTimeoutStatement(timeout time.Duration) string {
+	milliseconds := timeout.Milliseconds()
+	if milliseconds < 1 {
+		milliseconds = 1
+	}
+	return fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", milliseconds)
+}
+
+// isLockNotAvailable reports whether err is PostgreSQL's lock_timeout expiry
+// (SQLSTATE 55P03), the only failure a migration attempt is retried on.
+func isLockNotAvailable(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == lockNotAvailableSQLState
+}
+
+// applyMigrationWithRetry applies one migration and retries a bounded number of
+// times when the only failure was a lock timeout: the per-migration
+// transaction rolled back cleanly, so the next attempt starts from the same
+// state. Any other error, an exhausted attempt budget or a finished context
+// is reported to the operator with the quiescing advice.
+func applyMigrationWithRetry(ctx context.Context, connection *sql.Conn, migration migrationFile, config MigrationConfig) error {
+	for attempt := 1; ; attempt++ {
+		err := applyMigration(ctx, connection, migration, config.LockTimeout)
+		if err == nil {
+			return nil
+		}
+		if !isLockNotAvailable(err) {
+			return err
+		}
+		if attempt >= config.LockAttempts || ctx.Err() != nil {
+			return fmt.Errorf("%w; another session holds a conflicting lock on a table this migration alters (for example an idle-in-transaction API replica or a long-running query): stop or quiesce database clients and rerun, or raise the lock timeout (waited %s on each of %d attempt(s))", err, config.LockTimeout, attempt)
+		}
+		config.report("migration %s is waiting for a lock held by another session (attempt %d of %d timed out after %s); retrying in %s", migration.Name, attempt, config.LockAttempts, config.LockTimeout, migrationLockRetryDelay)
+		timer := time.NewTimer(migrationLockRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("apply migration %s: %w", migration.Name, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func applyMigration(ctx context.Context, connection *sql.Conn, migration migrationFile, lockTimeout time.Duration) error {
 	tx, err := connection.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %s: %w", migration.Name, err)
@@ -262,6 +353,12 @@ func applyMigration(ctx context.Context, connection *sql.Conn, migration migrati
 	defer func() {
 		_ = tx.Rollback()
 	}()
+	// Bound only lock waits. A statement_timeout would also cancel 0004's
+	// legitimate long-running repair UPDATEs and VALIDATE CONSTRAINT steps
+	// on populated databases, so none is set here.
+	if _, err := tx.ExecContext(ctx, lockTimeoutStatement(lockTimeout)); err != nil {
+		return fmt.Errorf("set lock timeout for migration %s: %w", migration.Name, err)
+	}
 	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
 		return fmt.Errorf("apply migration %s: %w", migration.Name, err)
 	}

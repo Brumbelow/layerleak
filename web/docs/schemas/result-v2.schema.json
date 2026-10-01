@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brumbelow.github.io/layerleak/docs/schemas/result-v2.schema.json",
+  "title": "Layerleak scan result (result_schema_version 2)",
+  "description": "The redacted scan result Layerleak prints with --format json, embeds in the local scan record and in the scan_runs snapshot, and returns from the HTTP API. Raw secret values never appear; every string from the image or the registry is control-character sanitised.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "result_schema_version",
+    "scanned_at",
+    "scanner",
+    "status",
+    "requested_reference",
+    "repository",
+    "mode",
+    "tags_enumerated",
+    "tags_resolved",
+    "tags_failed",
+    "target_count",
+    "completed_target_count",
+    "failed_target_count",
+    "partial_target_count",
+    "manifest_count",
+    "completed_manifest_count",
+    "failed_manifest_count",
+    "targets",
+    "findings",
+    "total_findings",
+    "unique_fingerprints",
+    "suppressed_findings_count",
+    "suppressed_unique_fingerprints",
+    "coverage"
+  ],
+  "properties": {
+    "result_schema_version": { "const": 2 },
+    "scanned_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC time the scan started, RFC 3339 with second precision."
+    },
+    "scanner": { "$ref": "#/$defs/scanner" },
+    "status": { "$ref": "#/$defs/resultStatus" },
+    "requested_reference": { "type": "string" },
+    "repository": { "type": "string" },
+    "mode": { "type": "string", "enum": ["reference", "repository"] },
+    "resolved_reference": { "type": "string" },
+    "requested_digest": { "type": "string" },
+    "tags_enumerated": { "$ref": "#/$defs/count" },
+    "tags_resolved": { "$ref": "#/$defs/count" },
+    "tags_failed": { "$ref": "#/$defs/count" },
+    "target_count": { "$ref": "#/$defs/count" },
+    "completed_target_count": { "$ref": "#/$defs/count" },
+    "failed_target_count": { "$ref": "#/$defs/count" },
+    "partial_target_count": { "$ref": "#/$defs/count" },
+    "manifest_count": { "$ref": "#/$defs/count" },
+    "completed_manifest_count": { "$ref": "#/$defs/count" },
+    "failed_manifest_count": { "$ref": "#/$defs/count" },
+    "tag_results": { "type": "array", "items": { "$ref": "#/$defs/tagResult" } },
+    "targets": { "type": "array", "items": { "$ref": "#/$defs/targetResult" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "suppressed_findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "total_findings": { "$ref": "#/$defs/count" },
+    "unique_fingerprints": { "$ref": "#/$defs/count" },
+    "suppressed_findings_count": { "$ref": "#/$defs/count" },
+    "suppressed_unique_fingerprints": { "$ref": "#/$defs/count" },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0 },
+    "digest": { "type": "string", "pattern": "^[a-z0-9]+:[A-Fa-f0-9]+$" },
+    "resultStatus": {
+      "type": "string",
+      "enum": ["completed", "partial", "failed"],
+      "description": "completed: every selected manifest was scanned; partial: some were; failed: none were."
+    },
+    "tagStatus": {
+      "type": "string",
+      "enum": ["resolved", "scanned", "partial", "failed", "skipped"],
+      "description": "scanned: every selected manifest of the tag's target completed; partial: some did; failed: the tag could not be resolved or its target failed; skipped: the sweep stopped before the tag's target; resolved: the tag resolved to a digest the sweep had not scanned yet (only in results of sweeps that stopped during tag resolution)."
+    },
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "disposition": {
+      "type": "string",
+      "enum": ["actionable", "example"],
+      "description": "actionable findings count toward total_findings and the exit code; example findings are placeholders, fixtures or demo values reported separately."
+    },
+    "dispositionReason": {
+      "type": "string",
+      "enum": ["test_path", "example_path", "placeholder_marker", "reserved_host", "known_dummy_value", "default_credentials"]
+    },
+    "sourceType": {
+      "type": "string",
+      "enum": ["file_final", "file_deleted_layer", "env", "label", "history", "config"]
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "layerleak" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "os": { "type": "string" },
+        "architecture": { "type": "string" },
+        "variant": { "type": "string" }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "layers_seen",
+        "layers_completed",
+        "files_seen",
+        "files_scanned",
+        "files_skipped_oversize",
+        "files_excluded_binary",
+        "entries_skipped_unsafe",
+        "metadata_values_scanned",
+        "expanded_layer_bytes",
+        "retained_bytes",
+        "detector_input_bytes_scanned"
+      ],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "layers_seen": { "$ref": "#/$defs/count" },
+        "layers_completed": { "$ref": "#/$defs/count" },
+        "files_seen": { "$ref": "#/$defs/count" },
+        "files_scanned": { "$ref": "#/$defs/count" },
+        "files_skipped_oversize": { "$ref": "#/$defs/count" },
+        "files_excluded_binary": { "$ref": "#/$defs/count" },
+        "entries_skipped_unsafe": { "$ref": "#/$defs/count" },
+        "metadata_values_scanned": { "$ref": "#/$defs/count" },
+        "expanded_layer_bytes": { "$ref": "#/$defs/count" },
+        "retained_bytes": { "$ref": "#/$defs/count" },
+        "detector_input_bytes_scanned": { "$ref": "#/$defs/count" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$",
+          "description": "Stable machine-readable code, for example files_skipped_oversize, max_findings_exceeded, raw_retention_truncated, platform_skipped, manifest_skipped, manifest_unsupported, platform_not_found or layer_trailing_data."
+        },
+        "scope": { "type": "string" },
+        "subject": { "type": "string" },
+        "message": { "type": "string" },
+        "limit": { "type": "integer", "minimum": 0 },
+        "observed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tagResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "status"],
+      "properties": {
+        "tag": { "type": "string", "minLength": 1 },
+        "root_digest": { "$ref": "#/$defs/digest" },
+        "target_reference": { "type": "string" },
+        "status": { "$ref": "#/$defs/tagStatus" },
+        "error": { "type": "string" }
+      }
+    },
+    "platformResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "manifest_digest", "findings_count", "coverage"],
+      "properties": {
+        "status": { "$ref": "#/$defs/resultStatus" },
+        "platform": { "$ref": "#/$defs/platform" },
+        "manifest_digest": { "type": "string" },
+        "findings_count": { "$ref": "#/$defs/count" },
+        "error": { "type": "string" },
+        "coverage": { "$ref": "#/$defs/coverage" },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+      }
+    },
+    "targetResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reference", "manifest_count", "completed_manifest_count", "failed_manifest_count", "findings_count"],
+      "properties": {
+        "status": { "$ref": "#/$defs/resultStatus" },
+        "reference": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "resolved_reference": { "type": "string" },
+        "requested_digest": { "type": "string" },
+        "manifest_count": { "$ref": "#/$defs/count" },
+        "completed_manifest_count": { "$ref": "#/$defs/count" },
+        "failed_manifest_count": { "$ref": "#/$defs/count" },
+        "platform_results": { "type": "array", "items": { "$ref": "#/$defs/platformResult" } },
+        "findings_count": { "$ref": "#/$defs/count" },
+        "error": { "type": "string" }
+      }
+    },
+    "findingProperties": {
+      "description": "The public finding fields, shared with the scan record's findings array (which adds source_location).",
+      "type": "object",
+      "required": [
+        "detector_name",
+        "confidence",
+        "disposition",
+        "source_type",
+        "manifest_digest",
+        "redacted_value",
+        "fingerprint",
+        "context_snippet",
+        "match_start",
+        "match_end",
+        "present_in_final_image"
+      ],
+      "properties": {
+        "detector_name": { "type": "string", "minLength": 1 },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "disposition_reason": { "$ref": "#/$defs/dispositionReason" },
+        "source_type": { "$ref": "#/$defs/sourceType" },
+        "manifest_digest": { "type": "string" },
+        "platform": { "$ref": "#/$defs/platform" },
+        "file_path": { "type": "string" },
+        "layer_digest": { "type": "string" },
+        "key": { "type": "string" },
+        "line_number": { "type": "integer", "minimum": 1 },
+        "redacted_value": { "type": "string" },
+        "fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "sha256 of the raw value, stable across installs." },
+        "context_snippet": { "type": "string" },
+        "match_start": { "type": "integer", "minimum": 0 },
+        "match_end": { "type": "integer", "minimum": 0 },
+        "present_in_final_image": { "type": "boolean" }
+      }
+    },
+    "finding": {
+      "allOf": [{ "$ref": "#/$defs/findingProperties" }],
+      "unevaluatedProperties": false
+    }
+  }
+}

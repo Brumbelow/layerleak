@@ -1,0 +1,261 @@
+{
+  "result_schema_version": 2,
+  "scanned_at": "2026-10-01T12:00:00Z",
+  "scanner": {
+    "name": "layerleak",
+    "version": "v3.0.0"
+  },
+  "status": "partial",
+  "requested_reference": "ghcr.io/example/app",
+  "repository": "example/app",
+  "mode": "repository",
+  "resolved_reference": "ghcr.io/example/app",
+  "tags_enumerated": 3,
+  "tags_resolved": 2,
+  "tags_failed": 1,
+  "target_count": 2,
+  "completed_target_count": 1,
+  "failed_target_count": 0,
+  "partial_target_count": 1,
+  "manifest_count": 3,
+  "completed_manifest_count": 2,
+  "failed_manifest_count": 1,
+  "tag_results": [
+    {
+      "tag": "1.0",
+      "root_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "target_reference": "ghcr.io/example/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "scanned"
+    },
+    {
+      "tag": "2.0",
+      "root_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "target_reference": "ghcr.io/example/app@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "status": "partial"
+    },
+    {
+      "tag": "broken",
+      "status": "failed",
+      "error": "registry request failed: status=404 Not Found"
+    }
+  ],
+  "targets": [
+    {
+      "status": "completed",
+      "reference": "ghcr.io/example/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "tags": [
+        "1.0"
+      ],
+      "resolved_reference": "ghcr.io/example/app@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "requested_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "manifest_count": 1,
+      "completed_manifest_count": 1,
+      "failed_manifest_count": 0,
+      "platform_results": [
+        {
+          "status": "completed",
+          "platform": {
+            "os": "linux",
+            "architecture": "amd64"
+          },
+          "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "findings_count": 2,
+          "coverage": {
+            "complete": true,
+            "layers_seen": 2,
+            "layers_completed": 2,
+            "files_seen": 41,
+            "files_scanned": 40,
+            "files_skipped_oversize": 1,
+            "files_excluded_binary": 0,
+            "entries_skipped_unsafe": 0,
+            "metadata_values_scanned": 3,
+            "expanded_layer_bytes": 4096,
+            "retained_bytes": 128,
+            "detector_input_bytes_scanned": 2048
+          },
+          "diagnostics": [
+            {
+              "code": "files_skipped_oversize",
+              "scope": "manifest",
+              "subject": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "message": "1 file(s) exceeded the per-file scan limit",
+              "limit": 1048576,
+              "observed": 1
+            }
+          ]
+        }
+      ],
+      "findings_count": 2
+    },
+    {
+      "status": "partial",
+      "reference": "ghcr.io/example/app@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "tags": [
+        "2.0"
+      ],
+      "resolved_reference": "ghcr.io/example/app@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "requested_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "manifest_count": 2,
+      "completed_manifest_count": 1,
+      "failed_manifest_count": 1,
+      "platform_results": [
+        {
+          "status": "completed",
+          "platform": {
+            "os": "linux",
+            "architecture": "amd64"
+          },
+          "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "findings_count": 0,
+          "coverage": {
+            "complete": true,
+            "layers_seen": 2,
+            "layers_completed": 2,
+            "files_seen": 13,
+            "files_scanned": 12,
+            "files_skipped_oversize": 1,
+            "files_excluded_binary": 0,
+            "entries_skipped_unsafe": 0,
+            "metadata_values_scanned": 3,
+            "expanded_layer_bytes": 4096,
+            "retained_bytes": 128,
+            "detector_input_bytes_scanned": 2048
+          }
+        },
+        {
+          "status": "failed",
+          "platform": {
+            "os": "linux",
+            "architecture": "arm64",
+            "variant": "v8"
+          },
+          "manifest_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "findings_count": 0,
+          "error": "unsupported manifest sha256:4444444444444444444444444444444444444444444444444444444444444444: layer uses a non-distributable (foreign) media type and cannot be scanned",
+          "coverage": {
+            "complete": false,
+            "layers_seen": 0,
+            "layers_completed": 0,
+            "files_seen": 0,
+            "files_scanned": 0,
+            "files_skipped_oversize": 0,
+            "files_excluded_binary": 0,
+            "entries_skipped_unsafe": 0,
+            "metadata_values_scanned": 0,
+            "expanded_layer_bytes": 0,
+            "retained_bytes": 0,
+            "detector_input_bytes_scanned": 0
+          },
+          "diagnostics": [
+            {
+              "code": "manifest_unsupported",
+              "scope": "manifest",
+              "subject": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "message": "layer uses a non-distributable (foreign) media type and cannot be scanned"
+            }
+          ]
+        }
+      ],
+      "findings_count": 0,
+      "error": "scan coverage is partial: 1 manifest(s) completed, 1 failed"
+    }
+  ],
+  "findings": [
+    {
+      "detector_name": "aws_secret_access_key",
+      "confidence": "medium",
+      "disposition": "actionable",
+      "source_type": "file_deleted_layer",
+      "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "file_path": "app/.env",
+      "layer_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "line_number": 12,
+      "redacted_value": "wJa********",
+      "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "context_snippet": "AWS_SECRET_ACCESS_KEY=wJa********",
+      "match_start": 22,
+      "match_end": 62,
+      "present_in_final_image": false
+    },
+    {
+      "detector_name": "github_token",
+      "confidence": "high",
+      "disposition": "actionable",
+      "source_type": "env",
+      "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "key": "GH_TOKEN",
+      "redacted_value": "ghp********",
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "context_snippet": "GH_TOKEN=ghp********",
+      "match_start": 9,
+      "match_end": 49,
+      "present_in_final_image": true
+    }
+  ],
+  "suppressed_findings": [
+    {
+      "detector_name": "basic_auth_url",
+      "confidence": "low",
+      "disposition": "example",
+      "disposition_reason": "test_path",
+      "source_type": "file_final",
+      "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "file_path": "test/fixtures/config.yaml",
+      "layer_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "line_number": 3,
+      "redacted_value": "***********",
+      "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "context_snippet": "url: https://user:***********@example.test/",
+      "match_start": 18,
+      "match_end": 29,
+      "present_in_final_image": true
+    }
+  ],
+  "total_findings": 2,
+  "unique_fingerprints": 2,
+  "suppressed_findings_count": 1,
+  "suppressed_unique_fingerprints": 1,
+  "coverage": {
+    "complete": false,
+    "layers_seen": 2,
+    "layers_completed": 2,
+    "files_seen": 53,
+    "files_scanned": 52,
+    "files_skipped_oversize": 1,
+    "files_excluded_binary": 0,
+    "entries_skipped_unsafe": 0,
+    "metadata_values_scanned": 3,
+    "expanded_layer_bytes": 4096,
+    "retained_bytes": 128,
+    "detector_input_bytes_scanned": 2048
+  },
+  "diagnostics": [
+    {
+      "code": "files_skipped_oversize",
+      "scope": "manifest",
+      "subject": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "message": "1 file(s) exceeded the per-file scan limit",
+      "limit": 1048576,
+      "observed": 1
+    },
+    {
+      "code": "manifest_unsupported",
+      "scope": "manifest",
+      "subject": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "message": "layer uses a non-distributable (foreign) media type and cannot be scanned"
+    }
+  ]
+}

@@ -136,7 +136,7 @@ jobs:
       - id: scan
         uses: brumbelow/layerleak@v3.0.0
         with: { image: "ghcr.io/${{ github.repository }}:${{ github.sha }}", fail-on: none }
-      - uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      - uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         if: ${{ always() && steps.scan.outputs.sarif-file != '' }}
         with: { sarif_file: "${{ steps.scan.outputs.sarif-file }}" }
 ```
@@ -284,7 +284,7 @@ code scanning from a workflow:
 
 ```yaml
 - run: layerleak scan ghcr.io/${{ github.repository }}:${{ github.sha }} --format sarif --output layerleak.sarif --fail-on none --no-artifacts
-- uses: github/codeql-action/upload-sarif@v3
+- uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
   with:
     sarif_file: layerleak.sarif
 ```

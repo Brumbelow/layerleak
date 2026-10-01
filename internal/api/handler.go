@@ -413,13 +413,13 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 			writeAPIError(writer, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body must not exceed %d bytes", h.options.MaxRequestBytes))
 			return
 		}
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", singleJSONObjectMessage)
 		return
 	}
 
 	reference, err := manifest.ParseReference(body.Reference)
 	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", invalidReferenceErrorMessage(body.Reference, err))
 		return
 	}
 	if body.AllTags && !reference.IsRepositoryOnly() {
@@ -975,6 +975,30 @@ func invalidBodyMessage(err error) string {
 	return "request body must be valid JSON"
 }
 
+// singleJSONObjectMessage is the fixed 400 message for any data after the
+// request object, whether another JSON value or bytes the decoder rejects; the
+// decoder's own text quotes request bytes and is never returned.
+const singleJSONObjectMessage = "request body must contain a single JSON object"
+
+// invalidReferenceMessage is the fixed 400 message for a reference the parser
+// rejects. The parser's error text can quote the submitted reference and the
+// upstream distribution grammar error, so it is never returned to a client.
+const invalidReferenceMessage = "reference is not a valid image reference"
+
+// invalidReferenceErrorMessage maps a ParseReference failure to a fixed
+// message: a missing reference and a local source scheme keep their own fixed
+// text, every other failure is invalidReferenceMessage.
+func invalidReferenceErrorMessage(raw string, err error) string {
+	switch {
+	case raw == "":
+		return "image reference is required"
+	case errors.Is(err, manifest.ErrLocalSourceNotSupported):
+		return manifest.ErrLocalSourceNotSupported.Error()
+	default:
+		return invalidReferenceMessage
+	}
+}
+
 func requireSingleJSONValue(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); err == io.EOF {
@@ -982,7 +1006,7 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 	} else if err != nil {
 		return err
 	}
-	return fmt.Errorf("request body must contain a single JSON object")
+	return errors.New(singleJSONObjectMessage)
 }
 
 // scanFailure is the HTTP mapping of a failed POST /api/v1/scans. Messages are

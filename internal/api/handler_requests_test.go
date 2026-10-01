@@ -304,6 +304,51 @@ func TestScanRequestBodyIsStrict(t *testing.T) {
 	}
 }
 
+// TestScanRequestErrorsNeverEchoInput: a reference the parser rejects and
+// trailing non-JSON data after the body are 400 invalid_request with fixed
+// messages. Neither the submitted reference, the upstream parser text nor the
+// JSON decoder text (which quotes request bytes) reaches the client.
+func TestScanRequestErrorsNeverEchoInput(t *testing.T) {
+	const probe = "probesecretname"
+	tests := []struct {
+		name    string
+		body    string
+		message string
+	}{
+		{name: "uppercase repository", body: `{"reference":"ghcr.io/Org/` + strings.ToUpper(probe) + `:1"}`, message: "reference is not a valid image reference"},
+		{name: "invalid tag", body: `{"reference":"library/app:` + probe + `!"}`, message: "reference is not a valid image reference"},
+		{name: "invalid digest", body: `{"reference":"library/app@sha256:` + probe + `"}`, message: "reference is not a valid image reference"},
+		{name: "invalid registry port", body: `{"reference":"` + probe + `.example:99999/app"}`, message: "reference is not a valid image reference"},
+		{name: "invalid path component", body: `{"reference":"library/` + probe + `--/app"}`, message: "reference is not a valid image reference"},
+		{name: "trailing garbage", body: `{"reference":"library/app:latest"} ` + probe, message: "request body must contain a single JSON object"},
+		{name: "trailing truncated value", body: `{"reference":"library/app:latest"} {"` + probe, message: "request body must contain a single JSON object"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scanner := &stubScanner{}
+			recorder := httptest.NewRecorder()
+			NewHandler(scanner, &stubReadStore{}).ServeHTTP(recorder, newJSONScanRequest(test.body))
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+			}
+			errorObject, _ := decodeErrorBody(t, recorder.Body.Bytes())
+			if errorObject["code"] != "invalid_request" || errorObject["message"] != test.message {
+				t.Fatalf("error = %v", errorObject)
+			}
+			lowered := strings.ToLower(recorder.Body.String())
+			for _, leaked := range []string{probe, "invalid character", "invalid reference format", "parse image reference"} {
+				if strings.Contains(lowered, leaked) {
+					t.Fatalf("response echoes %q: %s", leaked, recorder.Body.String())
+				}
+			}
+			if scanner.request.Reference.Original != "" {
+				t.Fatalf("scanner was invoked for %q", scanner.request.Reference.Original)
+			}
+		})
+	}
+}
+
 // TestScanRequestAcceptsJSONMediaTypeVariants: application/json with a
 // charset and structured +json suffixes are accepted; others are 415.
 func TestScanRequestAcceptsJSONMediaTypeVariants(t *testing.T) {

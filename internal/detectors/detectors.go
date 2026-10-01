@@ -119,7 +119,6 @@ func Default() Set {
 		newRegexDetector("linear_api_key", regexp.MustCompile(`\blin_api_[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("doppler_token", regexp.MustCompile(`\bdp\.(?:st|pt|sa|ct)\.[A-Za-z0-9._-]{20,}`), 0, ConfidenceHigh, nil),
 		newRegexDetector("grafana_service_account_token", regexp.MustCompile(`\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
-		newPathRegexDetector("kubeconfig_token", regexp.MustCompile(`(^|/)\.kube/config$`), regexp.MustCompile(`(?im)^\s+token:\s+([^\s#]+)\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
 		newPathRegexDetector("vault_token_file", regexp.MustCompile(`(^|/)\.vault-token$`), regexp.MustCompile(`((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}|s\.[A-Za-z0-9]{24,})`), 0, ConfidenceHigh, hasMinPrintableLength(24)),
 		// An Account SID is a public identifier, not a credential (DET-21).
 		newRegexDetector("twilio_account_sid", regexp.MustCompile(`\bAC[a-f0-9]{32}\b`), 0, ConfidenceMedium, nil),
@@ -154,7 +153,9 @@ func Default() Set {
 		newRegexDetector("mapbox_secret_token", regexp.MustCompile(`\bsk\.eyJ[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("airtable_personal_access_token", regexp.MustCompile(`\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("planetscale_service_token", regexp.MustCompile(`\bpscale_tkn_[A-Za-z0-9_]{43,}\b`), 0, ConfidenceHigh, nil),
-		newRegexDetector("fly_api_token", regexp.MustCompile(`\bfo1_[A-Za-z0-9._-]{43,}\b`), 0, ConfidenceHigh, nil),
+		// Fly.io API tokens: the fo1_ shape and the fm1a_/fm1r_/fm2_ macaroons
+		// (the "FlyV1 " prefix flyctl prints is not part of the value).
+		newRegexDetector("fly_api_token", regexp.MustCompile(`\b(?:fo1_[A-Za-z0-9._-]{43,}|fm1[ar]_[A-Za-z0-9+/]{100,}={0,3}|fm2_[A-Za-z0-9+/]{100,}={0,3})`), 0, ConfidenceHigh, nil).requiring("fo1_", "fm1a_", "fm1r_", "fm2_"),
 		newRegexDetector("circleci_personal_api_token", regexp.MustCompile(`\bCCIPAT_[A-Za-z0-9]{22}_[A-Fa-f0-9]{40}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("openrouter_api_key", regexp.MustCompile(`\bsk-or-v1-[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("sentry_user_token", regexp.MustCompile(`\bsntryu_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
@@ -177,6 +178,12 @@ func Default() Set {
 	rules = append(rules, vendorTokenDetectors()...)
 	rules = append(rules, registryCredentialDetectors()...)
 	rules = append(rules, httpHeaderCredentialDetectors()...)
+	rules = append(rules, cloudStateDetectors()...)
+	rules = append(rules, cloudFormatDetectors()...)
+	rules = append(rules, frameworkSecretDetectors()...)
+	rules = append(rules, saasTokenDetectors()...)
+	// Path-only classification runs through Set.ScanPath, never Set.Scan.
+	rules = append(rules, sensitiveFileDetector{})
 	rules = append(rules, contextEntropyDetector{})
 	return Set{detectors: rules}
 }
@@ -340,6 +347,10 @@ type regexDetector struct {
 	// lowered runs the rule over the ASCII-lowercased content; the rule must
 	// then be written in lowercase without (?i), which keeps a literal prefix.
 	lowered bool
+	// skip drops a match by its position in the haystack (the lowered
+	// content for a lowered rule), for context the value alone cannot show,
+	// such as the name of the constant a value is assigned to.
+	skip func(content string, start int) bool
 }
 
 func newRegexDetector(name string, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool) regexDetector {
@@ -367,6 +378,13 @@ func (d regexDetector) onLoweredContent() regexDetector {
 	return d
 }
 
+// skipping returns the detector with a positional filter applied after the
+// value validator.
+func (d regexDetector) skipping(skip func(content string, start int) bool) regexDetector {
+	d.skip = skip
+	return d
+}
+
 func (d regexDetector) Name() string {
 	return d.name
 }
@@ -380,7 +398,17 @@ func (d regexDetector) Scan(input ScanInput) []Match {
 	if d.lowered {
 		haystack = input.loweredView()
 	}
-	return scanRegexMatches(d.name, d.rule, d.group, d.base, priorityLocal, d.validator, input, haystack)
+	matches := scanRegexMatches(d.name, d.rule, d.group, d.base, priorityLocal, d.validator, input, haystack)
+	if d.skip == nil {
+		return matches
+	}
+	kept := matches[:0]
+	for _, match := range matches {
+		if !d.skip(haystack.Content, match.Start) {
+			kept = append(kept, match)
+		}
+	}
+	return kept
 }
 
 type pathRegexDetector struct {
@@ -390,6 +418,9 @@ type pathRegexDetector struct {
 	group          int
 	base           Confidence
 	validator      func(string) bool
+	// skip drops a match by its position in the content, for context the
+	// value alone cannot show (an XML comment around it).
+	skip func(content string, start int) bool
 }
 
 func newPathRegexDetector(name string, pathExpression, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool) pathRegexDetector {
@@ -401,6 +432,13 @@ func newPathRegexDetector(name string, pathExpression, expression *regexp.Regexp
 		base:           base,
 		validator:      validator,
 	}
+}
+
+// skipping returns the detector with a positional filter applied after the
+// value validator.
+func (d pathRegexDetector) skipping(skip func(content string, start int) bool) pathRegexDetector {
+	d.skip = skip
+	return d
 }
 
 func (d pathRegexDetector) Name() string {
@@ -418,7 +456,17 @@ func (d pathRegexDetector) Scan(input ScanInput) []Match {
 	}
 	// A rule gated on a file format knows what it is reading, so it outranks
 	// the shape-only rules on the same span.
-	return scanRegexMatches(d.name, d.rule, d.group, d.base, priorityStructured, d.validator, input, input)
+	matches := scanRegexMatches(d.name, d.rule, d.group, d.base, priorityStructured, d.validator, input, input)
+	if d.skip == nil {
+		return matches
+	}
+	kept := matches[:0]
+	for _, match := range matches {
+		if !d.skip(input.Content, match.Start) {
+			kept = append(kept, match)
+		}
+	}
+	return kept
 }
 
 type keyValueDetector struct {
@@ -894,7 +942,7 @@ func looksLikeWordCompound(value string) bool {
 		}
 	})
 	if len(segments) < 2 {
-		return false
+		return isCamelCaseCompound(value)
 	}
 	for _, segment := range segments {
 		if segment == "" || !wordyCandidateExpression.MatchString(segment) {
@@ -902,6 +950,29 @@ func looksLikeWordCompound(value string) bool {
 		}
 	}
 	return true
+}
+
+// isCamelCaseCompound reports a letters-only value made of two or more
+// capitalised words of at least three letters (RootManageSharedAccessKey,
+// defaultServiceAccount): a name, not key material. Random mixed-case
+// strings break into one- and two-letter runs and are kept.
+func isCamelCaseCompound(value string) bool {
+	segments := 0
+	run := 0
+	for index, r := range value {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+		if unicode.IsUpper(r) && index > 0 {
+			if run < 3 {
+				return false
+			}
+			segments++
+			run = 0
+		}
+		run++
+	}
+	return segments >= 1 && run >= 3
 }
 
 func hasStrongEntropyShape(value string) bool {

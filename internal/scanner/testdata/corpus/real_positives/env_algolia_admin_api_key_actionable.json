@@ -1,0 +1,13 @@
+{
+  "name": "env_algolia_admin_api_key_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "ALGOLIA_ADMIN_API_KEY",
+  "content": "ALGOLIA_ADMIN_API_KEY=0123456789abcdef0123456789abcdef",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "algolia_admin_api_key"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

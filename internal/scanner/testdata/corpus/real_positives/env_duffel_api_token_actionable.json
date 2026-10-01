@@ -1,0 +1,13 @@
+{
+  "name": "env_duffel_api_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "DUFFEL_TOKEN",
+  "content_base64": "RFVGRkVMX1RPS0VOPWR1ZmZlbF9saXZlX1hrOWZMMm1ROHZSNHRZN3daMWFCM2NENWVGNmdIOGpLMGxNMm5PNHBRNnI=",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "duffel_api_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

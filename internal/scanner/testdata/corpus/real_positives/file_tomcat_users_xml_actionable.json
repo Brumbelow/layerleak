@@ -1,0 +1,13 @@
+{
+  "name": "file_tomcat_users_xml_actionable",
+  "source_type": "file_final",
+  "path": "usr/local/tomcat/conf/tomcat-users.xml",
+  "key": "",
+  "content": "<tomcat-users>\n<!--\n  <user username=\"tomcat\" password=\"tomcat\" roles=\"tomcat\"/>\n-->\n  <user username=\"admin\" password=\"Sup3rS3cretPwXyz\" roles=\"manager-gui\"/>\n</tomcat-users>\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "xml_password_attribute"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

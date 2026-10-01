@@ -1,0 +1,13 @@
+{
+  "name": "file_aws_session_token_actionable",
+  "source_type": "file_final",
+  "path": "app/.env",
+  "key": "",
+  "content_base64": "QVdTX1NFU1NJT05fVE9LRU49SVFvSmIzSnBaMmx1WDJWakVKei8vLy8vLy8vLy93RWFDV1YxTFhkbGMzUXRNU0pITUVVQ0lRREFiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ0FiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ0FiMWNEMmVGM2dBYjFjRDJlRjNnPT0K",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "aws_session_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

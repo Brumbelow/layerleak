@@ -1,0 +1,13 @@
+{
+  "name": "file_facebook_access_token_actionable",
+  "source_type": "file_final",
+  "path": "app/.env",
+  "key": "",
+  "content_base64": "RkFDRUJPT0tfQUNDRVNTX1RPS0VOPUVBQUdYazlmTDJtUTh2UjR0WTd3WjFhQjNjRDVlRjZnSDhqSzBsTTJuTzRwUTZyUzh0VTB2VzJ4WTR6WGs5ZkwybVE4dlI0dFk3d1oxYUIzY0Q1ZUY2Z0g4akswbE0ybk80cFE2clM4dFUwdlcyeFk0ego=",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "facebook_access_token"
+  ],
+  "expected_confidence_floor": "medium",
+  "expected_reason": ""
+}

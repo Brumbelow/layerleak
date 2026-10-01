@@ -1,0 +1,13 @@
+{
+  "name": "file_azure_shared_access_key_actionable",
+  "source_type": "file_final",
+  "path": "app/appsettings.json",
+  "key": "",
+  "content": "{\"ServiceBus\":\"Endpoint=sb://ns.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=Xk9fL2mQ8vR4tY7wZ1aB3cD5eF6gH8jK0lM2nO4pQ6r=\"}",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "azure_shared_access_key"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

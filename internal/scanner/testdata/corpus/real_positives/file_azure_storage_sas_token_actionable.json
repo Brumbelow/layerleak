@@ -1,0 +1,13 @@
+{
+  "name": "file_azure_storage_sas_token_actionable",
+  "source_type": "file_final",
+  "path": "app/.env",
+  "key": "",
+  "content": "AZURE_STORAGE_SAS_URL=https://acct.blob.core.windows.net/c?sv=2022-11-02&ss=b&srt=sco&sp=rwdlac&se=2026-01-01T00:00:00Z&spr=https&sig=Xk9fL2mQ8vR4tY7wZ1aB3cD5eF6gH8jK0lM2nO4pQ6rS8%3D\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "azure_storage_sas_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

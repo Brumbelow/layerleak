@@ -1,0 +1,13 @@
+{
+  "name": "env_atlassian_api_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "JIRA_API_TOKEN",
+  "content_base64": "SklSQV9BUElfVE9LRU49QVRBVFQzeEZmR0YwWGs5ZkwybVE4dlI0dFk3d1oxYUIzY0Q1ZUY2Z0g4akswbE0ybk80cFE2clM4dFUwdlcyeFk0elhrOWZMMm1ROHZSNHRZN3daMWFCM2NENWVGNmdIOGpLMGxNMm5PNHBRNnJTOHRVMHZXMnhZNHo9MEExQjJDM0Q=",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "atlassian_api_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

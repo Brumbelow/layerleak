@@ -1,0 +1,13 @@
+{
+  "name": "env_supabase_personal_access_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "SUPABASE_ACCESS_TOKEN",
+  "content_base64": "U1VQQUJBU0VfQUNDRVNTX1RPS0VOPXNicF8wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "supabase_personal_access_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

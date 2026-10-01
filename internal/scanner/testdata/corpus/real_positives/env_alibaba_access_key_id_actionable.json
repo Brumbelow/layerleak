@@ -1,0 +1,13 @@
+{
+  "name": "env_alibaba_access_key_id_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "ALIBABA_CLOUD_ACCESS_KEY_ID",
+  "content_base64": "QUxJQkFCQV9DTE9VRF9BQ0NFU1NfS0VZX0lEPUxUQUk1dFhrOWZMMm1ROHZSNHRZN3daMQ==",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "alibaba_access_key_id"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

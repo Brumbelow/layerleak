@@ -1,0 +1,13 @@
+{
+  "name": "env_asana_personal_access_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "ASANA_ACCESS_TOKEN",
+  "content_base64": "QVNBTkFfQUNDRVNTX1RPS0VOPTEvMTIzNDU2Nzg5MDEyMzQ1NjowMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "asana_personal_access_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

@@ -1,0 +1,13 @@
+{
+  "name": "file_azure_cli_token_cache_actionable",
+  "source_type": "file_final",
+  "path": "root/.azure/msal_token_cache.json",
+  "key": "",
+  "content": "{\"AccessToken\":{\"id-x\":{\"secret\":\"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0In0.Xk9fL2mQ8vR4tY7wZ1aB3cD5eF6gH8jK0lM2\",\"credential_type\":\"AccessToken\"}}}",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "azure_cli_token_cache"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

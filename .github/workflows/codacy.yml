@@ -32,6 +32,7 @@ jobs:
       actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
     name: Codacy Security Scan
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       # Checkout the repository to the GitHub Actions runner
       - name: Checkout code
@@ -50,12 +51,17 @@ jobs:
           max-allowed-issues: 2147483647
 
       # Post-process SARIF so each of Codacy's per-tool runs gets a unique
-      # automationDetails.id — required since github/codeql-action@v4 enforces
-      # "one run per category" (GitHub Code Scanning policy, 2025-07-21).
+      # automationDetails.id (github/codeql-action@v4 enforces "one run per
+      # category"), drop runs that carry no results, and split the remainder
+      # into files of at most 20 runs because GitHub rejects larger uploads
+      # ("rejecting SARIF, as there are more runs than allowed").
       # See https://github.com/codacy/codacy-analysis-cli-action/issues/142
-      - name: Combine SARIF runs by tool name
+      - name: Combine SARIF runs by tool name and split into uploadable chunks
+        id: sarif
         if: hashFiles('results.sarif') != ''
+        shell: bash
         run: |
+          set -euo pipefail
           jq '.runs |= (
             group_by(.tool.driver.name) |
             map(
@@ -72,15 +78,46 @@ jobs:
                   )
                 ]
               }
-            )
+            ) |
+            map(select((.results | length) > 0))
           )' results.sarif > results-combined.sarif
+          total="$(jq '.runs | length' results-combined.sarif)"
+          echo "Codacy reported ${total} tool run(s) with results."
+          mkdir -p sarif-chunks
+          chunks=0
+          for ((start = 0; start < total; start += 20)); do
+            chunks=$((chunks + 1))
+            if (( chunks > 3 )); then
+              echo "More than 60 SARIF runs; extend the upload steps below." >&2
+              exit 1
+            fi
+            jq --argjson start "${start}" '.runs |= .[$start:$start + 20]' results-combined.sarif \
+              > "sarif-chunks/codacy-${chunks}.sarif"
+          done
+          echo "chunks=${chunks}" >> "${GITHUB_OUTPUT}"
 
-      - name: Upload SARIF results file
+      - name: Upload SARIF results (chunk 1)
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        if: hashFiles('results-combined.sarif') != ''
+        if: steps.sarif.outputs.chunks >= 1
         with:
-          sarif_file: results-combined.sarif
+          sarif_file: sarif-chunks/codacy-1.sarif
           category: Codacy
+          wait-for-processing: true
+
+      - name: Upload SARIF results (chunk 2)
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: steps.sarif.outputs.chunks >= 2
+        with:
+          sarif_file: sarif-chunks/codacy-2.sarif
+          category: Codacy/2
+          wait-for-processing: true
+
+      - name: Upload SARIF results (chunk 3)
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        if: steps.sarif.outputs.chunks >= 3
+        with:
+          sarif_file: sarif-chunks/codacy-3.sarif
+          category: Codacy/3
           wait-for-processing: true
 
   codacy-coverage:

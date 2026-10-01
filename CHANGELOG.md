@@ -241,6 +241,15 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   findings, nested archives or hardlinks into other layers are always
   re-fetched. `BenchmarkRepositorySweepSharedLayers` measures roughly half the
   time and memory on a sweep whose tags share most layers.
+- Results carry `duration_ms` (wall-clock milliseconds from `scanned_at` to
+  completion, rounded up; `0` only when unknown) and
+  `scanner.detector_set_version`, a `sha256:` digest of the sorted detector
+  identifiers the scan ran with, which changes whenever a detector is added,
+  removed or renamed. Both are additive within `result_schema_version` 2.
+- `layerleak scan --help` shows examples, the exit-code table with `--fail-on`
+  and the environment variables that affect a scan; `layerleak --help`
+  describes the tool above the subcommand list; a bad flag or a missing
+  reference ends with a pointer to `--help` (exit code still 1).
 
 ### Changed
 
@@ -474,6 +483,12 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   the golden fixtures gain the additive coverage counters
   `files_transcoded_utf16`, `nested_archives_expanded` and
   `nested_entries_scanned`.
+- `--all-tags` stops resolving tags as soon as the distinct-target bound
+  (`LAYERLEAK_MAX_REPOSITORY_TARGETS`, `--max-repository-targets`) is exceeded
+  instead of sending one manifest request per tag first. It still fails with
+  the `repository_targets` limit; `target_count` then reports the bound plus
+  one and the tags that were not resolved appear in `tag_results` as
+  `skipped` without a `root_digest`. Local sweeps are bounded the same way.
 
 ### Security
 
@@ -535,6 +550,11 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   holds more entries than the allowance is refused whole instead of
   allocating every header first. A fuzz target checks that arbitrary bytes
   never panic the scan. Zip readers never trust declared entry sizes.
+- Terminal output and the error and diagnostic messages in `--format json` and
+  the scan record drop Unicode format characters (bidi overrides and isolates,
+  zero-width characters, soft hyphens, byte-order marks) and other
+  non-printable runes, so text from a hostile registry or image cannot reorder
+  or hide output.
 
 ### Removed
 

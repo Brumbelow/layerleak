@@ -541,6 +541,16 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   checks the site and README variable tables against each other in both
   directions.
 
+- The OpenAPI `Diagnostic.message` enum lists every fixed message the API
+  can return, including `platform_skipped`, `manifest_skipped`,
+  `raw_retention_truncated`, `unsafe_archive_entries_skipped` and
+  `nested_archive_skipped`, and a test keeps the handler and the document in
+  step.
+- A baseline file with stray content after the JSON document is rejected.
+- `FuzzParseBearerChallenge` fuzzes the registry `WWW-Authenticate` parser in
+  CI, and the release-tool installer test is skipped off Linux x86_64, where
+  the reviewed tool bundle is not supported.
+
 ### Security
 
 - Raw values remain opt-in; a confirmation-gated command can irreversibly clear
@@ -610,6 +620,36 @@ versioning on the canonical `github.com/brumbelow/layerleak/v3` module line.
   zero-width characters, soft hyphens, byte-order marks) and other
   non-printable runes, so text from a hostile registry or image cannot reorder
   or hide output.
+
+- With the `--all-tags` layer cache on, a layer whose hardlink had no target
+  in its own layer (a missing path or a directory) could be cached and later
+  replayed onto a tag where the target was a clean cached file, so the
+  hardlink's own path was never scanned while coverage reported complete.
+  Such layers are no longer cached, and a cached layer that resolves a
+  hardlink to cached content of another layer makes the manifest replay from
+  the registry. Cache records are bounded while they are built, so a layer of
+  long names cannot pin memory the cache budget does not count.
+- A gzip member inside a layer, including a tar inside gzip, charges every
+  decompressed byte to the nested-archive, layer and image byte budgets on
+  every path (success, checksum error, truncation, trailing data), so a layer
+  of small archive bombs can no longer force unbounded decompression.
+- The nested zip directory bound reads the same end-of-central-directory
+  record `archive/zip` uses (trailing bytes and zip64 offsets included), so
+  padding after an archive cannot bypass `LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES`;
+  a zip whose directory cannot be located is skipped as malformed instead of
+  parsed.
+- A `docker-archive:` source hashes each layer once however often the
+  manifest lists it, refuses an image with more layers than
+  `LAYERLEAK_MAX_IMAGE_LAYERS` or a synthesised manifest above
+  `LAYERLEAK_MAX_MANIFEST_BYTES` before hashing, and observes cancellation and
+  `LAYERLEAK_SCAN_TIMEOUT` while hashing; a crafted archive could previously
+  pin the CPU for hours.
+- An OCI layout whose `oci-layout`, `index.json` or blob is a FIFO or another
+  non-regular file is refused without blocking; opening it previously hung
+  past `LAYERLEAK_SCAN_TIMEOUT`.
+- `POST /api/v1/scans` returns fixed messages for an invalid reference and for
+  data after the JSON body instead of echoing the parser's text, which could
+  contain caller input.
 
 ### Removed
 

@@ -1,9 +1,11 @@
 package scanner
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
@@ -108,6 +110,46 @@ func TestScanFindsSecretsInsideNestedArchives(t *testing.T) {
 	}
 	if len(result.PlatformResults) != 1 || result.PlatformResults[0].Status != ResultStatusCompleted {
 		t.Fatalf("platform results = %+v", result.PlatformResults)
+	}
+}
+
+// TestScanReportsNestedEntriesBehindHardlinkChains stores a jar once and
+// links to it twice, the second hardlink pointing at the first: the entries
+// inside the jar are reported under the jar's path and under both hardlinks,
+// so path-sensitive detectors see every name the content is reachable by.
+func TestScanReportsNestedEntriesBehindHardlinkChains(t *testing.T) {
+	jar := zipBytes(t, map[string]string{
+		"config/app.yml": "github:\n  token: " + syntheticGitHubToken + "\n",
+	})
+	f := newRegistryFixture()
+	layer := f.blob(t, manifest.MediaTypeDockerSchema2LayerGzip, gzipLayer(t, []tarEntry{
+		{name: "app/a.jar", body: string(jar)},
+		{name: "app/h1", typeflag: tar.TypeLink, linkname: "app/a.jar"},
+		{name: "app/h2", typeflag: tar.TypeLink, linkname: "app/h1"},
+	}))
+	f.setRootManifest(t, configBlob(t, f, "linux", "amd64"), []manifest.Descriptor{layer})
+
+	request := f.request(t, "")
+	request.MaxNestedArchiveBytes = 64 << 20
+	request.MaxNestedArchiveEntries = 10000
+	result, err := Scan(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Status != ResultStatusCompleted || !result.Coverage.Complete {
+		t.Fatalf("result = %+v", result)
+	}
+	paths := make([]string, 0, len(result.Findings))
+	for _, finding := range result.Findings {
+		if finding.DetectorName != "github_token" || finding.LayerDigest != layer.Digest {
+			t.Fatalf("unexpected finding %+v", finding)
+		}
+		paths = append(paths, finding.FilePath)
+	}
+	sort.Strings(paths)
+	want := "app/a.jar!config/app.yml,app/h1!config/app.yml,app/h2!config/app.yml"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("finding paths = %q, want %q", got, want)
 	}
 }
 

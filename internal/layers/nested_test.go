@@ -437,6 +437,41 @@ func TestReplayNestedEntriesFollowTheOuterArtifact(t *testing.T) {
 	}
 }
 
+// TestReplayHardlinkChainToArchiveNamesTheArchive links to an archive through
+// another hardlink: every hardlink in the chain names the regular file whose
+// nested entries it shares, so the entries can be re-rooted under its path.
+func TestReplayHardlinkChainToArchiveNamesTheArchive(t *testing.T) {
+	archive := zipArchive(t, []zipEntry{{name: "config/app.yml", body: nestedSecret}})
+	result := replayOne(t, gzipLayer(t, []tarEntry{
+		{name: "app/a.jar", body: string(archive)},
+		{name: "app/h1", typeflag: tar.TypeLink, linkname: "app/a.jar"},
+		{name: "app/h2", typeflag: tar.TypeLink, linkname: "app/h1"},
+	}), nestedOptions(64<<20, 0))
+	if len(result.FinalFiles) != 3 {
+		t.Fatalf("FinalFiles = %+v", result.FinalFiles)
+	}
+	for _, artifact := range result.FinalFiles {
+		switch artifact.Path {
+		case "app/a.jar":
+			if artifact.Type != ArtifactTypeRegularFile || artifact.Linkname != "" {
+				t.Fatalf("archive = %+v", artifact)
+			}
+		case "app/h1", "app/h2":
+			if artifact.Type != ArtifactTypeHardlink || artifact.Linkname != "app/a.jar" {
+				t.Fatalf("hardlink %s = type %q linkname %q, want hardlink to app/a.jar", artifact.Path, artifact.Type, artifact.Linkname)
+			}
+		default:
+			t.Fatalf("unexpected artifact %+v", artifact)
+		}
+		if got := strings.Join(nestedPaths(artifact), ","); got != "app/a.jar!config/app.yml" {
+			t.Fatalf("%s nested = %q", artifact.Path, got)
+		}
+	}
+	if result.Coverage.FilesSeen != 3 || result.Coverage.FilesExcludedBinary != 3 || result.Coverage.NestedArchivesExpanded != 1 {
+		t.Fatalf("Coverage = %+v", result.Coverage)
+	}
+}
+
 func TestReplayDropsNestedEntriesInsteadOfFailingOnRetainedBytes(t *testing.T) {
 	archive := zipArchive(t, []zipEntry{{name: "app.env", body: strings.Repeat("x", 4000)}})
 	layer := gzipLayer(t, []tarEntry{{name: "bundle.zip", body: string(archive)}})

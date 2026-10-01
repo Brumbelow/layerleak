@@ -61,11 +61,14 @@ type Artifact struct {
 	LayerDigest          string
 	DeletedByLayerDigest string
 	Type                 ArtifactType
-	Linkname             string
-	Content              []byte
-	Size                 int64
-	ContentClass         ContentClass
-	Scannable            bool
+	// Linkname is a symlink's target as written, or for a hardlink the path
+	// of the regular file whose content it shares (resolved through any
+	// chain of hardlinks), which is also the prefix of its Nested paths.
+	Linkname     string
+	Content      []byte
+	Size         int64
+	ContentClass ContentClass
+	Scannable    bool
 	// SourceEncoding names the stored encoding of a text file whose Content
 	// was transcoded to UTF-8 (UTF-16 with or without a byte-order mark).
 	// Offsets and line numbers of findings refer to the transcoded Content.
@@ -544,7 +547,13 @@ func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor
 			isFile := target.Type == ArtifactTypeRegularFile || target.Type == ArtifactTypeHardlink
 			if isFile {
 				linked.Type = ArtifactTypeHardlink
+				// Linkname names the regular file whose content (and nested
+				// entries, which keep that file's provenance paths) the
+				// hardlink shares, even through a chain of hardlinks.
 				linked.Linkname = linkTarget
+				if target.Type == ArtifactTypeHardlink {
+					linked.Linkname = target.Linkname
+				}
 				s.coverage.FilesSeen++
 			}
 			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {

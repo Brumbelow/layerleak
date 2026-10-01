@@ -171,6 +171,9 @@ jobs:
       - name: Validate OpenAPI and static documentation
         run: python scripts/validate_docs.py
 
+      - name: Validate SARIF fixtures against the OASIS 2.1.0 schema
+        run: python scripts/validate_sarif.py internal/sarif/testdata/*.sarif.json
+
       - name: Test release and container validation
         run: python3 -m unittest discover -s scripts/tests -v
 

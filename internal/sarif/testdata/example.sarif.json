@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "layerleak",
+          "version": "v3.0.0",
+          "semanticVersion": "3.0.0",
+          "informationUri": "https://github.com/Brumbelow/layerleak",
+          "rules": [
+            {
+              "id": "aws_access_key_id",
+              "name": "aws_access_key_id",
+              "shortDescription": {
+                "text": "AWS access key identifier."
+              },
+              "helpUri": "https://github.com/Brumbelow/layerleak",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "secret"
+                ]
+              }
+            },
+            {
+              "id": "basic_auth_url",
+              "name": "basic_auth_url",
+              "shortDescription": {
+                "text": "Likely secret matched by the basic_auth_url detector."
+              },
+              "helpUri": "https://github.com/Brumbelow/layerleak",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "secret"
+                ]
+              }
+            },
+            {
+              "id": "github_token",
+              "name": "github_token",
+              "shortDescription": {
+                "text": "Likely secret matched by the github_token detector."
+              },
+              "helpUri": "https://github.com/Brumbelow/layerleak",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "secret"
+                ]
+              }
+            },
+            {
+              "id": "keyword_entropy",
+              "name": "keyword_entropy",
+              "shortDescription": {
+                "text": "Likely secret matched by the keyword_entropy detector."
+              },
+              "helpUri": "https://github.com/Brumbelow/layerleak",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "secret"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "automationDetails": {
+        "id": "layerleak/ghcr.io/example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true
+        }
+      ],
+      "originalUriBaseIds": {
+        "IMAGE": {
+          "uri": "oci://ghcr.io/example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+          "description": {
+            "text": "Root filesystem of ghcr.io/example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "results": [
+        {
+          "ruleId": "github_token",
+          "ruleIndex": 2,
+          "level": "error",
+          "message": {
+            "text": "Likely secret matched by the github_token detector (high confidence) in file /app/config/.env production#1 line 3. Redacted value: ghp_********."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "app/config/.env%20production%231",
+                  "uriBaseId": "IMAGE"
+                },
+                "region": {
+                  "startLine": 3
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "layerleak/fingerprint/v1": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "properties": {
+            "confidence": "high",
+            "detector_name": "github_token",
+            "disposition": "actionable",
+            "file_path": "/app/config/.env production#1",
+            "layer_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "line_number": 3,
+            "manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "match_end": 53,
+            "match_start": 13,
+            "platform": "linux/amd64",
+            "present_in_final_image": true,
+            "source_type": "file_final"
+          }
+        },
+        {
+          "ruleId": "keyword_entropy",
+          "ruleIndex": 3,
+          "level": "note",
+          "message": {
+            "text": "Likely secret matched by the keyword_entropy detector (low confidence) in environment variable DB_PASSWORD. Redacted value: ********."
+          },
+          "locations": [
+            {
+              "logicalLocations": [
+                {
+                  "name": "DB_PASSWORD",
+                  "fullyQualifiedName": "env:DB_PASSWORD",
+                  "kind": "environmentVariable"
+                }
+              ]
+            }
+          ],
+          "partialFingerprints": {
+            "layerleak/fingerprint/v1": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "properties": {
+            "confidence": "low",
+            "detector_name": "keyword_entropy",
+            "disposition": "actionable",
+            "key": "DB_PASSWORD",
+            "manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "match_end": 28,
+            "match_start": 12,
+            "platform": "linux/amd64",
+            "present_in_final_image": true,
+            "source_type": "env"
+          }
+        },
+        {
+          "ruleId": "basic_auth_url",
+          "ruleIndex": 1,
+          "level": "warning",
+          "message": {
+            "text": "Likely secret matched by the basic_auth_url detector (medium confidence) in file /usr/share/doc/example/README line 12 (deleted by a later layer). Redacted value: ********. The value is not present in the final image filesystem but remains in the image history or an intermediate layer."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "usr/share/doc/example/README",
+                  "uriBaseId": "IMAGE"
+                },
+                "region": {
+                  "startLine": 12
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "layerleak/fingerprint/v1": "3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "suppressions": [
+            {
+              "kind": "external",
+              "status": "accepted",
+              "justification": "layerleak classified this finding as example (example_path)"
+            }
+          ],
+          "properties": {
+            "confidence": "medium",
+            "detector_name": "basic_auth_url",
+            "disposition": "example",
+            "disposition_reason": "example_path",
+            "file_path": "/usr/share/doc/example/README",
+            "layer_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "line_number": 12,
+            "manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "match_end": 40,
+            "match_start": 0,
+            "platform": "linux/amd64",
+            "present_in_final_image": false,
+            "source_type": "file_deleted_layer"
+          }
+        }
+      ],
+      "properties": {
+        "completed_manifest_count": 1,
+        "completed_target_count": 0,
+        "coverage": {
+          "complete": false,
+          "layers_seen": 3,
+          "layers_completed": 3,
+          "files_seen": 120,
+          "files_scanned": 118,
+          "files_skipped_oversize": 2,
+          "files_excluded_binary": 0,
+          "entries_skipped_unsafe": 0,
+          "metadata_values_scanned": 9,
+          "expanded_layer_bytes": 4096,
+          "retained_bytes": 2048,
+          "detector_input_bytes_scanned": 1024
+        },
+        "diagnostics": [
+          {
+            "code": "files_skipped_oversize",
+            "scope": "manifest",
+            "subject": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "message": "2 files exceeded the per-file byte bound and were not scanned",
+            "limit": 1048576,
+            "observed": 2
+          }
+        ],
+        "failed_manifest_count": 0,
+        "failed_target_count": 0,
+        "manifest_count": 1,
+        "mode": "reference",
+        "partial_target_count": 1,
+        "repository": "ghcr.io/example/app",
+        "requested_reference": "ghcr.io/example/app:1.2.3",
+        "resolved_reference": "ghcr.io/example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_schema_version": 1,
+        "status": "partial",
+        "suppressed_findings_count": 1,
+        "target_count": 1,
+        "total_findings": 2,
+        "unique_fingerprints": 2
+      }
+    }
+  ]
+}

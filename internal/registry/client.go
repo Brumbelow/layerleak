@@ -777,7 +777,13 @@ func (c *Client) doHTTP(request *http.Request) (*http.Response, error) {
 		if err := c.validateOutboundURL(next.URL.String(), origin, true, requestKind); err != nil {
 			return fmt.Errorf("reject redirect: %w", err)
 		}
-		if !sameURLHost(via[len(via)-1].URL, next.URL) {
+		previous := via[len(via)-1].URL
+		if previous.Scheme == "https" && next.URL.Scheme != "https" {
+			// Even an allowlisted plain-http host must not be reached by
+			// downgrading a TLS request: the bearer token would travel in clear.
+			return fmt.Errorf("reject redirect: https request must not be redirected to %s", next.URL.Scheme)
+		}
+		if !sameURLHost(previous, next.URL) {
 			next.Header.Del("Authorization")
 		}
 		return nil

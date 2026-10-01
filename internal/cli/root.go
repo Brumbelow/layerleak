@@ -78,11 +78,15 @@ func watchSignals(cancel context.CancelCauseFunc, stderr io.Writer, notify, stop
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "layerleak",
-		Short:         "Scan public OCI images for likely secrets",
+		Short:         "Scan OCI images for likely secrets",
+		Long:          rootLongHelp,
 		Version:       effectiveVersion(),
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
+	// Subcommands inherit the hint: usage is silenced on errors, so a bad
+	// flag points at --help instead.
+	cmd.SetFlagErrorFunc(usageHintFlagError)
 
 	cmd.AddCommand(newScanCmd())
 	cmd.AddCommand(newBaselineCmd())

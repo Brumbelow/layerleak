@@ -340,8 +340,17 @@ go run ./cmd/migrate
 go run ./cmd/migrate
 ```
 
-The second run is intentionally a no-op. The migration command reads three
-variables of its own:
+The second run is intentionally a no-op. Without flags the command applies
+every pending migration. `--status` prints the ledger (each shipped migration
+with its state, applied time and SHA-256, then `current` and `expected`) and
+exits 0 when the database is current, 2 when migrations are pending or a legacy
+schema is waiting to be adopted, and 1 on any error such as checksum drift;
+`--dry-run` lists what a run would adopt and apply, changes nothing, and exits
+0; `--version` prints the build version. Neither `--status` nor `--dry-run`
+creates the ledger, adopts a legacy schema or takes the migration lock. There
+is no `down` command: the shipped `*.down.sql` files are for manual use with
+`psql` and bypass the ledger. The migration command reads three variables of
+its own:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

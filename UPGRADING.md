@@ -45,8 +45,9 @@ Changed:
 - Redacted values have a fixed-length mask that no longer reveals the length
   or the tail of the secret, and multi-line values no longer reveal their
   first line.
-- Environment and label findings cover the value alone, so their
-  fingerprints change once; file findings are unaffected.
+- Environment and label findings cover the value alone, so the fingerprints
+  of those produced by the generic keyword and assignment detectors change
+  once; file findings and vendor-pattern findings are unaffected.
 - Seven shipped detector identifiers were renamed, and identifier-only
   detectors no longer claim high confidence.
 - Multi-platform images scan only the `linux` manifests (and entries with no
@@ -60,8 +61,8 @@ Changed:
 
 ## Track 1: pre-3.0.0 CLI users (v1.0.0 and source builds of the v2.x tags)
 
-`go install github.com/brumbelow/layerleak@latest` has always resolved to
-`v1.0.0`, because the v2.x tags carry a `go.mod` without a `/v2` suffix. A
+`go install github.com/brumbelow/layerleak@latest` resolves to `v1.0.0`,
+because the v2.x tags carry a `go.mod` without a `/v2` suffix. A
 binary you installed is therefore v1.0.0 unless you built it yourself from a
 v2.x checkout with `go build`.
 
@@ -151,11 +152,17 @@ v2.x checkout with `go build`.
    `sentry_dsn` is new in 3.0.0 and also reports `medium`.
 
 6. Re-baseline suppressions keyed on the fingerprints of environment-variable
-   or label findings. Every pre-3.0.0 build fingerprinted `KEY=value`; 3.0.0
-   fingerprints the value alone, so their `fingerprint`, `match_start`,
-   `match_end` and `redacted_value` equal those of the same secret found in a
-   file, and the two no longer produce separate findings. This change happens
-   once; file findings keep their fingerprints.
+   or label findings. Every pre-3.0.0 build let the generic detectors
+   (`keyword_entropy` and the assigned-value rules) match an unquoted
+   `KEY=value` entry as one token, because `=` was part of their candidate
+   character class, so such a finding was fingerprinted over `KEY=value` and
+   never matched the same secret found in a file. 3.0.0 fingerprints the
+   value alone, so `fingerprint`, `match_start`, `match_end` and
+   `redacted_value` equal those of the file finding and the two no longer
+   produce separate findings. This change happens once. File findings keep
+   their fingerprints, and so do environment or label findings from
+   vendor-pattern detectors (a `glpat-` or `sk_live_` token in an `ENV`
+   line), which already matched the token alone.
 
 7. Update anything that parsed `redacted_value`. Every pre-3.0.0 build showed
    the first three and last two characters around a mask five shorter than

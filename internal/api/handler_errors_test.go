@@ -1,13 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 
 	"github.com/brumbelow/layerleak/v3/internal/jobs"
 	"github.com/brumbelow/layerleak/v3/internal/limits"
@@ -267,5 +271,75 @@ func TestHandleScanNonLimitErrorsOmitLimitFields(t *testing.T) {
 	}
 	if _, ok := errorObject["limit"]; ok {
 		t.Fatalf("limit present: %s", recorder.Body.String())
+	}
+}
+
+// panickingStore panics from a read endpoint so the middleware's recovery
+// can be observed from outside.
+type panickingStore struct {
+	*stubReadStore
+	value any
+}
+
+func (s *panickingStore) ListRepositories(_ context.Context, _, _ int) ([]storage.RepositorySummary, error) {
+	panic(s.value)
+}
+
+// TestMiddlewareRepanicsErrAbortHandler pins API-17: net/http's abort
+// sentinel must propagate so the server closes the connection silently
+// instead of answering 500 JSON.
+func TestMiddlewareRepanicsErrAbortHandler(t *testing.T) {
+	logs := &bytes.Buffer{}
+	handler := NewHandlerWithOptions(&stubScanner{}, &panickingStore{stubReadStore: &stubReadStore{}, value: http.ErrAbortHandler}, HandlerOptions{Logger: testLogger(logs)})
+	recorder := httptest.NewRecorder()
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/repositories", nil))
+	}()
+
+	err, ok := recovered.(error)
+	if !ok || !errors.Is(err, http.ErrAbortHandler) {
+		t.Fatalf("recovered = %#v, want http.ErrAbortHandler", recovered)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("body written after abort: %s", recorder.Body.String())
+	}
+	if strings.Contains(logs.String(), "panic serving api request") {
+		t.Fatalf("abort was logged as a panic: %s", logs.String())
+	}
+}
+
+// TestMiddlewareRecoversPanicsWithStack: an ordinary panic yields the 500
+// envelope and a log line with the panic type and stack, never the value.
+func TestMiddlewareRecoversPanicsWithStack(t *testing.T) {
+	logs := &bytes.Buffer{}
+	handler := NewHandlerWithOptions(&stubScanner{}, &panickingStore{stubReadStore: &stubReadStore{}, value: errors.New("synthetic-panic-detail")}, HandlerOptions{Logger: testLogger(logs)})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/repositories", nil)
+	request.Header.Set("X-Request-ID", "panic-test")
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	errorObject, _ := decodeErrorBody(t, recorder.Body.Bytes())
+	if errorObject["code"] != "internal_error" || errorObject["request_id"] != "panic-test" {
+		t.Fatalf("error = %v", errorObject)
+	}
+	if strings.Contains(recorder.Body.String(), "synthetic-panic-detail") {
+		t.Fatalf("body leaked the panic value: %s", recorder.Body.String())
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, `"msg":"panic serving api request"`) || !strings.Contains(logged, `"panic_type":"*errors.errorString"`) || !strings.Contains(logged, `"request_id":"panic-test"`) {
+		t.Fatalf("panic log = %s", logged)
+	}
+	if !strings.Contains(logged, `"stack":"goroutine `) || !strings.Contains(logged, "panickingStore") {
+		t.Fatalf("panic log lacks a stack: %s", logged)
+	}
+	if strings.Contains(logged, "synthetic-panic-detail") {
+		t.Fatalf("panic log leaked the panic value: %s", logged)
 	}
 }

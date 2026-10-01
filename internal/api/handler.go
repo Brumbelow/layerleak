@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -925,11 +926,23 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 		}
 
 		defer func() {
-			if recovered := recover(); recovered != nil {
-				slog.Error("panic serving api request", "panic_type", fmt.Sprintf("%T", recovered), "request_id", requestID)
-				if !wrapped.wroteHeader {
-					writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
-				}
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+			if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				// net/http's convention: abort the response silently.
+				panic(recovered)
+			}
+			// The stack names frames, never values; the panic value itself may
+			// carry request or upstream detail and is reported by type only.
+			h.logger.Error("panic serving api request",
+				"panic_type", fmt.Sprintf("%T", recovered),
+				"stack", string(debug.Stack()),
+				"request_id", requestID,
+			)
+			if !wrapped.wroteHeader {
+				writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 			}
 		}()
 		next.ServeHTTP(wrapped, request)

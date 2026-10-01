@@ -8,85 +8,87 @@ import (
 	"testing"
 )
 
-func TestParseBearerChallengeShapes(t *testing.T) {
-	tests := []struct {
-		name    string
-		headers []string
-		want    bearerChallenge
-		wantErr string
-	}{
-		{
-			name:    "canonical docker hub challenge",
-			headers: []string{`Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull"`},
-			want:    bearerChallenge{Realm: "https://auth.docker.io/token", Service: "registry.docker.io", Scope: "repository:library/alpine:pull"},
-		},
-		{
-			name:    "comma inside quoted scope",
-			headers: []string{`Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull,push"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test", Scope: "repository:library/app:pull,push"},
-		},
-		{
-			name:    "comma inside quoted realm query",
-			headers: []string{`Bearer realm="https://auth.test/token?x=1,2"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token?x=1,2"},
-		},
-		{
-			name:    "escaped quote inside value",
-			headers: []string{`Bearer realm="https://auth.test/token",service="reg\"istry"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token", Service: `reg"istry`},
-		},
-		{
-			name:    "whitespace and lowercase scheme",
-			headers: []string{`bearer   realm = "https://auth.test/token" ,  service = "registry.test"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
-		},
-		{
-			name:    "unquoted token values",
-			headers: []string{`Bearer realm=https://auth.test/token,service=registry.test`},
-			want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
-		},
-		{
-			name:    "basic listed before bearer in separate headers",
-			headers: []string{`Basic realm="registry"`, `Bearer realm="https://auth.test/token",service="registry.test"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
-		},
-		{
-			name:    "basic and bearer in one header",
-			headers: []string{`Basic realm="registry", Bearer realm="https://auth.test/token",service="registry.test"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
-		},
-		{
-			name:    "unknown parameters are ignored",
-			headers: []string{`Bearer realm="https://auth.test/token",error="insufficient_scope",error_description="The access token has insufficient scope, retry"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token"},
-		},
-		{
-			name:    "first bearer challenge wins",
-			headers: []string{`Bearer realm="https://auth.test/token", Bearer realm="https://other.test/token"`},
-			want:    bearerChallenge{Realm: "https://auth.test/token"},
-		},
-		{
-			name:    "missing header",
-			wantErr: "registry auth challenge is missing",
-		},
-		{
-			name:    "only basic",
-			headers: []string{`Basic realm="super-secret-marker"`},
-			wantErr: "unsupported registry auth challenge",
-		},
-		{
-			name:    "bearer without realm",
-			headers: []string{`Bearer service="registry.test"`},
-			wantErr: "did not include a realm",
-		},
-		{
-			name:    "unterminated quoted value",
-			headers: []string{`Bearer realm="https://auth.test/token`},
-			wantErr: "malformed",
-		},
-	}
+// bearerChallengeShapes are the WWW-Authenticate shapes registries send; they
+// drive TestParseBearerChallengeShapes and seed FuzzParseBearerChallenge.
+var bearerChallengeShapes = []struct {
+	name    string
+	headers []string
+	want    bearerChallenge
+	wantErr string
+}{
+	{
+		name:    "canonical docker hub challenge",
+		headers: []string{`Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull"`},
+		want:    bearerChallenge{Realm: "https://auth.docker.io/token", Service: "registry.docker.io", Scope: "repository:library/alpine:pull"},
+	},
+	{
+		name:    "comma inside quoted scope",
+		headers: []string{`Bearer realm="https://auth.test/token",service="registry.test",scope="repository:library/app:pull,push"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test", Scope: "repository:library/app:pull,push"},
+	},
+	{
+		name:    "comma inside quoted realm query",
+		headers: []string{`Bearer realm="https://auth.test/token?x=1,2"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token?x=1,2"},
+	},
+	{
+		name:    "escaped quote inside value",
+		headers: []string{`Bearer realm="https://auth.test/token",service="reg\"istry"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token", Service: `reg"istry`},
+	},
+	{
+		name:    "whitespace and lowercase scheme",
+		headers: []string{`bearer   realm = "https://auth.test/token" ,  service = "registry.test"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
+	},
+	{
+		name:    "unquoted token values",
+		headers: []string{`Bearer realm=https://auth.test/token,service=registry.test`},
+		want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
+	},
+	{
+		name:    "basic listed before bearer in separate headers",
+		headers: []string{`Basic realm="registry"`, `Bearer realm="https://auth.test/token",service="registry.test"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
+	},
+	{
+		name:    "basic and bearer in one header",
+		headers: []string{`Basic realm="registry", Bearer realm="https://auth.test/token",service="registry.test"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test"},
+	},
+	{
+		name:    "unknown parameters are ignored",
+		headers: []string{`Bearer realm="https://auth.test/token",error="insufficient_scope",error_description="The access token has insufficient scope, retry"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token"},
+	},
+	{
+		name:    "first bearer challenge wins",
+		headers: []string{`Bearer realm="https://auth.test/token", Bearer realm="https://other.test/token"`},
+		want:    bearerChallenge{Realm: "https://auth.test/token"},
+	},
+	{
+		name:    "missing header",
+		wantErr: "registry auth challenge is missing",
+	},
+	{
+		name:    "only basic",
+		headers: []string{`Basic realm="super-secret-marker"`},
+		wantErr: "unsupported registry auth challenge",
+	},
+	{
+		name:    "bearer without realm",
+		headers: []string{`Bearer service="registry.test"`},
+		wantErr: "did not include a realm",
+	},
+	{
+		name:    "unterminated quoted value",
+		headers: []string{`Bearer realm="https://auth.test/token`},
+		wantErr: "malformed",
+	},
+}
 
-	for _, test := range tests {
+func TestParseBearerChallengeShapes(t *testing.T) {
+	for _, test := range bearerChallengeShapes {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := parseBearerChallenges(test.headers)
 			if test.wantErr != "" {
@@ -106,6 +108,46 @@ func TestParseBearerChallengeShapes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// FuzzParseBearerChallenge feeds hostile WWW-Authenticate values to the
+// challenge parser. Newline-separated input is several header lines. The
+// parser must not panic, must return only its fixed error messages (never
+// header contents), and a parsed challenge has a realm and no field longer
+// than the input it came from.
+func FuzzParseBearerChallenge(f *testing.F) {
+	for _, shape := range bearerChallengeShapes {
+		f.Add(strings.Join(shape.headers, "\n"))
+	}
+	f.Add(`Bearer realm="a\`)
+	f.Add(`Bearer realm=,service="x"`)
+	f.Add(`=realm, Bearer`)
+	f.Add(`Basic, Bearer realm="https://auth.test/token" scope="a" service=b`)
+	fixedErrors := map[string]bool{
+		"registry auth challenge is missing":            true,
+		"unsupported registry auth challenge":           true,
+		"bearer auth challenge did not include a realm": true,
+		"malformed registry auth challenge":             true,
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		headers := strings.Split(input, "\n")
+		challenge, err := parseBearerChallenges(headers)
+		_ = offersBasicChallenge(headers)
+		if err != nil {
+			if !fixedErrors[err.Error()] {
+				t.Fatalf("parseBearerChallenges() error %q is not a fixed message", err)
+			}
+			return
+		}
+		if challenge.Realm == "" {
+			t.Fatalf("parseBearerChallenges(%q) returned an empty realm without an error", input)
+		}
+		for name, field := range map[string]string{"realm": challenge.Realm, "service": challenge.Service, "scope": challenge.Scope} {
+			if len(field) > len(input) {
+				t.Fatalf("parseBearerChallenges(%q) %s has %d bytes, longer than the %d-byte input", input, name, len(field), len(input))
+			}
+		}
+	})
 }
 
 func TestFetchManifestUsesBearerChallengeAfterBasic(t *testing.T) {

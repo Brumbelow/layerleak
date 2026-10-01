@@ -413,13 +413,13 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 			writeAPIError(writer, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body must not exceed %d bytes", h.options.MaxRequestBytes))
 			return
 		}
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", singleJSONObjectMessage)
 		return
 	}
 
 	reference, err := manifest.ParseReference(body.Reference)
 	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", invalidReferenceErrorMessage(body.Reference, err))
 		return
 	}
 	if body.AllTags && !reference.IsRepositoryOnly() {
@@ -975,6 +975,30 @@ func invalidBodyMessage(err error) string {
 	return "request body must be valid JSON"
 }
 
+// singleJSONObjectMessage is the fixed 400 message for any data after the
+// request object, whether another JSON value or bytes the decoder rejects; the
+// decoder's own text quotes request bytes and is never returned.
+const singleJSONObjectMessage = "request body must contain a single JSON object"
+
+// invalidReferenceMessage is the fixed 400 message for a reference the parser
+// rejects. The parser's error text can quote the submitted reference and the
+// upstream distribution grammar error, so it is never returned to a client.
+const invalidReferenceMessage = "reference is not a valid image reference"
+
+// invalidReferenceErrorMessage maps a ParseReference failure to a fixed
+// message: a missing reference and a local source scheme keep their own fixed
+// text, every other failure is invalidReferenceMessage.
+func invalidReferenceErrorMessage(raw string, err error) string {
+	switch {
+	case raw == "":
+		return "image reference is required"
+	case errors.Is(err, manifest.ErrLocalSourceNotSupported):
+		return manifest.ErrLocalSourceNotSupported.Error()
+	default:
+		return invalidReferenceMessage
+	}
+}
+
 func requireSingleJSONValue(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); err == io.EOF {
@@ -982,7 +1006,7 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 	} else if err != nil {
 		return err
 	}
-	return fmt.Errorf("request body must contain a single JSON object")
+	return errors.New(singleJSONObjectMessage)
 }
 
 // scanFailure is the HTTP mapping of a failed POST /api/v1/scans. Messages are
@@ -1352,29 +1376,28 @@ func sanitizeResultErrors(value any) {
 	}
 }
 
+// diagnosticMessages is the fixed text the API returns for each diagnostic
+// code with its own message; every other code returns "scan step failed".
+// web/docs/openapi.yaml lists each value in the closed Diagnostic.message enum
+// and names each code in its description; TestDiagnosticMessagesMatchOpenAPIEnum
+// keeps the two in lockstep.
+var diagnosticMessages = map[string]string{
+	"files_skipped_oversize":         "one or more files exceeded the configured per-file scan limit",
+	"max_findings_exceeded":          "the scan exceeded the configured findings limit",
+	"max_raw_finding_bytes_exceeded": "the scan exceeded the configured raw finding byte limit",
+	"raw_retention_truncated":        "raw secret retention stopped at the configured byte limit; detection continued without raw values",
+	"platform_skipped":               "a platform manifest was skipped by the default linux-only platform policy",
+	"manifest_skipped":               "an index entry that is not an image manifest was skipped",
+	"manifest_unsupported":           "a selected manifest uses layers that cannot be scanned",
+	"platform_not_found":             "the requested platform was not found in the image",
+	"layer_trailing_data":            "a layer blob carried data after the end of its compressed stream",
+}
+
 func safeDiagnosticMessage(code string) string {
-	switch code {
-	case "files_skipped_oversize":
-		return "one or more files exceeded the configured per-file scan limit"
-	case "max_findings_exceeded":
-		return "the scan exceeded the configured findings limit"
-	case "max_raw_finding_bytes_exceeded":
-		return "the scan exceeded the configured raw finding byte limit"
-	case "raw_retention_truncated":
-		return "raw secret retention stopped at the configured byte limit; detection continued without raw values"
-	case "platform_skipped":
-		return "a platform manifest was skipped by the default linux-only platform policy"
-	case "manifest_skipped":
-		return "an index entry that is not an image manifest was skipped"
-	case "manifest_unsupported":
-		return "a selected manifest uses layers that cannot be scanned"
-	case "platform_not_found":
-		return "the requested platform was not found in the image"
-	case "layer_trailing_data":
-		return "a layer blob carried data after the end of its compressed stream"
-	default:
-		return "scan step failed"
+	if message, ok := diagnosticMessages[code]; ok {
+		return message
 	}
+	return "scan step failed"
 }
 
 func setResponseWriteDeadline(writer http.ResponseWriter) {

@@ -205,7 +205,8 @@ const (
 	TagStatusPartial TagStatus = "partial"
 	// TagStatusFailed: the tag could not be resolved or its target failed.
 	TagStatusFailed TagStatus = "failed"
-	// TagStatusSkipped: the sweep stopped before the tag's target was scanned.
+	// TagStatusSkipped: the sweep stopped before the tag's target was scanned,
+	// or before the tag was resolved (the repository target bound).
 	TagStatusSkipped TagStatus = "skipped"
 )
 
@@ -409,7 +410,7 @@ func scanRepository(ctx context.Context, request Request, started time.Time) (Re
 	}
 
 	groups := make(map[string]*targetGroup)
-	for _, tag := range tags {
+	for tagIndex, tag := range tags {
 		emitProgress(request, progressFromResult(request, result, ProgressPhaseResolvingTags, "Resolving tag digest", tag, ""))
 
 		resolved, err := request.Registry.ResolveManifest(ctx, request.Reference.Repository, tag)
@@ -451,6 +452,17 @@ func scanRepository(ctx context.Context, request Request, started time.Time) (Re
 			groups[resolved.Digest] = group
 		}
 		group.tags = append(group.tags, tag)
+
+		// The target bound is applied while resolving: once this tag adds the
+		// first target past it, the sweep fails with the limit error without
+		// sending one more manifest request for the remaining tags.
+		if request.MaxRepositoryTargets > 0 && len(groups) > request.MaxRepositoryTargets {
+			limitErr := limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
+			markUnresolvedTags(&result, tags[tagIndex+1:], limitErr)
+			result.TargetCount = len(groups)
+			finalizeResult(&result, nil, nil)
+			return result, limitErr
+		}
 	}
 
 	if len(groups) == 0 {
@@ -468,10 +480,6 @@ func scanRepository(ctx context.Context, request Request, started time.Time) (Re
 	})
 
 	result.TargetCount = len(groupList)
-	if request.MaxRepositoryTargets > 0 && len(groupList) > request.MaxRepositoryTargets {
-		finalizeResult(&result, nil, nil)
-		return result, limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
-	}
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
@@ -604,6 +612,19 @@ func markUnscannedTargets(result *Result, request Request, remaining []targetGro
 	}
 	if len(remaining) > 0 {
 		result.Coverage.Complete = false
+	}
+}
+
+// markUnresolvedTags records the tags a sweep stopped before resolving as
+// skipped, so tag_results still lists every enumerated tag.
+func markUnresolvedTags(result *Result, remaining []string, cause error) {
+	reason := "not resolved: the sweep stopped before this tag: " + cause.Error()
+	for _, tag := range remaining {
+		result.TagResults = append(result.TagResults, TagResult{
+			Tag:    tag,
+			Status: TagStatusSkipped,
+			Error:  reason,
+		})
 	}
 }
 

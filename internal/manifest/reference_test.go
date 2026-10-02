@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -244,6 +245,43 @@ func TestParseReferenceRejectsMalformedValues(t *testing.T) {
 				t.Fatalf("ParseReference(%q) error = nil", value)
 			}
 		})
+	}
+}
+
+// TestParseReferenceRejectionMessages pins the error each rejection returns
+// and which check wins when a value breaks several of them.
+func TestParseReferenceRejectionMessages(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{value: "", want: "image reference is required"},
+		{value: " oci:/srv/app", want: "image reference must not include surrounding whitespace"},
+		{value: "oci:/srv/app?x", want: ErrLocalSourceNotSupported.Error()},
+		{value: "https://example.com/image?x", want: "image reference must not include a scheme"},
+		{value: "owner/image?x@a@b", want: "image reference contains invalid characters"},
+		{value: "owner/image@a@b", want: "image reference must contain at most one digest separator"},
+		{value: "ghcr.io/", want: "parse image reference: invalid reference format"},
+		{value: "bad_host.example/owner/image", want: "registry host is invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			ref, err := ParseReference(test.value)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("ParseReference(%q) error = %v, want %q", test.value, err, test.want)
+			}
+			if ref != (Reference{}) {
+				t.Fatalf("ParseReference(%q) = %#v, want the zero Reference", test.value, ref)
+			}
+		})
+	}
+	if _, err := ParseReference("oci:/srv/app"); !errors.Is(err, ErrLocalSourceNotSupported) {
+		t.Fatalf("local reference error = %v", err)
+	}
+	ref, err := ParseReference("owner/image@sha384:" + strings.Repeat("a", 96))
+	var integrity *IntegrityError
+	if !errors.As(err, &integrity) || integrity.Kind != IntegrityUnsupportedDigestAlgorithm || ref != (Reference{}) {
+		t.Fatalf("sha384 digest: ref = %#v, error = %v", ref, err)
 	}
 }
 

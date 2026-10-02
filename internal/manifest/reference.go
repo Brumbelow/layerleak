@@ -28,24 +28,8 @@ type Reference struct {
 
 func ParseReference(raw string) (Reference, error) {
 	value := raw
-	if value == "" {
-		return Reference{}, fmt.Errorf("image reference is required")
-	}
-	if value != strings.TrimSpace(value) {
-		return Reference{}, fmt.Errorf("image reference must not include surrounding whitespace")
-	}
-
-	if LocalScheme(value) != "" {
-		return Reference{}, ErrLocalSourceNotSupported
-	}
-	if strings.Contains(value, "://") {
-		return Reference{}, fmt.Errorf("image reference must not include a scheme")
-	}
-	if strings.ContainsAny(value, `?#\\`) {
-		return Reference{}, fmt.Errorf("image reference contains invalid characters")
-	}
-	if strings.Count(value, "@") > 1 {
-		return Reference{}, fmt.Errorf("image reference must contain at most one digest separator")
+	if err := checkReferenceSyntax(value); err != nil {
+		return Reference{}, err
 	}
 
 	named, err := distributionreference.ParseNormalizedNamed(canonicalizeDockerHubDomain(value))
@@ -62,16 +46,9 @@ func ParseReference(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("repository is required")
 	}
 
-	tag := ""
-	if tagged, ok := named.(distributionreference.Tagged); ok {
-		tag = tagged.Tag()
-	}
-	digest := ""
-	if digested, ok := named.(distributionreference.Digested); ok {
-		digest = digested.Digest().String()
-		if err := ValidateDigest(digest); err != nil {
-			return Reference{}, err
-		}
+	tag, digest, err := namedTagAndDigest(named)
+	if err != nil {
+		return Reference{}, err
 	}
 
 	return Reference{
@@ -82,6 +59,49 @@ func ParseReference(raw string) (Reference, error) {
 		Digest:      digest,
 		TagExplicit: tag != "",
 	}, nil
+}
+
+// checkReferenceSyntax rejects, before the reference grammar runs, an empty
+// value, surrounding whitespace, a local source scheme, a URL scheme, query,
+// fragment or backslash characters and more than one digest separator.
+func checkReferenceSyntax(value string) error {
+	if value == "" {
+		return fmt.Errorf("image reference is required")
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("image reference must not include surrounding whitespace")
+	}
+
+	if LocalScheme(value) != "" {
+		return ErrLocalSourceNotSupported
+	}
+	if strings.Contains(value, "://") {
+		return fmt.Errorf("image reference must not include a scheme")
+	}
+	if strings.ContainsAny(value, `?#\\`) {
+		return fmt.Errorf("image reference contains invalid characters")
+	}
+	if strings.Count(value, "@") > 1 {
+		return fmt.Errorf("image reference must contain at most one digest separator")
+	}
+	return nil
+}
+
+// namedTagAndDigest returns the tag and the validated digest of a parsed
+// reference; either is empty when the reference does not carry it.
+func namedTagAndDigest(named distributionreference.Named) (string, string, error) {
+	tag := ""
+	if tagged, ok := named.(distributionreference.Tagged); ok {
+		tag = tagged.Tag()
+	}
+	digest := ""
+	if digested, ok := named.(distributionreference.Digested); ok {
+		digest = digested.Digest().String()
+		if err := ValidateDigest(digest); err != nil {
+			return "", "", err
+		}
+	}
+	return tag, digest, nil
 }
 
 // ValidateDigest verifies the OCI digest syntax and the encoded length for the

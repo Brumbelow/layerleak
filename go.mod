@@ -2,6 +2,11 @@ module github.com/brumbelow/layerleak/v3
 
 go 1.27.1
 
+// npm packages installed for the browser tests can ship Go sources without a
+// go.mod; keep them out of ./... so vet, lint, tests and govulncheck cover
+// only layerleak's own code.
+ignore ./scripts/tests/node_modules
+
 require (
 	github.com/distribution/reference v0.6.0
 	github.com/klauspost/compress v1.20.1

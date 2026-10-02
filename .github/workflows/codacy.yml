@@ -24,6 +24,17 @@ on:
 permissions:
   contents: read
 
+env:
+  # Issue budget for the Codacy analysis step: the run fails when Codacy reports
+  # more issues than this. The maintainer configured upload-only analysis
+  # (2147483647, the CLI's maximum) and that stays in force through the first
+  # v3.0.0 release candidate, so every finding reaches code scanning without
+  # blocking CI on the as yet unreviewed baseline. After the rc.1 SARIF
+  # baseline has been triaged, set this to the "Codacy reported N issues" total
+  # printed by the combine step plus a small margin, so new findings fail the
+  # job while existing ones are worked down. Lowering it is a reviewed change.
+  CODACY_MAX_ALLOWED_ISSUES: "2147483647"
+
 jobs:
   codacy-security-scan:
     permissions:
@@ -32,6 +43,7 @@ jobs:
       actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
     name: Codacy Security Scan
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       # Checkout the repository to the GitHub Actions runner
       - name: Checkout code
@@ -47,15 +59,22 @@ jobs:
           output: results.sarif
           format: sarif
           gh-code-scanning-compat: true
-          max-allowed-issues: 2147483647
+          max-allowed-issues: ${{ env.CODACY_MAX_ALLOWED_ISSUES }}
 
       # Post-process SARIF so each of Codacy's per-tool runs gets a unique
-      # automationDetails.id — required since github/codeql-action@v4 enforces
-      # "one run per category" (GitHub Code Scanning policy, 2025-07-21).
+      # automationDetails.id (github/codeql-action@v4 enforces "one run per
+      # category"), then split the runs into files of at most 20 because GitHub
+      # rejects larger uploads ("rejecting SARIF, as there are more runs than
+      # allowed"). Runs without results are uploaded too: an empty analysis is
+      # what tells code scanning that a tool's earlier alerts are fixed, and
+      # without it they would stay open on the branch.
       # See https://github.com/codacy/codacy-analysis-cli-action/issues/142
-      - name: Combine SARIF runs by tool name
+      - name: Combine SARIF runs by tool name and split into uploadable chunks
+        id: sarif
         if: hashFiles('results.sarif') != ''
+        shell: bash
         run: |
+          set -euo pipefail
           jq '.runs |= (
             group_by(.tool.driver.name) |
             map(
@@ -74,13 +93,46 @@ jobs:
               }
             )
           )' results.sarif > results-combined.sarif
+          total="$(jq '.runs | length' results-combined.sarif)"
+          issues="$(jq '[.runs[].results | length] | add // 0' results-combined.sarif)"
+          echo "Codacy reported ${total} tool run(s)."
+          # The figure to derive CODACY_MAX_ALLOWED_ISSUES from once the baseline is triaged.
+          echo "Codacy reported ${issues} issues (budget ${CODACY_MAX_ALLOWED_ISSUES})."
+          mkdir -p sarif-chunks
+          chunks=0
+          for ((start = 0; start < total; start += 20)); do
+            chunks=$((chunks + 1))
+            if (( chunks > 3 )); then
+              echo "More than 60 SARIF runs; extend the upload steps below." >&2
+              exit 1
+            fi
+            jq --argjson start "${start}" '.runs |= .[$start:$start + 20]' results-combined.sarif \
+              > "sarif-chunks/codacy-${chunks}.sarif"
+          done
+          echo "chunks=${chunks}" >> "${GITHUB_OUTPUT}"
 
-      - name: Upload SARIF results file
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        if: hashFiles('results-combined.sarif') != ''
+      - name: Upload SARIF results (chunk 1)
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        if: steps.sarif.outputs.chunks >= 1
         with:
-          sarif_file: results-combined.sarif
+          sarif_file: sarif-chunks/codacy-1.sarif
           category: Codacy
+          wait-for-processing: true
+
+      - name: Upload SARIF results (chunk 2)
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        if: steps.sarif.outputs.chunks >= 2
+        with:
+          sarif_file: sarif-chunks/codacy-2.sarif
+          category: Codacy/2
+          wait-for-processing: true
+
+      - name: Upload SARIF results (chunk 3)
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        if: steps.sarif.outputs.chunks >= 3
+        with:
+          sarif_file: sarif-chunks/codacy-3.sarif
+          category: Codacy/3
           wait-for-processing: true
 
   codacy-coverage:
@@ -94,8 +146,23 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_DB: layerleak_test
+          POSTGRES_USER: layerleak
+          POSTGRES_PASSWORD: layerleak-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U layerleak -d layerleak_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOFLAGS: -mod=readonly
+      LAYERLEAK_TEST_DATABASE_URL: postgres://layerleak:layerleak-test-only@127.0.0.1:5432/layerleak_test?sslmode=disable
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -113,8 +180,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -short ./... -count=1 -covermode=atomic -coverprofile=unit.coverage.out
-          test -s unit.coverage.out
+          # The full suite, including the PostgreSQL integration tests, so the
+          # published coverage reflects the storage layer as well.
+          go test ./... -count=1 -covermode=atomic -coverprofile=coverage.out
+          test -s coverage.out
 
       - name: Upload coverage to Codacy
         shell: bash
@@ -139,4 +208,4 @@ jobs:
           "${reporter}" report \
             --commit-uuid "${COVERAGE_COMMIT}" \
             --force-coverage-parser go \
-            -r unit.coverage.out
+            -r coverage.out

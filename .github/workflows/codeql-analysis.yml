@@ -5,21 +5,28 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-
+  schedule:
+    # Weekly, so new queries run against main even when nothing is pushed.
+    - cron: "27 6 * * 1"
 
 permissions:
   contents: read
   security-events: write
+
 jobs:
   analyze:
-    name: Analyze
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     if: github.event_name != 'schedule' || github.repository == 'brumbelow/layerleak'
 
     strategy:
       fail-fast: false
+      # Keep language as the only matrix key: CodeQL derives each analysis
+      # category from the workflow, job and matrix values, and main's Go alerts
+      # are tracked under ".github/workflows/codeql-analysis.yml:analyze/language:go".
       matrix:
-        language: [ 'go' ]
+        language: [ 'actions', 'go', 'javascript-typescript', 'python' ]
 
     steps:
     - name: Checkout repository
@@ -27,13 +34,19 @@ jobs:
       with:
         persist-credentials: false
 
+    - name: Set up Go
+      if: matrix.language == 'go'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      with:
+        go-version-file: go.mod
+        cache: true
+
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       with:
         languages: ${{ matrix.language }}
-
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        build-mode: ${{ matrix.language == 'go' && 'autobuild' || 'none' }}
+        queries: security-extended
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0

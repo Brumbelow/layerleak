@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 const (
@@ -26,6 +29,46 @@ var migrationFilenamePattern = regexp.MustCompile(`^([0-9]{4})_([a-z0-9][a-z0-9_
 type MigrationConfig struct {
 	DatabaseURL string
 	Directory   string
+	// LockTimeout bounds how long one migration transaction waits for a table
+	// lock (SET LOCAL lock_timeout) before it is rolled back and retried, so a
+	// migration that queues behind an idle-in-transaction reader cannot stall
+	// every later reader indefinitely. Zero selects DefaultMigrationLockTimeout.
+	LockTimeout time.Duration
+	// LockAttempts is how many times a migration is attempted when the only
+	// failure is a lock timeout (SQLSTATE 55P03). Zero selects
+	// DefaultMigrationLockAttempts.
+	LockAttempts int
+	// Progress, when set, receives human-readable progress lines such as
+	// "waiting for lock" notices and applied-migration notes.
+	Progress func(message string)
+}
+
+const (
+	// DefaultMigrationLockTimeout is the per-transaction lock wait bound.
+	DefaultMigrationLockTimeout = 15 * time.Second
+	// DefaultMigrationLockAttempts is the number of attempts per migration
+	// before a lock timeout is reported to the operator.
+	DefaultMigrationLockAttempts = 3
+	// migrationLockRetryDelay is the pause between lock-timeout attempts.
+	migrationLockRetryDelay = time.Second
+	// lockNotAvailableSQLState is PostgreSQL's SQLSTATE for lock_timeout expiry.
+	lockNotAvailableSQLState = "55P03"
+)
+
+func (c MigrationConfig) withDefaults() MigrationConfig {
+	if c.LockTimeout == 0 {
+		c.LockTimeout = DefaultMigrationLockTimeout
+	}
+	if c.LockAttempts == 0 {
+		c.LockAttempts = DefaultMigrationLockAttempts
+	}
+	return c
+}
+
+func (c MigrationConfig) report(format string, args ...any) {
+	if c.Progress != nil {
+		c.Progress(fmt.Sprintf(format, args...))
+	}
 }
 
 type MigrationResult struct {
@@ -42,54 +85,81 @@ type migrationFile struct {
 }
 
 type migrationRow struct {
-	Version  string
-	Name     string
-	Checksum string
+	Version   string
+	Name      string
+	Checksum  string
+	AppliedAt time.Time
 }
 
-// RunMigrations applies all pending up migrations while holding a database-wide
-// advisory lock. Each file and its ledger entry commit in the same transaction.
-func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult, error) {
-	databaseURL := strings.TrimSpace(config.DatabaseURL)
-	if err := (PostgresConfig{DatabaseURL: databaseURL}).Validate(); err != nil {
-		return MigrationResult{}, err
-	}
-	migrations, err := loadMigrationFiles(config.Directory)
+// loadValidatedMigrations loads the shipped migration files and checks that
+// they form the contiguous 0001..CurrentSchemaVersion sequence.
+func loadValidatedMigrations(directory string) ([]migrationFile, error) {
+	migrations, err := loadMigrationFiles(directory)
 	if err != nil {
-		return MigrationResult{}, err
+		return nil, err
 	}
 	if len(migrations) == 0 {
-		return MigrationResult{}, fmt.Errorf("no migration files found in %s", strings.TrimSpace(config.Directory))
+		return nil, fmt.Errorf("no migration files found in %s", strings.TrimSpace(directory))
 	}
 	for index, migration := range migrations {
 		expected := fmt.Sprintf("%04d", index+1)
 		if migration.Version != expected {
-			return MigrationResult{}, fmt.Errorf("migration sequence is not contiguous: expected %s, found %s", expected, migration.Version)
+			return nil, fmt.Errorf("migration sequence is not contiguous: expected %s, found %s", expected, migration.Version)
 		}
 	}
 	if migrations[len(migrations)-1].Version != CurrentSchemaVersion {
-		return MigrationResult{}, fmt.Errorf("migration set ends at %s, expected %s", migrations[len(migrations)-1].Version, CurrentSchemaVersion)
+		return nil, fmt.Errorf("migration set ends at %s, expected %s", migrations[len(migrations)-1].Version, CurrentSchemaVersion)
 	}
+	return migrations, nil
+}
 
+// openMigrationConnection opens a single pinned connection, pings it and
+// checks the server version. The caller closes both returned handles.
+func openMigrationConnection(ctx context.Context, databaseURL string) (*sql.DB, *sql.Conn, error) {
 	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
-		return MigrationResult{}, fmt.Errorf("open postgres connection: %w", err)
+		return nil, nil, fmt.Errorf("open postgres connection: %w", err)
 	}
-	defer db.Close()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
 	connection, err := db.Conn(ctx)
 	if err != nil {
-		return MigrationResult{}, fmt.Errorf("acquire migration connection: %w", err)
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("acquire migration connection: %w", err)
 	}
-	defer connection.Close()
 	if err := connection.PingContext(ctx); err != nil {
-		return MigrationResult{}, fmt.Errorf("ping postgres: %w", err)
+		_ = connection.Close()
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	if err := ensureMinimumPostgresServerVersion(ctx, connection); err != nil {
+		_ = connection.Close()
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return db, connection, nil
+}
+
+// RunMigrations applies all pending up migrations while holding a database-wide
+// advisory lock. Each file and its ledger entry commit in the same transaction.
+func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult, error) {
+	config = config.withDefaults()
+	databaseURL := strings.TrimSpace(config.DatabaseURL)
+	if err := (PostgresConfig{DatabaseURL: databaseURL}).Validate(); err != nil {
 		return MigrationResult{}, err
 	}
+	migrations, err := loadValidatedMigrations(config.Directory)
+	if err != nil {
+		return MigrationResult{}, err
+	}
+
+	db, connection, err := openMigrationConnection(ctx, databaseURL)
+	if err != nil {
+		return MigrationResult{}, err
+	}
+	defer func() { _ = db.Close() }()
+	defer func() { _ = connection.Close() }()
 	if _, err := connection.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationAdvisoryKey); err != nil {
 		return MigrationResult{}, fmt.Errorf("acquire migration lock: %w", err)
 	}
@@ -99,29 +169,31 @@ func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult
 		_, _ = connection.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, migrationAdvisoryKey)
 	}()
 
+	// Resolve the target schema once and address the ledger through it, so the
+	// ledger, the catalog checks (all scoped to current_schema()) and the
+	// unqualified CREATE/ALTER statements inside the migration files agree on
+	// one schema even when search_path lists several.
+	schema, err := resolveCurrentSchema(ctx, connection)
+	if err != nil {
+		return MigrationResult{}, err
+	}
+	ledger := newSchemaLedger(schema)
 	ledgerExisted, err := tableExistsContext(ctx, connection, "schema_migrations")
 	if err != nil {
 		return MigrationResult{}, err
 	}
 	if !ledgerExisted {
-		if _, err := connection.ExecContext(ctx, `
-			CREATE TABLE schema_migrations (
-				version TEXT PRIMARY KEY,
-				name TEXT NOT NULL,
-				sha256 TEXT NOT NULL,
-				applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-			)
-		`); err != nil {
+		if _, err := connection.ExecContext(ctx, ledger.createSQL()); err != nil {
 			return MigrationResult{}, fmt.Errorf("create schema migration ledger: %w", err)
 		}
 	}
 
-	applied, err := readAppliedMigrations(ctx, connection)
+	applied, err := readAppliedMigrations(ctx, connection, ledger)
 	if err != nil {
 		return MigrationResult{}, err
 	}
 	if len(applied) == 0 {
-		adopted, err := adoptLegacySchema(ctx, connection, migrations)
+		adopted, err := adoptLegacySchema(ctx, connection, migrations, ledger)
 		if err != nil {
 			return MigrationResult{}, err
 		}
@@ -136,7 +208,8 @@ func RunMigrations(ctx context.Context, config MigrationConfig) (MigrationResult
 		if _, ok := applied[migration.Version]; ok {
 			continue
 		}
-		if err := applyMigration(ctx, connection, migration); err != nil {
+		config.report("applying migration %s", migration.Name)
+		if err := applyMigrationWithRetry(ctx, connection, migration, config, ledger); err != nil {
 			return MigrationResult{}, err
 		}
 		result.Applied = append(result.Applied, migration.Name)
@@ -171,7 +244,7 @@ func loadMigrationFiles(directory string) ([]migrationFile, error) {
 			return nil, fmt.Errorf("duplicate migration version %s in %s and %s", matches[1], previous, entry.Name())
 		}
 		path := filepath.Join(directory, entry.Name())
-		body, err := os.ReadFile(path)
+		body, err := os.ReadFile(path) //nolint:gosec // migrations are read from the operator-configured directory by design
 		if err != nil {
 			return nil, fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
@@ -195,23 +268,65 @@ func loadMigrationFiles(directory string) ([]migrationFile, error) {
 	return migrations, nil
 }
 
+// resolveCurrentSchema returns the schema PostgreSQL would create unqualified
+// objects in for this session: the first existing entry of search_path.
+func resolveCurrentSchema(ctx context.Context, queryer queryRower) (string, error) {
+	var schema sql.NullString
+	if err := queryer.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		return "", fmt.Errorf("resolve current schema: %w", err)
+	}
+	if !schema.Valid || strings.TrimSpace(schema.String) == "" {
+		return "", fmt.Errorf("database search_path does not name an existing schema; create the schema or fix search_path in the connection string")
+	}
+	return schema.String, nil
+}
+
+// schemaLedger renders the schema-qualified statements for schema_migrations.
+// The schema name is the server's own current_schema() quoted with
+// pq.QuoteIdentifier, never operator-supplied text, so a foreign
+// schema_migrations table later on the search_path is never read or written.
+type schemaLedger struct {
+	table string
+}
+
+func newSchemaLedger(schema string) schemaLedger {
+	return schemaLedger{table: pq.QuoteIdentifier(schema) + ".schema_migrations"}
+}
+
+func (l schemaLedger) createSQL() string {
+	return "CREATE TABLE " + l.table + ` (
+		version TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		sha256 TEXT NOT NULL,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`
+}
+
+func (l schemaLedger) readSQL() string {
+	return "SELECT version, name, sha256, applied_at FROM " + l.table + " ORDER BY version"
+}
+
+func (l schemaLedger) versionsSQL() string {
+	return "SELECT version FROM " + l.table + " ORDER BY version"
+}
+
+func (l schemaLedger) insertSQL() string {
+	return "INSERT INTO " + l.table + " (version, name, sha256) VALUES ($1, $2, $3)"
+}
+
 func readAppliedMigrations(ctx context.Context, queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}) (map[string]migrationRow, error) {
-	rows, err := queryer.QueryContext(ctx, `
-		SELECT version, name, sha256
-		FROM schema_migrations
-		ORDER BY version
-	`)
+}, ledger schemaLedger) (map[string]migrationRow, error) {
+	rows, err := queryer.QueryContext(ctx, ledger.readSQL())
 	if err != nil {
 		return nil, fmt.Errorf("read schema migration ledger: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	applied := make(map[string]migrationRow)
 	for rows.Next() {
 		var item migrationRow
-		if err := rows.Scan(&item.Version, &item.Name, &item.Checksum); err != nil {
+		if err := rows.Scan(&item.Version, &item.Name, &item.Checksum, &item.AppliedAt); err != nil {
 			return nil, fmt.Errorf("scan schema migration ledger: %w", err)
 		}
 		applied[item.Version] = item
@@ -254,7 +369,53 @@ func validateAppliedMigrations(migrations []migrationFile, applied map[string]mi
 	return nil
 }
 
-func applyMigration(ctx context.Context, connection *sql.Conn, migration migrationFile) error {
+// lockTimeoutStatement renders SET LOCAL lock_timeout for one transaction. SET
+// does not accept bind parameters, so the value is an integer millisecond
+// count formatted by this function, never operator-supplied text.
+func lockTimeoutStatement(timeout time.Duration) string {
+	milliseconds := timeout.Milliseconds()
+	if milliseconds < 1 {
+		milliseconds = 1
+	}
+	return fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", milliseconds)
+}
+
+// isLockNotAvailable reports whether err is PostgreSQL's lock_timeout expiry
+// (SQLSTATE 55P03), the only failure a migration attempt is retried on.
+func isLockNotAvailable(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == lockNotAvailableSQLState
+}
+
+// applyMigrationWithRetry applies one migration and retries a bounded number of
+// times when the only failure was a lock timeout: the per-migration
+// transaction rolled back cleanly, so the next attempt starts from the same
+// state. Any other error, an exhausted attempt budget or a finished context
+// is reported to the operator with the quiescing advice.
+func applyMigrationWithRetry(ctx context.Context, connection *sql.Conn, migration migrationFile, config MigrationConfig, ledger schemaLedger) error {
+	for attempt := 1; ; attempt++ {
+		err := applyMigration(ctx, connection, migration, config.LockTimeout, ledger)
+		if err == nil {
+			return nil
+		}
+		if !isLockNotAvailable(err) {
+			return err
+		}
+		if attempt >= config.LockAttempts || ctx.Err() != nil {
+			return fmt.Errorf("%w; another session holds a conflicting lock on a table this migration alters (for example an idle-in-transaction API replica or a long-running query): stop or quiesce database clients and rerun, or raise the lock timeout (waited %s on each of %d attempt(s))", err, config.LockTimeout, attempt)
+		}
+		config.report("migration %s is waiting for a lock held by another session (attempt %d of %d timed out after %s); retrying in %s", migration.Name, attempt, config.LockAttempts, config.LockTimeout, migrationLockRetryDelay)
+		timer := time.NewTimer(migrationLockRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("apply migration %s: %w", migration.Name, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func applyMigration(ctx context.Context, connection *sql.Conn, migration migrationFile, lockTimeout time.Duration, ledger schemaLedger) error {
 	tx, err := connection.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %s: %w", migration.Name, err)
@@ -262,13 +423,16 @@ func applyMigration(ctx context.Context, connection *sql.Conn, migration migrati
 	defer func() {
 		_ = tx.Rollback()
 	}()
+	// Bound only lock waits. A statement_timeout would also cancel 0004's
+	// legitimate long-running repair UPDATEs and VALIDATE CONSTRAINT steps
+	// on populated databases, so none is set here.
+	if _, err := tx.ExecContext(ctx, lockTimeoutStatement(lockTimeout)); err != nil {
+		return fmt.Errorf("set lock timeout for migration %s: %w", migration.Name, err)
+	}
 	if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
 		return fmt.Errorf("apply migration %s: %w", migration.Name, err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_migrations (version, name, sha256)
-		VALUES ($1, $2, $3)
-	`, migration.Version, migration.Name, migration.Checksum); err != nil {
+	if _, err := tx.ExecContext(ctx, ledger.insertSQL(), migration.Version, migration.Name, migration.Checksum); err != nil {
 		return fmt.Errorf("record migration %s: %w", migration.Name, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -277,7 +441,7 @@ func applyMigration(ctx context.Context, connection *sql.Conn, migration migrati
 	return nil
 }
 
-func adoptLegacySchema(ctx context.Context, connection *sql.Conn, migrations []migrationFile) (map[string]migrationRow, error) {
+func adoptLegacySchema(ctx context.Context, connection *sql.Conn, migrations []migrationFile, ledger schemaLedger) (map[string]migrationRow, error) {
 	state, err := inspectLegacySchema(ctx, connection)
 	if err != nil {
 		return nil, err
@@ -302,10 +466,7 @@ func adoptLegacySchema(ctx context.Context, connection *sql.Conn, migrations []m
 		if !ok {
 			return nil, fmt.Errorf("legacy schema matches migration %s, but its file is missing", version)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO schema_migrations (version, name, sha256)
-			VALUES ($1, $2, $3)
-		`, migration.Version, migration.Name, migration.Checksum); err != nil {
+		if _, err := tx.ExecContext(ctx, ledger.insertSQL(), migration.Version, migration.Name, migration.Checksum); err != nil {
 			return nil, fmt.Errorf("record adopted migration %s: %w", migration.Name, err)
 		}
 		applied[version] = migrationRow{Version: version, Name: migration.Name, Checksum: migration.Checksum}
@@ -579,9 +740,22 @@ func inspectLegacySchema(ctx context.Context, queryer schemaQueryer) ([]string, 
 	return versions, nil
 }
 
+// tableExistsContext is scoped to current_schema() like every other catalog
+// check here; to_regclass() resolved through the whole search_path and could
+// find a table in a later schema that the column and constraint checks then
+// could not see.
 func tableExistsContext(ctx context.Context, queryer queryRower, table string) (bool, error) {
 	var exists bool
-	if err := queryer.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil {
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_class AS table_row
+			JOIN pg_namespace AS namespace_row ON namespace_row.oid = table_row.relnamespace
+			WHERE namespace_row.nspname = current_schema()
+			  AND table_row.relname = $1
+			  AND table_row.relkind IN ('r', 'p')
+		)
+	`, table).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check table %s: %w", table, err)
 	}
 	return exists, nil
@@ -608,9 +782,12 @@ func constraintExistsContext(ctx context.Context, queryer queryRower, table, con
 	if err := queryer.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
-			FROM pg_constraint
-			WHERE conrelid = to_regclass($1)
-			  AND conname = $2
+			FROM pg_constraint AS constraint_row
+			JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid
+			JOIN pg_namespace AS namespace_row ON namespace_row.oid = table_row.relnamespace
+			WHERE namespace_row.nspname = current_schema()
+			  AND table_row.relname = $1
+			  AND constraint_row.conname = $2
 		)
 	`, table, constraint).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check constraint %s on %s: %w", constraint, table, err)
@@ -709,7 +886,7 @@ func requireSchemaColumns(ctx context.Context, queryer schemaQueryer, version, l
 	if err != nil {
 		return fmt.Errorf("inspect database schema columns: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	available := make(map[string]map[string]schemaColumnState)
 	for rows.Next() {
@@ -795,7 +972,7 @@ func requireSchemaConstraints(ctx context.Context, queryer schemaQueryer, versio
 	if err != nil {
 		return fmt.Errorf("inspect database schema constraints: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	available := make(map[string][]schemaConstraintState)
 	for rows.Next() {
@@ -911,7 +1088,7 @@ func requireSchemaIndexes(ctx context.Context, queryer schemaQueryer, version, l
 	if err != nil {
 		return fmt.Errorf("inspect database schema indexes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	available := make(map[string]schemaIndexState)
 	for rows.Next() {
@@ -993,25 +1170,13 @@ func checkSchemaVersion(ctx context.Context, queryer schemaQueryer) error {
 	if !exists {
 		return fmt.Errorf("database schema is not initialized; run layerleak-migrate-up")
 	}
-	rows, err := queryer.QueryContext(ctx, `
-		SELECT version
-		FROM schema_migrations
-		ORDER BY version
-	`)
+	schema, err := resolveCurrentSchema(ctx, queryer)
 	if err != nil {
-		return fmt.Errorf("read database schema version: %w", err)
+		return err
 	}
-	defer rows.Close()
-	versions := make([]string, 0, currentMigrationCount)
-	for rows.Next() {
-		var version string
-		if err := rows.Scan(&version); err != nil {
-			return fmt.Errorf("scan database schema version: %w", err)
-		}
-		versions = append(versions, version)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate database schema versions: %w", err)
+	versions, err := readSchemaLedgerVersions(ctx, queryer, schema)
+	if err != nil {
+		return err
 	}
 	expectedVersions := make([]string, 0, currentMigrationCount)
 	for version := 1; version <= currentMigrationCount; version++ {
@@ -1024,6 +1189,28 @@ func checkSchemaVersion(ctx context.Context, queryer schemaQueryer) error {
 		return fmt.Errorf("database schema ledger says %s, but required schema objects are missing: %w; restore the database or repair the migration", CurrentSchemaVersion, err)
 	}
 	return nil
+}
+
+// readSchemaLedgerVersions returns the versions recorded in the
+// schema_migrations ledger of schema, in the order versionsSQL selects them.
+func readSchemaLedgerVersions(ctx context.Context, queryer schemaQueryer, schema string) ([]string, error) {
+	rows, err := queryer.QueryContext(ctx, newSchemaLedger(schema).versionsSQL())
+	if err != nil {
+		return nil, fmt.Errorf("read database schema version: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	versions := make([]string, 0, currentMigrationCount)
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return nil, fmt.Errorf("scan database schema version: %w", err)
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate database schema versions: %w", err)
+	}
+	return versions, nil
 }
 
 func (s *PostgresStore) Ready(ctx context.Context) error {

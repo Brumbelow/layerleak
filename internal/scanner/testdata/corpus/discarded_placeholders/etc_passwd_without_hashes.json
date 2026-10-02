@@ -1,0 +1,11 @@
+{
+  "name": "etc_passwd_without_hashes",
+  "source_type": "file_final",
+  "path": "etc/passwd",
+  "key": "",
+  "content": "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n",
+  "expected_outcome": "discarded",
+  "expected_detectors": [],
+  "expected_confidence_floor": "",
+  "expected_reason": ""
+}

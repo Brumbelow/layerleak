@@ -1,0 +1,11 @@
+{
+  "name": "file_pgpass_actionable",
+  "source_type": "file_final",
+  "path": "root/.pgpass",
+  "key": "",
+  "content": "# libpq password file\ndb.internal:5432:app:deploy:Sup3rS3cretPw9Xy\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["pgpass_password"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

@@ -5,38 +5,50 @@ on:
     branches: [main]
     paths:
       - "web/**"
+      - "scripts/validate_docs.py"
+      - "scripts/test_validate_docs.py"
+      - "scripts/validate_schemas.py"
+      - "scripts/tests/test_validate_schemas.py"
+      - "internal/cli/testdata/*.json"
+      - "requirements-docs.txt"
+      - "CHANGELOG.md"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
-      - name: Verify Pages artifact
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install pinned documentation validators
+        run: python -m pip install --require-hashes -r requirements-docs.txt
+
+      - name: Validate the site before publishing it
         run: |
-          test -f web/index.html
-          test -f web/docs/index.html
-          test -f web/docs/openapi.yaml
-          test -f web/docs/demo/index.html
-          test -f web/demo/index.html
-          test -f web/assets/styles.css
-          test -f web/assets/site.js
-          test -f web/assets/demo.js
-          test -f web/assets/demo-data.json
-          test -f web/.nojekyll
+          python -m unittest scripts/test_validate_docs.py
+          python scripts/validate_docs.py
+          python -m unittest scripts/tests/test_validate_schemas.py
+          python scripts/validate_schemas.py
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
 
@@ -47,6 +59,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

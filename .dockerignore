@@ -1,3 +1,13 @@
-.git
-.github
-findings
+# Allowlist: the image build needs only the Go module, its sources and the
+# migrations. Everything else (docs, web site, scripts, local .env files,
+# test fixtures) stays out of the build context so it can neither leak into
+# the builder stage nor invalidate the build cache.
+*
+!go.mod
+!go.sum
+!main.go
+!cmd/
+!internal/
+!migrations/
+**/*_test.go
+**/testdata/

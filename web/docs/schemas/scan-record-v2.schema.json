@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brumbelow.github.io/layerleak/docs/schemas/scan-record-v2.schema.json",
+  "title": "Layerleak local scan record (record_schema_version 2)",
+  "description": "The one JSON file the CLI writes per scan under --output-dir / LAYERLEAK_FINDINGS_DIR / ./findings. It embeds the public result, a findings array (public fields plus source_location) and the PostgreSQL persistence outcome. It never carries raw secret values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["record_schema_version", "created_at", "result", "findings", "persistence"],
+  "properties": {
+    "record_schema_version": { "const": 2 },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC time the record was written, RFC 3339 with second precision."
+    },
+    "result": {
+      "$ref": "result-v2.schema.json",
+      "description": "The public result, identical to --format json: scanned_at, duration_ms and scanner (name, version, detector_set_version) date and attribute the scan."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Every finding of the scan, actionable first and then suppressed, in its public form.",
+      "items": { "$ref": "#/$defs/recordFinding" }
+    },
+    "persistence": { "$ref": "#/$defs/persistence" }
+  },
+  "$defs": {
+    "recordFinding": {
+      "allOf": [{ "$ref": "result-v2.schema.json#/$defs/findingProperties" }],
+      "properties": {
+        "source_location": {
+          "type": "string",
+          "description": "Where the detector saw the value, for example env:KEY or file:<path>."
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["disabled", "saved", "failed"],
+          "description": "disabled: no database was configured (or --no-db); saved: the scan_runs row was written; failed: the save failed and the error is a neutral code."
+        },
+        "scan_run_id": { "type": "integer", "minimum": 1 },
+        "error_code": { "type": "string", "enum": ["storage_unavailable"] },
+        "error_message": { "type": "string" }
+      }
+    }
+  }
+}

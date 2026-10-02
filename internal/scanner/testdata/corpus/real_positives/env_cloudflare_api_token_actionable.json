@@ -5,7 +5,7 @@
   "key": "CF_API_TOKEN",
   "content": "CF_API_TOKEN=v1aBcDeFgHiJkLmNoPqRsTuVwXyZ01234Ab56Cd",
   "expected_outcome": "actionable",
-  "expected_detectors": ["cloudflare_api_token", "keyword_entropy"],
+  "expected_detectors": ["cloudflare_api_token"],
   "expected_confidence_floor": "medium",
   "expected_reason": ""
 }

@@ -6,15 +6,19 @@ bad module version cannot be withdrawn reliably.
 
 ## Version policy
 
-The module path is `github.com/brumbelow/layerleak`. Valid release inputs are:
+The module path is `github.com/brumbelow/layerleak/v3`. Valid release inputs
+are:
 
 ```text
-v1.<minor>.<patch>-rc.<positive integer>
-v1.<minor>.<patch>
+v3.<minor>.<patch>-rc.<positive integer>
+v3.<minor>.<patch>
 ```
 
-Numeric identifiers cannot have leading zeroes. The workflow rejects v2 and v3
-tags because those majors require `/v2` or `/v3` in the module path.
+Numeric identifiers cannot have leading zeroes. The workflow rejects v1 and v2
+tags: v1 belongs to the frozen root-path module and v2 was never a valid module
+major. The workflow, `scripts/release-preflight.py` and `go.mod` must agree on
+the major; the preflight refuses a tag whose major does not match the module
+path.
 
 - Use a patch release for backward-compatible fixes.
 - Use a minor release for additive CLI, API, configuration, result-schema, or
@@ -25,9 +29,12 @@ tags because those majors require `/v2` or `/v3` in the module path.
 - Never move or reuse a version tag.
 
 Historical v2.0.0-v2.5.0 GitHub/container releases are preserved but are not
-valid v2 Go module releases. Generate new release notes from v1.0.0, not the
-historical GitHub “latest” release. The stable v1.1.0 release will restore the
-GitHub latest designation to the canonical module line.
+Go module releases, and v1.0.0 remains the only version of the root import
+path. Generated release notes compare against the newest published release by
+default (v2.5.0 for the first v3 release candidate and for v3.0.0, the previous
+candidate for a later candidate); the optional `notes_baseline` input overrides
+that. The stable v3.0.0 release restores the GitHub latest designation to the
+canonical module line.
 
 ## Reviewed release tools
 
@@ -35,25 +42,31 @@ The release workflow provisions the following exact versions on Linux x86_64:
 
 | Tool | Version | Provisioning |
 | --- | --- | --- |
-| GitHub CLI | [2.100.0](https://github.com/cli/cli/releases/tag/v2.100.0) | Official archive and repository-pinned SHA-256 |
-| Cosign | [3.0.2](https://github.com/sigstore/cosign/releases/tag/v3.0.2) | Official binary and repository-pinned SHA-256 |
-| Grype | [0.99.1](https://github.com/anchore/grype/releases/tag/v0.99.1) | Official archive and repository-pinned SHA-256; scan action selects the same version |
-| Docker Buildx | [0.37.0](https://github.com/docker/buildx/releases/tag/v0.37.0) | Explicit version on every pinned setup action |
-| BuildKit | [0.33.0](https://github.com/moby/buildkit/releases/tag/v0.33.0) | Official multi-platform image pinned by digest in `BUILDKIT_IMAGE` |
+| GitHub CLI | [2.102.0](https://github.com/cli/cli/releases/tag/v2.102.0) | Official archive and repository-pinned SHA-256 |
+| Cosign | [3.1.3](https://github.com/sigstore/cosign/releases/tag/v3.1.3) | Official binary and repository-pinned SHA-256 |
+| Grype | [0.119.0](https://github.com/anchore/grype/releases/tag/v0.119.0) | Official archive and repository-pinned SHA-256; the scan job runs this binary directly |
+| Docker Buildx | [0.37.2](https://github.com/docker/buildx/releases/tag/v0.37.2) | Explicit version on every pinned setup action |
+| BuildKit | [0.33.1](https://github.com/moby/buildkit/releases/tag/v0.33.1) | Official multi-platform image pinned by digest in `BUILDKIT_IMAGE` |
+| Go | the `go` directive in `go.mod` | Digest-pinned `actions/setup-go` without a build cache; the `build-cli` job cross-compiles the five CLI archives with it and the manifest records the exact `go env GOVERSION` |
 
 These pins define the reviewed capability set, not an automatic claim that a
 future release is safe. Updates require a reviewed change to the installer,
 workflow, preflight, and this table, followed by capability and regression tests.
 Do not accept arbitrary newer versions or downgrade around a failed check.
 GitHub CLI versions before 2.93.0 are unsuitable for this procedure because of
-the [verification-command credential fix](https://github.com/cli/cli/releases/tag/v2.93.0).
-The preflight accepts exactly 2.100.0, including its release-verification and
-attestation commands and the required `isImmutable` JSON field.
+the [verification-command credential fix](https://github.com/cli/cli/releases/tag/v2.93.0),
+and versions before 2.102.0 weaken the policy this workflow relies on:
+`gh attestation verify --signer-workflow` only prefix-matched the certificate
+identity (GHSA-wjmr-j3rp-mh2g), `--source-ref` compared case-insensitively
+(GHSA-4mq3-hpgx-9cx8), and `gh release download` followed symlinks
+(GHSA-39wj-f2f4-978v). The preflight accepts exactly 2.102.0, including its
+release-verification and attestation commands and the required `isImmutable`
+JSON field.
 
 Install the compatible GitHub CLI without changing the system installation:
 
 ```bash
-release_tools="${HOME}/.local/share/layerleak/release-tools/2026-09-09"
+release_tools="${HOME}/.local/share/layerleak/release-tools/2026-09-30"
 scripts/release-tools.sh "${release_tools}" gh
 export PATH="${release_tools}/bin:${PATH}"
 python3 scripts/release-preflight.py tools
@@ -84,7 +97,7 @@ head and the workflow execution commit. For stable, use the accepted RC's exact
 commit. Prepare the tag locally; only the protected workflow publishes its ref.
 
 ```bash
-version=v1.1.0-rc.1
+version=v3.0.0-rc.1
 source_sha='<full-approved-source-sha>'
 git verify-commit "${source_sha}"
 git tag -s "${version}" "${source_sha}" -m "${version}"
@@ -123,10 +136,17 @@ Complete these settings before the first RC:
 3. Keep the default `GITHUB_TOKEN` permissions read-only. The release workflow
    grants required write scopes only to the jobs that publish evidence or the
    release.
-4. Protect `main` with pull requests, no force pushes or deletion, and all CI,
-   CodeQL, and Codacy checks required.
-5. Add a tag ruleset for `v1.*` that blocks updates, deletion, and non-fast-
-   forward changes with no bypass. Personal repositories cannot select the
+4. Protect `main` with pull requests, no force pushes or deletion, and these
+   status checks required: every `Full verification / ...` job from `CI`
+   (`Go quality and CLI smoke`, `Lint`, `OpenAPI and static documentation`,
+   `Linked dependency licenses`, `PostgreSQL integration and migrations`,
+   `Compose configuration`, `Container smoke (linux/amd64)`,
+   `Container smoke (linux/arm64)`, `Reachable Go vulnerabilities`),
+   `Dependency review`, the four `CodeQL / Analyze (...)` jobs, and
+   `Codacy Security Scan` and `Codacy Coverage`. Re-check this list whenever a
+   job is added or renamed in `.github/workflows/`.
+5. Add a tag ruleset covering `v1.*`, `v2.*` and `v3.*` that blocks updates,
+   deletion, and non-fast-forward changes with no bypass. Personal repositories cannot select the
    GitHub Actions integration as a ruleset bypass actor, so leave initial tag
    creation enabled for the protected workflow. Prepare only the local handoff
    described above; do not push release tags manually.
@@ -150,7 +170,8 @@ attestation immediately after publication.
 The release workflow accepts a version, full source SHA, and source-tag handoff, then:
 
 1. checks the reviewed release tools, validates the source-tag handoff,
-   canonical v1 semver, module identity, `main` ancestry, existing tags,
+   canonical v3 semver, module identity (`github.com/brumbelow/layerleak/v3`),
+   the OpenAPI version, `main` ancestry, existing tags,
    candidate/release immutability, increasing stable versions, and RC/stable
    relationships;
 2. runs the reusable full gate: format, module integrity, vet, normal/race
@@ -176,18 +197,23 @@ The release workflow accepts a version, full source SHA, and source-tag handoff,
 10. verifies the Go proxy, image tags, release immutability and attestation,
     signature, and source-bound image attestations after publication.
 
-RC publication never changes the GHCR `latest` tag or Go module `@latest`.
-Stable publication points `v1.x.y` and `latest` to the accepted RC digest.
+RC publication never changes the GHCR `latest` tag. Go resolves `@latest` on
+the `/v3` path to the highest stable release, or to the newest release
+candidate while no stable v3 release exists, so the first candidate of a new
+major is expected to become `@latest`. Stable publication points `v3.x.y` and
+`latest` to the accepted RC digest.
 
-## Prepare v1.1.0-rc.1
+## Prepare v3.0.0-rc.1
 
 1. Merge the intended release changes to `main`.
-2. Confirm the **CI**, **CodeQL**, **Codacy Security Scan**, and **Pages**
-   workflows are green on the exact commit.
+2. Confirm the **CI**, **CodeQL**, and **Codacy Security Scan** workflows are
+   green on the exact commit, and that the most recent **Pages** deployment
+   succeeded (Pages runs only when `web/`, the validators, or the CHANGELOG
+   change, so most release commits have no Pages run of their own).
 3. Review [CHANGELOG.md](./CHANGELOG.md), [README.md](./README.md), the OpenAPI
    document, migration notes, security policy, and third-party notices. Freeze
-   the changes under the final `v1.1.0` changelog heading and use `1.1.0` as the
-   OpenAPI version before RC. Do not embed an RC number in files that stable
+   the changes under the final `v3.0.0` changelog heading and use `3.0.0` as the
+   OpenAPI version before RC; the validate job refuses a mismatch. Do not embed an RC number in files that stable
    must reuse unchanged.
 4. From a clean checkout, run:
 
@@ -202,6 +228,10 @@ go test -short -race ./... -count=1
 LAYERLEAK_DB_PASSWORD=release-check docker compose --profile tools config --quiet
 ```
 
+   `make verify` runs the same commands plus lint, `govulncheck`, the
+   documentation, schema and SARIF validators and the release-script tests;
+   `make db-test` adds the PostgreSQL suite against a disposable database.
+
 5. Copy the full `main` commit SHA:
 
 ```bash
@@ -212,10 +242,11 @@ git rev-parse origin/main
    SHA. In **Actions → Release → Run workflow**, select `main` and enter:
 
 ```text
-version: v1.1.0-rc.1
+version: v3.0.0-rc.1
 source_sha: <the full main SHA>
 source_tag: <the single-line handoff>
 candidate_version: <leave empty>
+notes_baseline: <leave empty>
 ```
 
 7. Review the workflow summary, Grype reports, image/platform digests,
@@ -231,45 +262,63 @@ clean_root="$(mktemp -d)"
 GOBIN="${clean_root}/bin" \
 GOCACHE="${clean_root}/cache" \
 GOMODCACHE="${clean_root}/mod" \
-go install github.com/brumbelow/layerleak@v1.1.0-rc.1
-"${clean_root}/bin/layerleak" --version
+go install github.com/brumbelow/layerleak/v3@v3.0.0-rc.1
+"${clean_root}/bin/layerleak" version
 "${clean_root}/bin/layerleak" scan --help
 
-go list -m github.com/brumbelow/layerleak@latest
-docker buildx imagetools inspect ghcr.io/brumbelow/layerleak:v1.1.0-rc.1
+go list -m github.com/brumbelow/layerleak/v3@latest
+docker buildx imagetools inspect ghcr.io/brumbelow/layerleak:v3.0.0-rc.1
 ```
 
 Confirm:
 
-- exact RC installation succeeds while `@latest` remains the previous stable;
+- exact RC installation succeeds; `@latest` on the `/v3` path resolves to the
+  candidate while no stable v3 release exists, and to the previous stable
+  otherwise;
 - GHCR contains linux/amd64 and linux/arm64 application manifests plus expected
   attestation manifests;
 - `latest` did not move;
-- migration succeeds twice against a fresh PostgreSQL 16.13 database;
+- migration succeeds twice against a fresh PostgreSQL 16 database;
 - the API refuses startup before migration; after schema 0004 is installed,
   `/health`, `/livez`, and `/readyz` become healthy. Readiness reports later
   database or schema degradation independently of liveness;
+- `layerleak version` prints exactly the RC tag as its version;
 - signatures and GitHub attestations verify against the exact digest and
-  `container-release.yml@refs/heads/main` identity and the RC source SHA;
-- attached SBOM/provenance/checksum files match `release-manifest.json`.
+  `container-release.yml@refs/heads/main` identity and the RC source SHA. The
+  certificate identity is matched exactly, so confirm on the first RC that the
+  repository capitalisation in the identity (`Brumbelow/layerleak`) is what
+  the Fulcio certificate carries before writing it into automation;
+- a real scan succeeds from a host without a proxy and from a host behind an
+  `HTTPS_PROXY`, and a multi-platform image (for example `golang:latest`)
+  completes with the Windows manifests reported as skipped;
+- attached SBOM/provenance/checksum files match `release-manifest.json`;
+- the five CLI archives pass `scripts/release-preflight.py binaries`,
+  `sha256sum --check`, `cosign verify-blob` of the checksums bundle and
+  `gh attestation verify` as shown under [CLI binaries](#cli-binaries), and a
+  downloaded binary reports the RC tag from `layerleak version` on Linux,
+  macOS and Windows;
+- a scratch repository workflow that uses `brumbelow/layerleak@v3.0.0-rc.1`
+  with `format: sarif` verifies the archive, scans a small public image, and
+  uploads the SARIF file to code scanning.
 
 Soak an RC for at least 72 hours. The stable workflow enforces this interval
 from the immutable candidate release's publication timestamp. Treat a
 correctness regression, security regression, migration problem, data-loss risk,
 false clean scan, signature or attestation failure, or unsupported-platform
 failure as release-blocking. Any code or image change requires
-`v1.1.0-rc.2`; do not repair or move RC.1.
+`v3.0.0-rc.2`; do not repair or move RC.1.
 
-## Promote v1.1.0
+## Promote v3.0.0
 
 Once an RC is accepted, prepare a new handoff for the stable version using the
 RC's exact source SHA, then run the same workflow from `main`:
 
 ```text
-version: v1.1.0
+version: v3.0.0
 source_sha: <accepted RC source SHA>
 source_tag: <the stable version handoff>
-candidate_version: v1.1.0-rc.1
+candidate_version: v3.0.0-rc.1
+notes_baseline: <leave empty>
 ```
 
 The workflow verifies the RC release and asset attestations, publication age,
@@ -280,11 +329,11 @@ commit, candidate, and digest in the workflow summary.
 
 After stable publication, verify:
 
-- `go install github.com/brumbelow/layerleak@v1.1.0` succeeds;
-- `go install github.com/brumbelow/layerleak@latest` installs v1.1.0;
-- GHCR `v1.1.0` and `latest` resolve to the accepted RC digest;
+- `go install github.com/brumbelow/layerleak/v3@v3.0.0` succeeds;
+- `go install github.com/brumbelow/layerleak/v3@latest` installs v3.0.0;
+- GHCR `v3.0.0` and `latest` resolve to the accepted RC digest;
 - RC tags remain unchanged;
-- GitHub marks v1.1.0 as latest and the release is immutable;
+- GitHub marks v3.0.0 as latest and the release is immutable;
 - both platforms pass migration/API smoke;
 - Pages serves the matching docs and OpenAPI file.
 
@@ -295,21 +344,27 @@ reports for at least 24 hours after stable publication.
 
 Every release attaches:
 
-- `release-manifest.json` with version, source SHA, workflow run, index digest,
-  and both platform manifest digests;
+- `release-manifest.json` (`schema_version` 2) with version, source SHA,
+  workflow SHA, workflow run, index digest, both platform manifest digests, the
+  `cli` object described under [CLI binaries](#cli-binaries) and the Go, Grype
+  and Cosign versions used;
+- the five CLI archives `layerleak_<version>_<os>_<arch>.tar.gz` /
+  `layerleak_<version>_windows_amd64.zip`, their `layerleak_<version>_checksums.txt`
+  and its Sigstore bundle `layerleak_<version>_checksums.txt.sigstore.json`;
 - per-platform SPDX JSON SBOMs;
 - per-platform SLSA v1 provenance;
 - image index metadata;
 - Critical and fixable-High Grype reports for both platforms;
 - the linked Go dependency license inventory;
-- GitHub attestation bundles;
-- `SHA256SUMS`.
+- GitHub attestation bundles for the image index, both SBOMs and the CLI
+  archives (`attestation-cli-binaries.jsonl`);
+- `SHA256SUMS` over every other asset.
 
 Verify a release digest:
 
 ```bash
 image=ghcr.io/brumbelow/layerleak
-version=v1.1.0
+version=v3.0.0
 digest='sha256:<digest-from-release-manifest>'
 source_sha='<source-sha-from-release-manifest>'
 
@@ -330,6 +385,62 @@ gh release verify "${version}" --repo Brumbelow/layerleak
 sha256sum --check SHA256SUMS
 ```
 
+### CLI binaries
+
+The `build-cli` job cross-compiles the `layerleak` CLI for linux/amd64,
+linux/arm64, darwin/amd64, darwin/arm64 and windows/amd64 from the validated
+source commit (`CGO_ENABLED=0 go build -trimpath -buildvcs=false`, version set
+through `internal/version.Version`, `SOURCE_DATE_EPOCH` from the source commit
+date) and attaches, per release:
+
+- `layerleak_<version>_<os>_<arch>.tar.gz` (`layerleak`, `LICENSE`,
+  `THIRD_PARTY_NOTICES.md`) for Linux and macOS and
+  `layerleak_<version>_windows_amd64.zip` (`layerleak.exe`) for Windows;
+- `layerleak_<version>_checksums.txt`, the `sha256sum` list of those archives,
+  keyless-signed as `layerleak_<version>_checksums.txt.sigstore.json`
+  (`cosign sign-blob --yes --bundle`);
+- `attestation-cli-binaries.jsonl`, the SLSA v1 build-provenance attestation
+  whose subjects are the five archives;
+- in `release-manifest.json` (`schema_version` 2) the `cli` object: checksums
+  name and digest, bundle names, the attestation digest and, per target, the
+  archive and binary digests; `workflow_sha` is the commit of the release
+  workflow run that the Sigstore certificates bind.
+
+Stable promotion does not re-attach the RC archives: it rebuilds from the
+accepted RC commit with the stable version string so `layerleak version`
+reports the downloaded tag, and the job proves reproducibility first by
+compiling every target with the RC's version string and requiring the binary
+digests recorded in the RC manifest byte for byte. A mismatch fails the stable
+release before anything is published. Verify the published archives with:
+
+```bash
+version=v3.0.0
+checksums="layerleak_${version}_checksums.txt"
+gh release download "${version}" --repo Brumbelow/layerleak \
+  --pattern "layerleak_${version}_*" --pattern release-manifest.json
+python3 scripts/release-preflight.py binaries \
+  --version "${version}" --checksums "${checksums}" --dir .
+sha256sum --check "${checksums}"
+
+cosign verify-blob \
+  --bundle "${checksums}.sigstore.json" \
+  --certificate-identity 'https://github.com/Brumbelow/layerleak/.github/workflows/container-release.yml@refs/heads/main' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  "${checksums}"
+
+gh attestation verify "layerleak_${version}_linux_amd64.tar.gz" \
+  --repo Brumbelow/layerleak \
+  --signer-workflow Brumbelow/layerleak/.github/workflows/container-release.yml \
+  --source-ref refs/heads/main \
+  --source-digest "$(jq -r .workflow_sha release-manifest.json)" \
+  --deny-self-hosted-runners
+```
+
+`--source-digest` names `workflow_sha`, not `source_sha`: for a new release
+candidate the two are equal, while a stable release is dispatched from the
+current `main` head and compiles the RC's `source_sha`, which the attestation
+records under `predicate.buildDefinition.resolvedDependencies`.
+
 ## Failure and recovery
 
 - Before the protected publish job, only a run-scoped candidate tag exists. No
@@ -349,6 +460,15 @@ sha256sum --check SHA256SUMS
   version and digest; any artifact change requires a new RC or patch version.
 - Never delete or move a version tag to hide a failed release. Go proxies and
   downstream caches may retain it indefinitely.
+- A draft release left behind by an interrupted `gh release create` blocks
+  every retry because validation requires a published immutable release or
+  none at all. Delete the draft (drafts carry no tag and no immutability) and
+  rerun the workflow.
+- If an RC image was pushed but its attestations were not, the recovery path
+  needs the source-bound attestations to exist. Rerun the same workflow run:
+  the recovery step verifies them from the registry and fails explicitly when
+  they are missing, in which case publish the next RC instead of patching the
+  existing image.
 - Run-scoped `candidate-*` image tags may be cleaned up later according to a
   documented package-retention policy, but digest-referenced release evidence
   and all version tags must remain.

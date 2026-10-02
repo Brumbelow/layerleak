@@ -1,25 +1,7 @@
 package cli
 
-import (
-	"runtime/debug"
-	"strings"
-)
+import "github.com/brumbelow/layerleak/v3/internal/version"
 
 func effectiveVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	return resolveVersion(Version, info, ok)
-}
-
-func resolveVersion(explicit string, info *debug.BuildInfo, infoOK bool) string {
-	trimmed := strings.TrimSpace(explicit)
-	if trimmed != "" && trimmed != "dev" {
-		return trimmed
-	}
-	if infoOK && info != nil {
-		mainVersion := strings.TrimSpace(info.Main.Version)
-		if mainVersion != "" && mainVersion != "(devel)" {
-			return mainVersion
-		}
-	}
-	return "dev"
+	return version.Effective()
 }

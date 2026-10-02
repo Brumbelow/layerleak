@@ -59,7 +59,7 @@ func TestDiscardReason(t *testing.T) {
 		{
 			name:  "url with foobar credentials",
 			value: "https://foobar:secret@host.example/path",
-			want:  ReasonDiscardPlaceholder,
+			want:  ReasonNone,
 		},
 		{
 			name:  "url with foo:bar password",
@@ -69,17 +69,17 @@ func TestDiscardReason(t *testing.T) {
 		{
 			name:  "admin:admin credentials in url",
 			value: "https://admin:admin@db.internal/",
-			want:  ReasonDiscardPlaceholder,
+			want:  ReasonNone,
 		},
 		{
 			name:  "admin:password credentials in url",
 			value: "https://admin:password@db.internal/",
-			want:  ReasonDiscardPlaceholder,
+			want:  ReasonNone,
 		},
 		{
 			name:  "root:password credentials in url",
 			value: "https://root:password@db.internal/",
-			want:  ReasonDiscardPlaceholder,
+			want:  ReasonNone,
 		},
 		{
 			name:  "placeholder prefix in real credential",
@@ -219,21 +219,21 @@ func TestTestPathReason(t *testing.T) {
 		{name: "test segment", filePath: "src/test/config.yaml", want: ReasonTestPath},
 		{name: "tests segment", filePath: "src/tests/config.yaml", want: ReasonTestPath},
 		{name: "__tests__ segment", filePath: "src/__tests__/snap", want: ReasonTestPath},
-		{name: "fixture segment", filePath: "internal/fixture/data", want: ReasonTestPath},
+		{name: "fixture segment", filePath: "internal/fixture/data", want: ReasonNone},
 		{name: "fixtures segment", filePath: "internal/fixtures/data", want: ReasonTestPath},
-		{name: "mock segment", filePath: "internal/mock/server.go", want: ReasonTestPath},
-		{name: "mocks segment", filePath: "internal/mocks/server.go", want: ReasonTestPath},
+		{name: "mock segment", filePath: "internal/mock/server.go", want: ReasonNone},
+		{name: "mocks segment", filePath: "internal/mocks/server.go", want: ReasonNone},
 		{name: "__mocks__ segment", filePath: "src/__mocks__/module.js", want: ReasonTestPath},
-		{name: "spec segment", filePath: "src/spec/fixtures.rb", want: ReasonTestPath},
-		{name: "specs segment", filePath: "src/specs/fixtures.rb", want: ReasonTestPath},
+		{name: "spec segment", filePath: "src/spec/fixtures.rb", want: ReasonNone},
+		{name: "specs segment", filePath: "src/specs/fixtures.rb", want: ReasonNone},
 		{name: "testdata segment", filePath: "internal/scanner/testdata/config.yaml", want: ReasonTestPath},
 		{name: "windows-style backslash path", filePath: "src\\tests\\config.yaml", want: ReasonTestPath},
 		{name: "case-insensitive", filePath: "src/TESTS/config.yaml", want: ReasonTestPath},
 		{name: "test substring not whole segment", filePath: "src/contest/config.yaml", want: ReasonNone},
 		{name: "test segment with trailing space", filePath: "src/tests /config.yaml", want: ReasonNone},
-		{name: "e2e segment", filePath: "src/e2e/config.yaml", want: ReasonTestPath},
-		{name: "acceptance segment", filePath: "src/acceptance/config.yaml", want: ReasonTestPath},
-		{name: "stubs segment", filePath: "src/stubs/server.go", want: ReasonTestPath},
+		{name: "e2e segment", filePath: "src/e2e/config.yaml", want: ReasonNone},
+		{name: "acceptance segment", filePath: "src/acceptance/config.yaml", want: ReasonNone},
+		{name: "stubs segment", filePath: "src/stubs/server.go", want: ReasonNone},
 	}
 
 	for _, tt := range tests {
@@ -256,7 +256,7 @@ func TestExampleFilenameReason(t *testing.T) {
 		{name: "production filename", filePath: ".env", want: ReasonNone},
 		{name: ".env.example", filePath: ".env.example", want: ReasonExamplePath},
 		{name: ".env.sample", filePath: "config/.env.sample", want: ReasonExamplePath},
-		{name: ".env.template", filePath: "config/.env.template", want: ReasonExamplePath},
+		{name: ".env.template", filePath: "config/.env.template", want: ReasonNone},
 		{name: "config.example.yaml", filePath: "etc/config.example.yaml", want: ReasonExamplePath},
 		{name: "case insensitive", filePath: "etc/CONFIG.EXAMPLE.YAML", want: ReasonExamplePath},
 		{name: "windows path", filePath: "etc\\config.example.yaml", want: ReasonExamplePath},

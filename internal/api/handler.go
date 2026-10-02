@@ -11,17 +11,25 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/limits"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanservice"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/version"
 )
 
 const (
@@ -33,18 +41,35 @@ const (
 	defaultQueryTimeout       = 10 * time.Second
 	defaultReadinessTimeout   = 2 * time.Second
 	defaultResponseTimeout    = 30 * time.Second
+	defaultReadinessCacheTTL  = 5 * time.Second
 )
 
 type scanExecutor interface {
 	ScanAndSave(rctx context.Context, request scanservice.Request) (scanservice.Outcome, error)
 }
 
+// Handler is the JSON API. It implements http.Handler through the middleware
+// that wraps its mux, and tracks whether the server is draining.
 type Handler struct {
 	scanner   scanExecutor
 	store     storage.ReadStore
 	options   HandlerOptions
 	scanSlots chan struct{}
 	requestID func() string
+	logger    *slog.Logger
+	draining  atomic.Bool
+	serve     http.Handler
+	auth      *bearerAuth
+	metrics   *metrics
+
+	// readiness caches the last store check for ReadinessCacheTTL. The mutex
+	// also serialises probes so one slow check is not run by every prober.
+	readiness struct {
+		sync.Mutex
+		checkedAt time.Time
+		err       error
+		cached    bool
+	}
 }
 
 type HandlerOptions struct {
@@ -55,16 +80,39 @@ type HandlerOptions struct {
 	ReadinessTimeout   time.Duration
 	ResponseTimeout    time.Duration
 	RequestID          func() string
+	// ReadinessCacheTTL is how long a /readyz result is reused before the
+	// store's schema-contract validation runs again. Zero disables the cache
+	// and a negative value selects the 5 s default.
+	ReadinessCacheTTL time.Duration
+	// Logger receives request and lifecycle logs. Nil uses slog.Default().
+	Logger *slog.Logger
+	// BearerTokenDigests enables bearer-token authentication for every
+	// /api/ path: each entry is the SHA-256 digest of an accepted token.
+	// Empty keeps the API open. A digest of the wrong length is a
+	// programming error and panics at construction.
+	BearerTokenDigests [][]byte
 }
+
+const shuttingDownMessage = "the API is shutting down; retry against another instance"
 
 type readinessChecker interface {
 	Ready(context.Context) error
+}
+
+// healthResponse is the body of /health, /livez and a ready /readyz. Version
+// is the build version so operators can tell which build answers.
+type healthResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
 }
 
 type errorResponse struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	RequestID string `json:"request_id,omitempty"`
+	// LimitKind and Limit accompany scan_limit_exceeded only.
+	LimitKind string `json:"limit_kind,omitempty"`
+	Limit     int64  `json:"limit,omitempty"`
 }
 
 type scanRequest struct {
@@ -79,17 +127,23 @@ type scanResponse struct {
 	Error     *errorResponse  `json:"error,omitempty"`
 }
 
+// List responses carry next_cursor: an opaque keyset position for the page
+// after this one whenever the page was full, "" when the listing is known to
+// be exhausted. It is additive beside limit and offset.
 type repositoriesResponse struct {
 	Repositories []repositoryItem `json:"repositories"`
 	Limit        int              `json:"limit"`
 	Offset       int              `json:"offset"`
+	NextCursor   string           `json:"next_cursor"`
 }
 
 type repositoryScansResponse struct {
+	Registry   string            `json:"registry"`
 	Repository string            `json:"repository"`
 	Scans      []scanSummaryItem `json:"scans"`
 	Limit      int               `json:"limit"`
 	Offset     int               `json:"offset"`
+	NextCursor string            `json:"next_cursor"`
 }
 
 type repositoryItem struct {
@@ -100,11 +154,13 @@ type repositoryItem struct {
 }
 
 type repositoryFindingsResponse struct {
+	Registry    string               `json:"registry"`
 	Repository  string               `json:"repository"`
 	Findings    []findingSummaryItem `json:"findings"`
 	Disposition string               `json:"disposition"`
 	Limit       int                  `json:"limit"`
 	Offset      int                  `json:"offset"`
+	NextCursor  string               `json:"next_cursor"`
 }
 
 type findingSummaryItem struct {
@@ -194,13 +250,24 @@ func NewHandler(scanner scanExecutor, store storage.ReadStore) http.Handler {
 // NewHandlerWithOptions returns the JSON HTTP API with explicit resource and
 // deadline limits. Zero-valued options use the stable API defaults.
 func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) http.Handler {
+	return newHandler(scanner, store, options)
+}
+
+func newHandler(scanner scanExecutor, store storage.ReadStore, options HandlerOptions) *Handler {
 	options = options.withDefaults()
+	auth, err := newBearerAuth(options.BearerTokenDigests)
+	if err != nil {
+		panic("api: " + err.Error())
+	}
 	handler := &Handler{
 		scanner:   scanner,
 		store:     store,
 		options:   options,
 		scanSlots: make(chan struct{}, options.MaxConcurrentScans),
 		requestID: options.RequestID,
+		logger:    options.Logger,
+		auth:      auth,
+		metrics:   newMetrics(version.Effective(), time.Now()),
 	}
 
 	mux := http.NewServeMux()
@@ -221,7 +288,24 @@ func NewHandlerWithOptions(scanner scanExecutor, store storage.ReadStore, option
 	mux.HandleFunc("/api/v1/repositories/", handler.methodNotAllowed(http.MethodGet))
 	mux.HandleFunc("/api/v1/findings/{id}", handler.methodNotAllowed(http.MethodGet))
 	mux.HandleFunc("/", handler.handleNotFound)
-	return handler.middleware(mux)
+	handler.serve = handler.middleware(mux)
+	return handler
+}
+
+// ServeHTTP serves the API through its middleware and mux.
+func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	h.serve.ServeHTTP(writer, request)
+}
+
+// startDraining marks the server as shutting down: /readyz reports 503
+// not_ready, new scans are refused with 503 server_shutting_down, and
+// requests whose contexts the drain cancels report the same code.
+func (h *Handler) startDraining() {
+	h.draining.Store(true)
+}
+
+func (h *Handler) isDraining() bool {
+	return h.draining.Load()
 }
 
 func (options HandlerOptions) withDefaults() HandlerOptions {
@@ -243,35 +327,67 @@ func (options HandlerOptions) withDefaults() HandlerOptions {
 	if options.ResponseTimeout <= 0 {
 		options.ResponseTimeout = defaultResponseTimeout
 	}
+	if options.ReadinessCacheTTL < 0 {
+		options.ReadinessCacheTTL = defaultReadinessCacheTTL
+	}
 	if options.RequestID == nil {
 		options.RequestID = newRequestID
+	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
 	}
 	return options
 }
 
 func (h *Handler) handleHealth(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(writer, http.StatusOK, healthResponse{Status: "ok", Version: version.Effective()})
 }
 
-func (h *Handler) handleReady(writer http.ResponseWriter, request *http.Request) {
+func (h *Handler) handleReady(writer http.ResponseWriter, _ *http.Request) {
+	if h.isDraining() {
+		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "the API is draining before shutdown")
+		return
+	}
 	checker, ok := h.store.(readinessChecker)
 	if !ok || checker == nil {
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database readiness check is not configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), h.options.ReadinessTimeout)
-	defer cancel()
-	if err := checker.Ready(ctx); err != nil {
-		slog.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
+	if err := h.checkReadiness(checker); err != nil {
+		h.logger.Warn("api readiness check failed", "error_type", fmt.Sprintf("%T", err), "request_id", requestIDFromWriter(writer))
 		writeAPIError(writer, http.StatusServiceUnavailable, "not_ready", "database is not ready")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
+	writeJSON(writer, http.StatusOK, healthResponse{Status: "ready", Version: version.Effective()})
+}
+
+// checkReadiness runs the store's readiness check, reusing the previous
+// result while it is younger than ReadinessCacheTTL. The check runs under
+// its own bounded context rather than the prober's so a probe that hangs up
+// cannot poison the shared result.
+func (h *Handler) checkReadiness(checker readinessChecker) error {
+	h.readiness.Lock()
+	defer h.readiness.Unlock()
+	ttl := h.options.ReadinessCacheTTL
+	if ttl > 0 && h.readiness.cached && time.Since(h.readiness.checkedAt) < ttl {
+		return h.readiness.err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), h.options.ReadinessTimeout)
+	defer cancel()
+	err := checker.Ready(ctx)
+	h.readiness.err = err
+	h.readiness.checkedAt = time.Now()
+	h.readiness.cached = ttl > 0
+	return err
 }
 
 func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) {
 	if h.scanner == nil {
 		writeAPIError(writer, http.StatusInternalServerError, "internal_error", "scan service is not configured")
+		return
+	}
+	if h.isDraining() {
+		writeAPIError(writer, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
 		return
 	}
 	if !isJSONContentType(request.Header.Get("Content-Type"), request.ContentLength) {
@@ -297,13 +413,13 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 			writeAPIError(writer, http.StatusRequestEntityTooLarge, "request_too_large", fmt.Sprintf("request body must not exceed %d bytes", h.options.MaxRequestBytes))
 			return
 		}
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", singleJSONObjectMessage)
 		return
 	}
 
 	reference, err := manifest.ParseReference(body.Reference)
 	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", invalidReferenceErrorMessage(body.Reference, err))
 		return
 	}
 	if body.AllTags && !reference.IsRepositoryOnly() {
@@ -320,6 +436,8 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 	select {
 	case h.scanSlots <- struct{}{}:
 		defer func() { <-h.scanSlots }()
+		h.metrics.scanStarted()
+		defer h.metrics.scanFinished()
 	default:
 		writer.Header().Set("Retry-After", "5")
 		writeAPIError(writer, http.StatusTooManyRequests, "scan_capacity_exceeded", "the maximum number of concurrent scans is already running")
@@ -334,6 +452,7 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		AllTags:   body.AllTags,
 		Logger:    slog.Default(),
 	})
+	h.metrics.observeScan(scanOutcomeLabel(outcome.Result.Status, err))
 	resultJSON, marshalErr := marshalScanResult(outcome.Result)
 	if marshalErr != nil {
 		slog.Error("encode scan result", "error_type", fmt.Sprintf("%T", marshalErr), "request_id", requestIDFromWriter(writer))
@@ -341,16 +460,21 @@ func (h *Handler) handleScan(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	if err != nil {
-		statusCode, code, message := classifyScanError(err)
-		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", code, "status", statusCode, "request_id", requestIDFromWriter(writer))
+		failure := classifyScanError(scanCtx, request.Context(), err, h.isDraining())
+		slog.Warn("api scan failed", "error_type", fmt.Sprintf("%T", err), "error_code", failure.code, "status", failure.status, "request_id", requestIDFromWriter(writer))
 		response := scanResponse{
 			ScanRunID: outcome.ScanRunID,
-			Error:     newErrorResponse(writer, code, message),
+			Error:     newErrorResponse(writer, failure.code, failure.message),
 		}
+		response.Error.LimitKind = failure.limitKind
+		response.Error.Limit = failure.limit
 		if hasResult(outcome.Result) {
 			response.Result = resultJSON
 		}
-		writeJSON(writer, statusCode, response)
+		if failure.retryAfter != "" {
+			writer.Header().Set("Retry-After", failure.retryAfter)
+		}
+		writeJSON(writer, failure.status, response)
 		return
 	}
 
@@ -371,10 +495,15 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindRepository, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositories(ctx, limit, offset)
+	items, err := h.store.ListRepositories(ctx, limit, offset, repositoryCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repositories", err)
 		return
@@ -384,6 +513,7 @@ func (h *Handler) handleListRepositories(writer http.ResponseWriter, request *ht
 		Repositories: make([]repositoryItem, 0, len(items)),
 		Limit:        limit,
 		Offset:       offset,
+		NextCursor:   nextRepositoryCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Repositories = append(response.Repositories, repositoryItem{
@@ -430,20 +560,31 @@ func (h *Handler) handleListRepositoryScans(writer http.ResponseWriter, request 
 		return
 	}
 
-	registry := request.URL.Query().Get("registry")
+	registry, err := parseRegistryFilter(request.URL.Query().Get("registry"))
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	cursor, err := parseCursorParam(request.URL.Query(), cursorKindScan, offset)
+	if err != nil {
+		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset)
+	items, err := h.store.ListRepositoryScans(ctx, registry, repository, limit, offset, scanRunCursorFrom(cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository scans", err)
 		return
 	}
 
 	response := repositoryScansResponse{
+		Registry:   registry,
 		Repository: repository,
 		Scans:      make([]scanSummaryItem, 0, len(items)),
 		Limit:      limit,
 		Offset:     offset,
+		NextCursor: nextScanRunCursor(items, limit),
 	}
 	for _, item := range items {
 		response.Scans = append(response.Scans, mapScanRunSummary(item))
@@ -463,38 +604,63 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 
-	disposition, err := parseDispositionFilter(request.URL.Query().Get("disposition"))
+	query, err := parseRepositoryFindingsQuery(request.URL.Query())
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	limit, offset, err := parsePagination(request.URL.Query())
-	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	registry := request.URL.Query().Get("registry")
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset)
+	items, err := h.store.ListRepositoryFindings(ctx, query.registry, repository, query.disposition, query.limit, query.offset, findingCursorFrom(query.cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository findings", err)
 		return
 	}
 
 	response := repositoryFindingsResponse{
+		Registry:    query.registry,
 		Repository:  repository,
 		Findings:    make([]findingSummaryItem, 0, len(items)),
-		Disposition: string(disposition),
-		Limit:       limit,
-		Offset:      offset,
+		Disposition: string(query.disposition),
+		Limit:       query.limit,
+		Offset:      query.offset,
+		NextCursor:  nextFindingCursor(items, query.limit),
 	}
 	for _, item := range items {
 		response.Findings = append(response.Findings, mapFindingSummary(item))
 	}
 
 	writeJSON(writer, http.StatusOK, response)
+}
+
+// repositoryFindingsQuery holds the validated query parameters of
+// GET /api/v1/repositories/{repository}/findings.
+type repositoryFindingsQuery struct {
+	disposition storage.FindingDispositionFilter
+	registry    string
+	limit       int
+	offset      int
+	cursor      *cursorPayload
+}
+
+// parseRepositoryFindingsQuery validates the disposition, pagination,
+// registry and cursor parameters in that order and returns the first error.
+func parseRepositoryFindingsQuery(values url.Values) (repositoryFindingsQuery, error) {
+	var query repositoryFindingsQuery
+	var err error
+	if query.disposition, err = parseDispositionFilter(values.Get("disposition")); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	if query.limit, query.offset, err = parsePagination(values); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	if query.registry, err = parseRegistryFilter(values.Get("registry")); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	if query.cursor, err = parseCursorParam(values, cursorKindFinding, query.offset); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	return query, nil
 }
 
 func (h *Handler) handleGetScan(writer http.ResponseWriter, request *http.Request) {
@@ -592,6 +758,21 @@ func (h *Handler) handleGetFinding(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, response)
 }
 
+// scanOutcomeLabel is the metrics outcome of one scan: the result's own status
+// when the scanner produced one, otherwise failed on error and completed on
+// success. A completed result that could not be stored still counts as a
+// completed scan; the storage_unavailable code is counted separately.
+func scanOutcomeLabel(status jobs.ResultStatus, err error) string {
+	switch status {
+	case jobs.ResultStatusCompleted, jobs.ResultStatusPartial, jobs.ResultStatusFailed:
+		return string(status)
+	}
+	if err != nil {
+		return string(jobs.ResultStatusFailed)
+	}
+	return string(jobs.ResultStatusCompleted)
+}
+
 func mapScanRunSummary(item storage.ScanRunSummary) scanSummaryItem {
 	errorMessage := ""
 	if strings.TrimSpace(item.ErrorMessage) != "" {
@@ -638,22 +819,60 @@ func mapFindingSummary(item storage.FindingSummary) findingSummaryItem {
 	}
 }
 
-func repositoryPathValue(path, suffix string) (string, bool, error) {
-	const prefix = "/api/v1/repositories/"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+const (
+	repositoriesPrefix      = "/api/v1/repositories/"
+	maxRepositoryNameLength = 255
+)
+
+// repositoryNamePattern is the OCI distribution <name> grammar: lowercase
+// path components joined by single separators (. _ __ or one or more -) and
+// slashes. Registry hosts are never part of the path.
+var repositoryNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*$`)
+
+// repositoryPathValue extracts the repository from a subtree path whose final
+// segment is suffix, for example "/scans". requestPath is request.URL.Path,
+// which net/url has already percent-decoded once; it is not decoded again, so
+// "%252F" stays "%2F" and fails validation. ok is false when no repository
+// segment precedes the suffix (a 404); err reports a name outside the
+// distribution grammar (a 400).
+func repositoryPathValue(requestPath, suffix string) (string, bool, error) {
+	rest, hasPrefix := strings.CutPrefix(requestPath, repositoriesPrefix)
+	if !hasPrefix {
 		return "", false, nil
 	}
-
-	rawRepository := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	repository, err := url.PathUnescape(strings.Trim(rawRepository, "/"))
-	if err != nil {
-		return "", false, fmt.Errorf("repository path is invalid")
-	}
-	if strings.TrimSpace(repository) == "" {
+	repository, hasSuffix := strings.CutSuffix(rest, suffix)
+	if !hasSuffix || repository == "" {
 		return "", false, nil
 	}
-
+	if err := validateRepositoryName(repository); err != nil {
+		return "", false, err
+	}
 	return repository, true, nil
+}
+
+func validateRepositoryName(name string) error {
+	if len(name) > maxRepositoryNameLength || !repositoryNamePattern.MatchString(name) {
+		return fmt.Errorf("repository must be a lowercase OCI repository path such as library/alpine")
+	}
+	return nil
+}
+
+// isCleanPath reports whether requestPath is already in the canonical form
+// http.ServeMux would redirect to. Unclean paths (repeated slashes, dot
+// segments) are answered with the JSON 404 before the mux sees them, so the
+// API never emits a text/html redirect.
+func isCleanPath(requestPath string) bool {
+	if requestPath == "" || requestPath[0] != '/' {
+		return false
+	}
+	// Rooting the argument explicitly keeps Clean from ever seeing a
+	// relative path; requestPath already starts with "/", so this is the same
+	// value and only the comparison below decides.
+	cleaned := path.Clean("/" + strings.TrimPrefix(requestPath, "/"))
+	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned == requestPath
 }
 
 func parsePagination(values url.Values) (int, int, error) {
@@ -688,6 +907,101 @@ func parsePagination(values url.Values) (int, int, error) {
 	return limit, offset, nil
 }
 
+var errInvalidRegistryFilter = errors.New("registry must be a hostname or IP address, optionally with a port")
+
+// parseRegistryFilter validates the ?registry= query as host[:port] and
+// returns the normalised value the store filters on: trimmed, lowercased,
+// Docker Hub aliases folded to docker.io, and docker.io when empty. The
+// returned value is echoed in the response.
+func parseRegistryFilter(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "docker.io", "index.docker.io", "registry-1.docker.io":
+		return manifest.DockerHubRegistry, nil
+	}
+	if err := validateRegistryHost(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// validateRegistryHost accepts a lowercase hostname, IPv4 literal or bracketed
+// IPv6 literal, each optionally followed by :port, matching the registry
+// grammar manifest.ParseReference applies to image references.
+func validateRegistryHost(value string) error {
+	if strings.HasPrefix(value, "[") {
+		return validateBracketedRegistryHost(value)
+	}
+	host, err := splitRegistryHostPort(value)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errInvalidRegistryFilter
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	return validateRegistryHostname(host)
+}
+
+// validateBracketedRegistryHost accepts "[IPv6]:port".
+func validateBracketedRegistryHost(value string) error {
+	bracketed, port, err := net.SplitHostPort(value)
+	if err != nil || net.ParseIP(bracketed) == nil || !validRegistryPort(port) {
+		return errInvalidRegistryFilter
+	}
+	return nil
+}
+
+// splitRegistryHostPort strips an optional single ":port" suffix, rejecting a
+// second colon or an out-of-range port.
+func splitRegistryHostPort(value string) (string, error) {
+	colon := strings.LastIndexByte(value, ':')
+	if colon < 0 {
+		return value, nil
+	}
+	if strings.Count(value, ":") != 1 || !validRegistryPort(value[colon+1:]) {
+		return "", errInvalidRegistryFilter
+	}
+	return value[:colon], nil
+}
+
+// validateRegistryHostname accepts a lowercase DNS name of at most 253 bytes
+// whose labels are 1-63 bytes of [a-z0-9-] not starting or ending with '-'.
+func validateRegistryHostname(host string) error {
+	if len(host) > 253 {
+		return errInvalidRegistryFilter
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !validRegistryHostLabel(label) {
+			return errInvalidRegistryFilter
+		}
+	}
+	return nil
+}
+
+func validRegistryHostLabel(label string) bool {
+	if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+		return false
+	}
+	for _, r := range label {
+		if invalidRegistryHostRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func invalidRegistryHostRune(r rune) bool {
+	return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-'
+}
+
+func validRegistryPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 1 && port <= 65535
+}
+
 func parseDispositionFilter(value string) (storage.FindingDispositionFilter, error) {
 	switch strings.TrimSpace(value) {
 	case "":
@@ -710,6 +1024,30 @@ func invalidBodyMessage(err error) string {
 	return "request body must be valid JSON"
 }
 
+// singleJSONObjectMessage is the fixed 400 message for any data after the
+// request object, whether another JSON value or bytes the decoder rejects; the
+// decoder's own text quotes request bytes and is never returned.
+const singleJSONObjectMessage = "request body must contain a single JSON object"
+
+// invalidReferenceMessage is the fixed 400 message for a reference the parser
+// rejects. The parser's error text can quote the submitted reference and the
+// upstream distribution grammar error, so it is never returned to a client.
+const invalidReferenceMessage = "reference is not a valid image reference"
+
+// invalidReferenceErrorMessage maps a ParseReference failure to a fixed
+// message: a missing reference and a local source scheme keep their own fixed
+// text, every other failure is invalidReferenceMessage.
+func invalidReferenceErrorMessage(raw string, err error) string {
+	switch {
+	case raw == "":
+		return "image reference is required"
+	case errors.Is(err, manifest.ErrLocalSourceNotSupported):
+		return manifest.ErrLocalSourceNotSupported.Error()
+	default:
+		return invalidReferenceMessage
+	}
+}
+
 func requireSingleJSONValue(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); err == io.EOF {
@@ -717,33 +1055,101 @@ func requireSingleJSONValue(decoder *json.Decoder) error {
 	} else if err != nil {
 		return err
 	}
-	return fmt.Errorf("request body must contain a single JSON object")
+	return errors.New(singleJSONObjectMessage)
 }
 
-func classifyScanError(err error) (int, string, string) {
+// scanFailure is the HTTP mapping of a failed POST /api/v1/scans. Messages are
+// fixed strings: the underlying error chain carries registry hosts, redirect
+// targets and reference strings that must never reach a client.
+type scanFailure struct {
+	status     int
+	code       string
+	message    string
+	retryAfter string
+	limitKind  string
+	limit      int64
+}
+
+// registryRateLimitRetryAfter is the Retry-After hint for 503
+// registry_rate_limited. The registry client has already retried with the
+// upstream Retry-After before giving up, so a longer back-off is suggested.
+const registryRateLimitRetryAfter = "60"
+
+// classifyScanError maps a scan failure to a response. Only the API's own scan
+// deadline (scanCtx) produces 504 and only an ended request context produces
+// 408 (or 503 server_shutting_down when the drain cancelled it): a context
+// error nested inside the scan (the registry client bounds each request with
+// its own timeout) is an upstream failure and reports 502.
+func classifyScanError(scanCtx, requestCtx context.Context, err error, draining bool) scanFailure {
 	switch {
 	case scanservice.IsSaveError(err):
-		return http.StatusServiceUnavailable, "storage_unavailable", "the scan result could not be stored"
+		return scanFailure{status: http.StatusServiceUnavailable, code: "storage_unavailable", message: "the scan result could not be stored"}
+	case requestCtx.Err() != nil && draining:
+		return scanFailure{status: http.StatusServiceUnavailable, code: "server_shutting_down", message: shuttingDownMessage}
+	case requestCtx.Err() != nil:
+		return scanFailure{status: http.StatusRequestTimeout, code: "scan_canceled", message: "the request was canceled before the scan completed"}
+	case errors.Is(scanCtx.Err(), context.DeadlineExceeded):
+		return scanFailure{status: http.StatusGatewayTimeout, code: "scan_timeout", message: "the scan exceeded its configured deadline"}
 	case jobs.IsIncomplete(err):
-		var incomplete *jobs.IncompleteError
-		if errors.As(err, &incomplete) && incomplete != nil {
-			return http.StatusUnprocessableEntity, "scan_incomplete", fmt.Sprintf(
-				"scan coverage is %s: %d manifest(s) completed, %d failed",
-				incomplete.Status,
-				incomplete.CompletedManifestCount,
-				incomplete.FailedManifestCount,
-			)
-		}
-		return http.StatusUnprocessableEntity, "scan_incomplete", "the scan did not cover every selected manifest"
+		return incompleteScanFailure(err)
 	case limits.IsExceeded(err):
-		return http.StatusUnprocessableEntity, "scan_limit_exceeded", err.Error()
-	case errors.Is(err, context.DeadlineExceeded):
-		return http.StatusGatewayTimeout, "scan_timeout", "the scan exceeded its configured deadline"
-	case errors.Is(err, context.Canceled):
-		return http.StatusRequestTimeout, "scan_canceled", "the scan was canceled"
+		return limitExceededFailure(err)
 	default:
-		return http.StatusBadGateway, "scan_failed", "the registry scan could not be completed"
+		return registryScanFailure(err)
 	}
+}
+
+// incompleteScanFailure reports the manifest counts of an incomplete scan as
+// 422 scan_incomplete, or a fixed message when the typed error is absent.
+func incompleteScanFailure(err error) scanFailure {
+	var incomplete *jobs.IncompleteError
+	if errors.As(err, &incomplete) && incomplete != nil {
+		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: fmt.Sprintf(
+			"scan coverage is %s: %d manifest(s) completed, %d failed",
+			incomplete.Status,
+			incomplete.CompletedManifestCount,
+			incomplete.FailedManifestCount,
+		)}
+	}
+	return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: "the scan did not cover every selected manifest"}
+}
+
+// registryScanFailure maps the remaining, registry-side failures; anything
+// unrecognised is a generic 502 scan_failed.
+func registryScanFailure(err error) scanFailure {
+	switch {
+	case registry.IsNotFound(err):
+		return scanFailure{status: http.StatusNotFound, code: "image_not_found", message: "the requested image was not found in the registry"}
+	case registry.IsRateLimited(err):
+		return scanFailure{status: http.StatusServiceUnavailable, code: "registry_rate_limited", message: "the registry rate limited the scan; retry later", retryAfter: registryRateLimitRetryAfter}
+	case registry.IsUnauthorized(err):
+		return scanFailure{status: http.StatusBadGateway, code: "registry_unauthorized", message: "the registry refused access to the requested image"}
+	default:
+		return scanFailure{status: http.StatusBadGateway, code: "scan_failed", message: "the registry scan could not be completed"}
+	}
+}
+
+// limitExceededFailure builds the scan_limit_exceeded response from the
+// typed limit alone. The wrapped chain names blobs, manifests and repositories
+// and changes with internal wording, so it never reaches the client.
+func limitExceededFailure(err error) scanFailure {
+	failure := scanFailure{
+		status:  http.StatusUnprocessableEntity,
+		code:    "scan_limit_exceeded",
+		message: "the scan exceeded a configured resource limit",
+	}
+	exceeded, ok := limits.AsExceeded(err)
+	if !ok || exceeded == nil {
+		return failure
+	}
+	failure.limitKind = string(exceeded.Kind)
+	failure.limit = exceeded.Limit
+	kind := strings.ReplaceAll(strings.TrimSpace(string(exceeded.Kind)), "_", " ")
+	if kind == "" {
+		kind = "resource"
+	}
+	failure.message = fmt.Sprintf("the scan exceeded the configured %s limit of %d", kind, exceeded.Limit)
+	return failure
 }
 
 func hasResult(result jobs.Result) bool {
@@ -778,6 +1184,21 @@ type apiResponseWriter struct {
 	requestID    string
 	writeTimeout time.Duration
 	wroteHeader  bool
+	status       int
+	bytes        int64
+	// errorCode is the code of the last error envelope written, so the
+	// middleware can count scan failures by code without each return path
+	// reporting itself.
+	errorCode string
+}
+
+// statusCode is the status the client saw: 200 when the handler wrote a body
+// without an explicit WriteHeader, or nothing at all.
+func (w *apiResponseWriter) statusCode() int {
+	if !w.wroteHeader {
+		return http.StatusOK
+	}
+	return w.status
 }
 
 func (w *apiResponseWriter) WriteHeader(statusCode int) {
@@ -785,6 +1206,7 @@ func (w *apiResponseWriter) WriteHeader(statusCode int) {
 		return
 	}
 	w.wroteHeader = true
+	w.status = statusCode
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
@@ -792,7 +1214,9 @@ func (w *apiResponseWriter) Write(body []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	return w.ResponseWriter.Write(body)
+	written, err := w.ResponseWriter.Write(body)
+	w.bytes += int64(written)
+	return written, err
 }
 
 func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
@@ -801,6 +1225,7 @@ func (w *apiResponseWriter) Unwrap() http.ResponseWriter {
 
 func (h *Handler) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
 		requestID := validRequestID(request.Header.Get("X-Request-ID"))
 		if requestID == "" {
 			requestID = h.requestID()
@@ -816,14 +1241,68 @@ func (h *Handler) middleware(next http.Handler) http.Handler {
 
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				slog.Error("panic serving api request", "panic_type", fmt.Sprintf("%T", recovered), "request_id", requestID)
+				if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					// net/http's convention: abort the response silently.
+					panic(recovered)
+				}
+				// The stack names frames, never values; the panic value itself may
+				// carry request or upstream detail and is reported by type only.
+				h.logger.Error("panic serving api request",
+					"panic_type", fmt.Sprintf("%T", recovered),
+					"stack", string(debug.Stack()),
+					"request_id", requestID,
+				)
 				if !wrapped.wroteHeader {
 					writeAPIError(wrapped, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 				}
 			}
+			h.logAccess(wrapped, request, started)
+			h.observeRequest(wrapped, request, started)
 		}()
+
+		if h.isDraining() && request.Context().Err() != nil {
+			// The drain cancelled the base context before this request ran.
+			writeAPIError(wrapped, http.StatusServiceUnavailable, "server_shutting_down", shuttingDownMessage)
+			return
+		}
+		if !isCleanPath(request.URL.Path) {
+			h.handleNotFound(wrapped, request)
+			return
+		}
+		if !h.authorize(wrapped, request, requestID) {
+			return
+		}
 		next.ServeHTTP(wrapped, request)
 	})
+}
+
+// logAccess records one Info line per request. It logs the matched route
+// pattern (request.Pattern), never the path or query, because repository
+// names and reference strings belong to the caller, not the log stream.
+func (h *Handler) logAccess(wrapped *apiResponseWriter, request *http.Request, started time.Time) {
+	h.logger.Info("api request",
+		"method", request.Method,
+		"route", request.Pattern,
+		"status", wrapped.statusCode(),
+		"bytes", wrapped.bytes,
+		"duration_ms", float64(time.Since(started).Microseconds())/1000,
+		"request_id", wrapped.requestID,
+		"remote_addr", request.RemoteAddr,
+	)
+}
+
+// scanRoutePattern is the mux pattern whose error envelopes are counted as
+// scan errors by code.
+const scanRoutePattern = "POST /api/v1/scans"
+
+// observeRequest feeds the request counters and the duration histogram. The
+// route label is the mux pattern (or "none"), never the path.
+func (h *Handler) observeRequest(wrapped *apiResponseWriter, request *http.Request, started time.Time) {
+	route := routeLabel(request.Pattern)
+	h.metrics.observeRequest(route, wrapped.statusCode(), time.Since(started))
+	if route == scanRoutePattern && wrapped.errorCode != "" {
+		h.metrics.observeScanError(wrapped.errorCode)
+	}
 }
 
 func (h *Handler) methodNotAllowed(allowed string) http.HandlerFunc {
@@ -843,6 +1322,9 @@ func (h *Handler) writeStorageError(writer http.ResponseWriter, operation string
 }
 
 func newErrorResponse(writer http.ResponseWriter, code, message string) *errorResponse {
+	if wrapped := apiWriterOf(writer); wrapped != nil {
+		wrapped.errorCode = code
+	}
 	return &errorResponse{
 		Code:      code,
 		Message:   message,
@@ -850,17 +1332,26 @@ func newErrorResponse(writer http.ResponseWriter, code, message string) *errorRe
 	}
 }
 
-func requestIDFromWriter(writer http.ResponseWriter) string {
+// apiWriterOf unwraps to the middleware's response writer, or nil when the
+// handler is served without the middleware (direct unit tests).
+func apiWriterOf(writer http.ResponseWriter) *apiResponseWriter {
 	for {
 		wrapped, ok := writer.(*apiResponseWriter)
 		if !ok {
-			return ""
+			return nil
 		}
 		if wrapped.requestID != "" {
-			return wrapped.requestID
+			return wrapped
 		}
 		writer = wrapped.ResponseWriter
 	}
+}
+
+func requestIDFromWriter(writer http.ResponseWriter) string {
+	if wrapped := apiWriterOf(writer); wrapped != nil {
+		return wrapped.requestID
+	}
+	return ""
 }
 
 func validRequestID(value string) string {
@@ -877,7 +1368,9 @@ func validRequestID(value string) string {
 		}
 		return ""
 	}
-	return value
+	// The allow-list above already excludes line breaks; removing them again
+	// keeps that guarantee visible where the value reaches the access log.
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\r", ""), "\n", "")
 }
 
 func newRequestID() string {
@@ -949,17 +1442,30 @@ func sanitizeResultErrors(value any) {
 	}
 }
 
+// diagnosticMessages is the fixed text the API returns for each diagnostic
+// code with its own message; every other code returns "scan step failed".
+// web/docs/openapi.yaml lists each value in the closed Diagnostic.message enum
+// and names each code in its description; TestDiagnosticMessagesMatchOpenAPIEnum
+// keeps the two in lockstep.
+var diagnosticMessages = map[string]string{
+	"files_skipped_oversize":         "one or more files exceeded the configured per-file scan limit",
+	"max_findings_exceeded":          "the scan exceeded the configured findings limit",
+	"max_raw_finding_bytes_exceeded": "the scan exceeded the configured raw finding byte limit",
+	"raw_retention_truncated":        "raw secret retention stopped at the configured byte limit; detection continued without raw values",
+	"platform_skipped":               "a platform manifest was skipped by the default linux-only platform policy",
+	"manifest_skipped":               "an index entry that is not an image manifest was skipped",
+	"manifest_unsupported":           "a selected manifest uses layers that cannot be scanned",
+	"platform_not_found":             "the requested platform was not found in the image",
+	"layer_trailing_data":            "a layer blob carried data after the end of its compressed stream",
+	"unsafe_archive_entries_skipped": "layer entries with unsafe paths or links were skipped",
+	"nested_archive_skipped":         "an archive stored in a layer was not expanded; its own file was still scanned",
+}
+
 func safeDiagnosticMessage(code string) string {
-	switch code {
-	case "files_skipped_oversize":
-		return "one or more files exceeded the configured per-file scan limit"
-	case "max_findings_exceeded":
-		return "the scan exceeded the configured findings limit"
-	case "max_raw_finding_bytes_exceeded":
-		return "the scan exceeded the configured raw finding byte limit"
-	default:
-		return "scan step failed"
+	if message, ok := diagnosticMessages[code]; ok {
+		return message
 	}
+	return "scan step failed"
 }
 
 func setResponseWriteDeadline(writer http.ResponseWriter) {

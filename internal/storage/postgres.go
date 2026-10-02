@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/lib/pq"
 )
 
@@ -48,16 +48,16 @@ func NewPostgresStore(config PostgresConfig) (*PostgresStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	if err := ensureMinimumPostgresServerVersion(ctx, db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if config.RequireSchema {
 		if err := checkSchemaVersion(ctx, db); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}
@@ -149,6 +149,10 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64,
 	if err := validateScanRecord(record); err != nil {
 		return 0, err
 	}
+	record, err := sanitizeScanRecord(record)
+	if err != nil {
+		return 0, err
+	}
 	ctx, cancel := withTimeout(ctx, s.writeTimeout)
 	defer cancel()
 
@@ -187,14 +191,20 @@ func (s *PostgresStore) SaveScan(ctx context.Context, record ScanRecord) (int64,
 		return 0, err
 	}
 
-	for _, item := range findings.DeduplicateDetailed(record.DetailedFindings) {
-		findingID, err := upsertFinding(ctx, tx, item, scannedAt, s.persistRawSecrets)
-		if err != nil {
-			return 0, err
-		}
-		if err := upsertFindingOccurrence(ctx, tx, findingID, item, scannedAt, s.persistRawSecrets); err != nil {
-			return 0, err
-		}
+	// Findings and occurrences are written as multi-row upserts (DB-02): the
+	// serial version issued two round trips per finding and a 10,000-finding
+	// scan on a 2-5 ms link could exceed the write timeout and roll back the
+	// whole scan. The rows stay in DeduplicateDetailed's sorted order so
+	// concurrent writers touching the same manifest take row locks in the
+	// same order, and conflict keys are collapsed first because PostgreSQL
+	// rejects a statement that would update the same row twice.
+	deduplicated := findings.DeduplicateDetailed(record.DetailedFindings)
+	findingIDs, err := upsertFindingsBatch(ctx, tx, collapseFindings(deduplicated, s.persistRawSecrets), scannedAt, s.persistRawSecrets)
+	if err != nil {
+		return 0, err
+	}
+	if err := upsertFindingOccurrencesBatch(ctx, tx, collapseOccurrences(deduplicated, s.persistRawSecrets), findingIDs, scannedAt, s.persistRawSecrets); err != nil {
+		return 0, err
 	}
 
 	scanRunID, err := insertScanRun(ctx, tx, repositoryID, record, scannedAt)
@@ -353,109 +363,6 @@ func replaceTagMappings(ctx context.Context, tx *sql.Tx, repositoryID int64, ite
 		`, repositoryID, item.Name, item.ManifestDigest, item.RootDigest, item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.Status, item.Error, scannedAt); err != nil {
 			return fmt.Errorf("insert tag mapping %s: %w", item.Name, err)
 		}
-	}
-
-	return nil
-}
-
-func upsertFinding(ctx context.Context, tx *sql.Tx, item findings.DetailedFinding, scannedAt time.Time, persistRawSecrets bool) (int64, error) {
-	var findingID int64
-	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO findings (
-			manifest_digest,
-			fingerprint,
-			redacted_value,
-			value,
-			first_seen_at,
-			last_seen_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $5)
-		ON CONFLICT (manifest_digest, fingerprint)
-		DO UPDATE SET
-			redacted_value = CASE
-				WHEN EXCLUDED.last_seen_at >= findings.last_seen_at THEN EXCLUDED.redacted_value
-				ELSE findings.redacted_value
-			END,
-			value = CASE
-				WHEN $6 AND EXCLUDED.last_seen_at >= findings.last_seen_at THEN EXCLUDED.value
-				ELSE findings.value
-			END,
-			first_seen_at = LEAST(findings.first_seen_at, EXCLUDED.first_seen_at),
-			last_seen_at = GREATEST(findings.last_seen_at, EXCLUDED.last_seen_at)
-		RETURNING id
-	`, strings.TrimSpace(item.ManifestDigest), strings.TrimSpace(item.Fingerprint), item.RedactedValue, persistedValue(item, persistRawSecrets), scannedAt, persistRawSecrets).Scan(&findingID); err != nil {
-		return 0, fmt.Errorf("upsert finding %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
-	}
-
-	return findingID, nil
-}
-
-const upsertFindingOccurrenceSQL = `
-	INSERT INTO finding_occurrences (
-		finding_id,
-		detector_name,
-		confidence,
-		disposition,
-		disposition_reason,
-		source_type,
-		platform_os,
-		platform_architecture,
-		platform_variant,
-		file_path,
-		layer_digest,
-		source_key,
-		line_number,
-		context_snippet,
-		raw_snippet,
-		source_location,
-		match_start,
-		match_end,
-		present_in_final_image,
-		first_seen_at,
-		last_seen_at
-	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $20)
-	ON CONFLICT (
-		finding_id,
-		detector_name,
-		confidence,
-		source_type,
-		platform_os,
-		platform_architecture,
-		platform_variant,
-		file_path,
-		layer_digest,
-		source_key,
-		context_snippet,
-		source_location,
-		match_start,
-		match_end,
-		present_in_final_image
-	)
-	DO UPDATE SET
-		disposition = CASE
-			WHEN EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.disposition
-			ELSE finding_occurrences.disposition
-		END,
-		disposition_reason = CASE
-			WHEN EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.disposition_reason
-			ELSE finding_occurrences.disposition_reason
-		END,
-		line_number = CASE
-			WHEN EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.line_number
-			ELSE finding_occurrences.line_number
-		END,
-		raw_snippet = CASE
-			WHEN $21 AND EXCLUDED.last_seen_at >= finding_occurrences.last_seen_at THEN EXCLUDED.raw_snippet
-			ELSE finding_occurrences.raw_snippet
-		END,
-		first_seen_at = LEAST(finding_occurrences.first_seen_at, EXCLUDED.first_seen_at),
-		last_seen_at = GREATEST(finding_occurrences.last_seen_at, EXCLUDED.last_seen_at)
-`
-
-func upsertFindingOccurrence(ctx context.Context, tx *sql.Tx, findingID int64, item findings.DetailedFinding, scannedAt time.Time, persistRawSecrets bool) error {
-	if _, err := tx.ExecContext(ctx, upsertFindingOccurrenceSQL, findingID, item.DetectorName, item.Confidence, string(item.Disposition), string(item.DispositionReason), string(item.SourceType), item.Platform.OS, item.Platform.Architecture, item.Platform.Variant, item.FilePath, item.LayerDigest, item.Key, item.LineNumber, item.ContextSnippet, persistedRawSnippet(item, persistRawSecrets), item.SourceLocation, item.MatchStart, item.MatchEnd, item.PresentInFinalImage, scannedAt, persistRawSecrets); err != nil {
-		return fmt.Errorf("upsert finding occurrence %s/%s: %w", item.ManifestDigest, item.Fingerprint, err)
 	}
 
 	return nil

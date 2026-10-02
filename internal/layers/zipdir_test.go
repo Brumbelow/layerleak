@@ -1,0 +1,129 @@
+package layers
+
+import (
+	"archive/zip"
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"math"
+	"testing"
+)
+
+// A zip64 locator in content too short to hold a zip64 end record must be
+// rejected without slicing out of range.
+func TestZipDirectoryEntriesShortZip64Locator(t *testing.T) {
+	for size := zipDirectoryEndLen + zipDirectory64LocLen; size < zipDirectory64EndLen+zipDirectory64LocLen+zipDirectoryEndLen; size++ {
+		content := make([]byte, size)
+		end := size - zipDirectoryEndLen
+		copy(content[end:], zipDirectoryEndSig)
+		binary.LittleEndian.PutUint16(content[end+zipDirectoryEndRecords:], 0xffff)
+		locator := end - zipDirectory64LocLen
+		copy(content[locator:], zipDirectory64LocSig)
+		binary.LittleEndian.PutUint32(content[locator+16:], 1)
+		binary.LittleEndian.PutUint64(content[locator+8:], 0)
+		// The zip64 record cannot exist in so few bytes, so the 16-bit
+		// declaration (0xffff) is all there is to go on; the point is that
+		// nothing slices out of range.
+		entries, ok := zipDirectoryEntries(content)
+		if !ok || entries != 0xffff {
+			t.Fatalf("size %d: entries = %d, ok = %t", size, entries, ok)
+		}
+	}
+}
+
+// TestZipDirectoryEntriesSearchesLikeArchiveZip pads a zip with trailing
+// bytes around the edge of archive/zip's end-record search window (the last
+// 65*1024 bytes): the pre-check locates the directory exactly when the reader
+// does, so ok is false only for content the reader rejects.
+func TestZipDirectoryEntriesSearchesLikeArchiveZip(t *testing.T) {
+	archive := storedZipArchive(t, 3)
+	for _, padding := range []int{0, 1000, 65535, 65536, 66000, 66538, 66539, 70000} {
+		t.Run(fmt.Sprint(padding), func(t *testing.T) {
+			content := append(bytes.Clone(archive), make([]byte, padding)...)
+			_, readerErr := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+			entries, ok := zipDirectoryEntries(content)
+			if ok != (readerErr == nil) {
+				t.Fatalf("zipDirectoryEntries ok = %t, archive/zip error = %v", ok, readerErr)
+			}
+			if ok && entries != 3 {
+				t.Fatalf("entries = %d, want 3", entries)
+			}
+		})
+	}
+
+	// A comment running past the end of the content is not skipped in favour
+	// of an earlier end record: archive/zip rejects the archive.
+	truncated := bytes.Clone(archive)
+	binary.LittleEndian.PutUint16(truncated[len(truncated)-2:], 10)
+	content := append(bytes.Clone(archive), truncated...)
+	if _, err := zip.NewReader(bytes.NewReader(content), int64(len(content))); err == nil {
+		t.Fatal("archive/zip accepted a truncated comment; fixture needs adjusting")
+	}
+	if _, ok := zipDirectoryEntries(content); ok {
+		t.Fatal("zipDirectoryEntries located an end record archive/zip does not use")
+	}
+}
+
+// TestZipDirectoryEntriesZip64Declarations covers the zip64 end records that
+// settle the result on their own: an entry count beyond the content (capped
+// to an int64) is taken as declared, and a directory larger than the content
+// or an offset that does not fit an int64 is refused as archive/zip refuses it.
+func TestZipDirectoryEntriesZip64Declarations(t *testing.T) {
+	archive := storedZipArchive(t, 3)
+	end := zipDirectoryEnd(t, archive)
+	tests := []struct {
+		name        string
+		field       int
+		value       uint64
+		wantEntries int64
+		wantOK      bool
+	}{
+		{name: "declared entries beyond the content", field: zipDirectory64Records, value: 1 << 20, wantEntries: 1 << 20, wantOK: true},
+		{name: "declared entries beyond int64", field: zipDirectory64Records, value: 1<<63 + 1, wantEntries: math.MaxInt64, wantOK: true},
+		{name: "directory larger than the content", field: zipDirectory64Size, value: 1 << 20, wantEntries: 0, wantOK: false},
+		{name: "offset beyond int64", field: zipDirectory64Offset, value: 1<<63 + 1, wantEntries: 0, wantOK: false},
+		{name: "consistent record counts the directory", field: zipDirectory64Records, value: 3, wantEntries: 3, wantOK: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			content := zip64Archive(t, archive, 3)
+			binary.LittleEndian.PutUint64(content[end+test.field:], test.value)
+			entries, ok := zipDirectoryEntries(content)
+			if entries != test.wantEntries || ok != test.wantOK {
+				t.Fatalf("zipDirectoryEntries() = %d, %t, want %d, %t", entries, ok, test.wantEntries, test.wantOK)
+			}
+		})
+	}
+}
+
+// FuzzZipDirectoryEntries checks that the pre-parse directory count never
+// panics, never reports a negative count, reports ok whenever archive/zip
+// opens the content, and then bounds the number of headers it parsed.
+func FuzzZipDirectoryEntries(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte(zipDirectoryEndSig + "\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00"))
+	short := make([]byte, 48)
+	copy(short[26:], zipDirectoryEndSig)
+	copy(short[6:], zipDirectory64LocSig)
+	f.Add(short)
+	valid := storedZipArchive(f, 3)
+	f.Add(valid)
+	f.Add(append(bytes.Clone(valid), make([]byte, 65600)...))
+	f.Add(zip64Archive(f, valid, 3))
+	f.Fuzz(func(t *testing.T, content []byte) {
+		entries, ok := zipDirectoryEntries(content)
+		if entries < 0 {
+			t.Fatalf("entries = %d", entries)
+		}
+		reader, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+		if err != nil {
+			return
+		}
+		if !ok {
+			t.Fatalf("archive/zip opened %d entries the pre-check could not locate", len(reader.File))
+		}
+		if int64(len(reader.File)) > entries {
+			t.Fatalf("archive/zip parsed %d headers, the pre-check counted %d", len(reader.File), entries)
+		}
+	})
+}

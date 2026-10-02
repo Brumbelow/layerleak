@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact v1 release, for example v1.1.0-rc.1 or v1.1.0
+        description: Exact v3 release, for example v3.0.0-rc.1 or v3.0.0
         required: true
         type: string
       source_sha:
@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ""
+      notes_baseline:
+        description: Existing tag that generated release notes compare against. Empty selects the newest published release (the previous RC for a later RC).
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -32,9 +37,15 @@ concurrency:
 
 env:
   IMAGE_NAME: ghcr.io/brumbelow/layerleak
-  GRYPE_VERSION: v0.99.1
-  BUILDX_VERSION: v0.37.0
-  BUILDKIT_IMAGE: moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+  # The Go module path and its major version. Every version gate below derives from these.
+  MODULE_PATH: github.com/brumbelow/layerleak/v3
+  RELEASE_MAJOR: "3"
+  # Prebuilt CLI targets (GOOS/GOARCH). scripts/release-preflight.py CLI_TARGETS
+  # must list the same pairs; its tests enforce that.
+  CLI_TARGETS: linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+  GRYPE_VERSION: v0.119.0
+  BUILDX_VERSION: v0.37.2
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
 jobs:
   validate:
@@ -52,6 +63,7 @@ jobs:
       release_exists: ${{ steps.validate.outputs.release_exists }}
       source_date: ${{ steps.validate.outputs.source_date }}
       tag_object: ${{ steps.validate.outputs.tag_object }}
+      notes_baseline: ${{ steps.validate.outputs.notes_baseline }}
     steps:
       - name: Checkout release control plane
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -68,7 +80,7 @@ jobs:
           PATH="${tool_bin}:${PATH}" python3 scripts/release-preflight.py tools
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -87,10 +99,19 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
           REQUESTED_CANDIDATE: ${{ inputs.candidate_version }}
+          REQUESTED_NOTES_BASELINE: ${{ inputs.notes_baseline }}
           SOURCE_TAG: ${{ inputs.source_tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          if [[ "${MODULE_PATH}" != *"/v${RELEASE_MAJOR}" ]]; then
+            echo "MODULE_PATH ${MODULE_PATH} does not end in /v${RELEASE_MAJOR}; the workflow constants disagree." >&2
+            exit 1
+          fi
+          version_pattern="^v${RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$"
+          rc_pattern="^v${RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*$"
+          stable_pattern="^v${RELEASE_MAJOR}\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
 
           if [[ "${GITHUB_REPOSITORY,,}" != "brumbelow/layerleak" ]]; then
             echo "Refusing to publish from ${GITHUB_REPOSITORY}." >&2
@@ -100,21 +121,37 @@ jobs:
             echo "The release control workflow must come from main, not ${GITHUB_WORKFLOW_REF}." >&2
             exit 1
           fi
-          if [[ ! "${REQUESTED_VERSION}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
-            echo "Version must be a canonical v1 stable or RC tag." >&2
+          if [[ ! "${REQUESTED_VERSION}" =~ ${version_pattern} ]]; then
+            echo "Version must be a canonical v${RELEASE_MAJOR} stable or RC tag." >&2
             exit 1
           fi
           if [[ ! "${REQUESTED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "source_sha must be a full lowercase commit SHA." >&2
             exit 1
           fi
-          if [[ "$(awk '$1 == "module" { print $2 }' go.mod)" != "github.com/brumbelow/layerleak" ]]; then
-            echo "The root Go module path is not release-compatible." >&2
+          if [[ "$(awk '$1 == "module" { print $2 }' go.mod)" != "${MODULE_PATH}" ]]; then
+            echo "go.mod does not declare ${MODULE_PATH}; the module path must carry the released major." >&2
             exit 1
+          fi
+          base_version="${REQUESTED_VERSION%%-rc.*}"
+          spec_version="$(sed -n 's/^  version: *//p' web/docs/openapi.yaml | head -n 1)"
+          if [[ "${spec_version}" != "${base_version#v}" ]]; then
+            echo "web/docs/openapi.yaml info.version ${spec_version} does not match ${REQUESTED_VERSION}." >&2
+            exit 1
+          fi
+          if [[ -n "${REQUESTED_NOTES_BASELINE}" ]]; then
+            if [[ ! "${REQUESTED_NOTES_BASELINE}" =~ ^v[0-9]+\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+              echo "notes_baseline must be an existing version tag." >&2
+              exit 1
+            fi
           fi
 
           git fetch --quiet origin main --tags
           git cat-file -e "${REQUESTED_SOURCE_SHA}^{commit}"
+          if [[ -n "${REQUESTED_NOTES_BASELINE}" ]] && ! git show-ref --verify --quiet "refs/tags/${REQUESTED_NOTES_BASELINE}"; then
+            echo "notes_baseline ${REQUESTED_NOTES_BASELINE} is not an existing tag." >&2
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "${REQUESTED_SOURCE_SHA}" origin/main; then
             echo "The release commit is not reachable from origin/main." >&2
             exit 1
@@ -177,8 +214,8 @@ jobs:
               echo "Stable release dispatches must run from main, not ${GITHUB_REF}." >&2
               exit 1
             fi
-            if [[ ! "${REQUESTED_CANDIDATE}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.[1-9][0-9]*$ ]]; then
-              echo "A stable release requires an accepted v1 RC tag." >&2
+            if [[ ! "${REQUESTED_CANDIDATE}" =~ ${rc_pattern} ]]; then
+              echo "A stable release requires an accepted v${RELEASE_MAJOR} RC tag." >&2
               exit 1
             fi
             if [[ "${REQUESTED_CANDIDATE%%-rc.*}" != "${REQUESTED_VERSION}" ]]; then
@@ -198,7 +235,7 @@ jobs:
               latest_minor=-1
               latest_patch=-1
               while IFS= read -r stable_tag; do
-                if [[ "${stable_tag}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                if [[ "${stable_tag}" =~ ${stable_pattern} ]]; then
                   minor="${BASH_REMATCH[1]}"
                   patch="${BASH_REMATCH[2]}"
                   if (( minor > latest_minor || (minor == latest_minor && patch > latest_patch) )); then
@@ -207,10 +244,10 @@ jobs:
                     latest_patch="${patch}"
                   fi
                 fi
-              done < <(git tag --list 'v1.*')
+              done < <(git tag --list "v${RELEASE_MAJOR}.*")
 
               if [[ -n "${latest_stable}" && "${latest_stable}" != "${REQUESTED_VERSION}" ]]; then
-                [[ "${REQUESTED_VERSION}" =~ ^v1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+                [[ "${REQUESTED_VERSION}" =~ ${stable_pattern} ]]
                 requested_minor="${BASH_REMATCH[1]}"
                 requested_patch="${BASH_REMATCH[2]}"
                 if (( requested_minor < latest_minor ||
@@ -232,6 +269,7 @@ jobs:
             echo "release_exists=${release_exists}"
             echo "source_date=${source_date}"
             echo "tag_object=${tag_object}"
+            echo "notes_baseline=${REQUESTED_NOTES_BASELINE}"
           } >> "${GITHUB_OUTPUT}"
 
   verify:
@@ -243,6 +281,173 @@ jobs:
     with:
       ref: ${{ needs.validate.outputs.source_sha }}
 
+  build-cli:
+    name: Build CLI archives
+    needs:
+      - validate
+      - verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      go_version: ${{ steps.build.outputs.go_version }}
+    env:
+      GOFLAGS: -mod=readonly
+    steps:
+      # The checkout action fetches the workflow's own trusted commit; the
+      # release commit is selected only after this job has re-verified that it
+      # is reachable from origin/main, so nothing outside main is ever built
+      # here even if the validate job's output were altered.
+      - name: Checkout release workflow commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select the validated release source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The validated source SHA is not a full lowercase commit SHA." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${SOURCE_SHA}" origin/main; then
+            echo "The release commit is not reachable from origin/main." >&2
+            exit 1
+          fi
+          git checkout --quiet --detach "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+
+      - name: Provision reviewed release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_bin="$(scripts/release-tools.sh "${RUNNER_TEMP}/release-tools" gh)"
+          echo "${tool_bin}" >> "${GITHUB_PATH}"
+          PATH="${tool_bin}:${PATH}" python3 scripts/release-preflight.py tools
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Stable promotion rebuilds the CLI from the accepted RC commit with the
+      # stable version string instead of re-attaching the RC archives, so
+      # `layerleak version` reports the tag the user downloaded. The rebuild is
+      # held to the soaked bytes: every target is compiled a second time with
+      # the candidate's version string and must reproduce the binary sha256
+      # recorded in the RC's immutable release manifest exactly. A mismatch
+      # means the toolchain or source no longer reproduce what was soaked, and
+      # the stable release stops here rather than shipping untested code.
+      - name: Build, package and checksum the CLI
+        id: build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          SOURCE_DATE: ${{ needs.validate.outputs.source_date }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          CANDIDATE_VERSION: ${{ needs.validate.outputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          SOURCE_DATE_EPOCH="$(date -u -d "${SOURCE_DATE}" +%s)"
+          export SOURCE_DATE_EPOCH
+          dist="${GITHUB_WORKSPACE}/dist"
+          mkdir -p "${dist}"
+
+          binary_name() {
+            if [[ "$1" == windows ]]; then echo layerleak.exe; else echo layerleak; fi
+          }
+          # build_cli <version> <goos/goarch> <output root>: a static, trimmed,
+          # VCS-free build whose only version input is the -X flag.
+          build_cli() {
+            local version="$1" goos="${2%/*}" goarch="${2#*/}" root="$3"
+            mkdir -p "${root}/${goos}_${goarch}"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X ${MODULE_PATH}/internal/version.Version=${version}" \
+              -o "${root}/${goos}_${goarch}/$(binary_name "${goos}")" .
+          }
+
+          if [[ "${PRERELEASE}" == false ]]; then
+            mkdir -p candidate-release
+            gh release download "${CANDIDATE_VERSION}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern release-manifest.json --dir candidate-release
+            manifest=candidate-release/release-manifest.json
+            gh release verify-asset "${CANDIDATE_VERSION}" "${manifest}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+            test "$(jq -r .schema_version "${manifest}")" = 2
+            test "$(jq -r .version "${manifest}")" = "${CANDIDATE_VERSION}"
+            test "$(jq -r .source_sha "${manifest}")" = "${SOURCE_SHA}"
+            for target in ${CLI_TARGETS}; do
+              goos="${target%/*}"
+              goarch="${target#*/}"
+              build_cli "${CANDIDATE_VERSION}" "${target}" "${RUNNER_TEMP}/candidate-build"
+              actual="$(sha256sum "${RUNNER_TEMP}/candidate-build/${goos}_${goarch}/$(binary_name "${goos}")" | awk '{print $1}')"
+              expected="$(jq -r --arg os "${goos}" --arg arch "${goarch}" \
+                '.cli.binaries[] | select(.os == $os and .arch == $arch) | .binary_sha256' "${manifest}")"
+              if [[ ! "${expected}" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "${CANDIDATE_VERSION} recorded no binary digest for ${target}." >&2
+                exit 1
+              fi
+              if [[ "${actual}" != "${expected}" ]]; then
+                echo "Rebuilding ${target} at ${SOURCE_SHA} does not reproduce the ${CANDIDATE_VERSION} binary (${actual} != ${expected})." >&2
+                exit 1
+              fi
+            done
+            echo "Every CLI target reproduces the ${CANDIDATE_VERSION} binaries byte for byte."
+          fi
+
+          for target in ${CLI_TARGETS}; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            binary="$(binary_name "${goos}")"
+            build_cli "${RELEASE_VERSION}" "${target}" "${RUNNER_TEMP}/build"
+            stage="${RUNNER_TEMP}/stage/${goos}_${goarch}"
+            mkdir -p "${stage}"
+            cp "${RUNNER_TEMP}/build/${goos}_${goarch}/${binary}" LICENSE THIRD_PARTY_NOTICES.md "${stage}/"
+            touch -d "@${SOURCE_DATE_EPOCH}" "${stage}"/*
+            if [[ "${goos}" == windows ]]; then
+              (cd "${stage}" && TZ=UTC zip -X -q "${dist}/layerleak_${RELEASE_VERSION}_${goos}_${goarch}.zip" \
+                "${binary}" LICENSE THIRD_PARTY_NOTICES.md)
+            else
+              tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${SOURCE_DATE_EPOCH}" --format=gnu \
+                -C "${stage}" -cf - "${binary}" LICENSE THIRD_PARTY_NOTICES.md \
+                | gzip -n -9 > "${dist}/layerleak_${RELEASE_VERSION}_${goos}_${goarch}.tar.gz"
+            fi
+          done
+
+          # The runner's own architecture must execute and report the version.
+          native="${RUNNER_TEMP}/build/linux_amd64/layerleak"
+          test "$("${native}" --version)" = "layerleak version ${RELEASE_VERSION}"
+          "${native}" version --format json | jq -e --arg version "${RELEASE_VERSION}" \
+            '.version == $version and .os == "linux" and .arch == "amd64"' >/dev/null
+
+          checksums="layerleak_${RELEASE_VERSION}_checksums.txt"
+          (
+            cd "${dist}"
+            find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\0' \
+              | LC_ALL=C sort -z | xargs -0 sha256sum
+          ) > "${dist}/${checksums}"
+          python3 scripts/release-preflight.py binaries \
+            --version "${RELEASE_VERSION}" --checksums "${dist}/${checksums}" --dir "${dist}"
+          cat "${dist}/${checksums}"
+          echo "go_version=$(go env GOVERSION)" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload CLI archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-cli
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
   stage-image:
     name: Stage immutable image
     needs:
@@ -253,7 +458,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      attestations: read
     outputs:
       digest: ${{ steps.finalize.outputs.digest }}
       reference: ${{ steps.reference.outputs.reference }}
@@ -276,10 +480,10 @@ jobs:
 
       - name: Set up QEMU
         if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false'
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -315,7 +519,7 @@ jobs:
       - name: Build and push RC candidate
         id: build
         if: needs.validate.outputs.prerelease == 'true' && needs.validate.outputs.release_exists == 'false' && steps.recover.outputs.recovered != 'true'
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -331,6 +535,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.title=layerleak
             org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+          build-args: |
+            LAYERLEAK_VERSION=${{ needs.validate.outputs.version }}
           attests: |
             type=provenance,mode=max,version=v1
             type=sbom
@@ -448,6 +654,21 @@ jobs:
           - platform: linux/arm64
             suffix: arm64
     steps:
+      - name: Checkout release control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Provision reviewed release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_bin="$(scripts/release-tools.sh "${RUNNER_TEMP}/release-tools" all)"
+          echo "${tool_bin}" >> "${GITHUB_PATH}"
+          PATH="${tool_bin}:${PATH}" python3 scripts/release-preflight.py tools
+          PATH="${tool_bin}:${PATH}" grype version \
+            | grep -Eq "^Version:[[:space:]]+${GRYPE_VERSION#v}([[:space:]]|$)"
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -458,34 +679,34 @@ jobs:
       - name: Scan all critical vulnerabilities
         id: critical
         continue-on-error: true
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        shell: bash
         env:
+          GRYPE_CHECK_FOR_APP_UPDATE: "false"
           GRYPE_PLATFORM: ${{ matrix.platform }}
-        with:
-          image: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
-          grype-version: ${{ env.GRYPE_VERSION }}
-          severity-cutoff: critical
-          only-fixed: false
-          fail-build: true
-          output-format: sarif
-          output-file: grype-critical-${{ matrix.suffix }}.sarif
-          cache-db: false
+          IMAGE_REFERENCE: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
+          REPORT: grype-critical-${{ matrix.suffix }}.sarif
+        run: |
+          set -euo pipefail
+          status=0
+          grype "registry:${IMAGE_REFERENCE}" --fail-on critical --output sarif --file "${REPORT}" || status=$?
+          test -s "${REPORT}"
+          exit "${status}"
 
       - name: Scan fixable high vulnerabilities
         id: fixable_high
         continue-on-error: true
-        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        shell: bash
         env:
+          GRYPE_CHECK_FOR_APP_UPDATE: "false"
           GRYPE_PLATFORM: ${{ matrix.platform }}
-        with:
-          image: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
-          grype-version: ${{ env.GRYPE_VERSION }}
-          severity-cutoff: high
-          only-fixed: true
-          fail-build: true
-          output-format: json
-          output-file: grype-fixable-high-${{ matrix.suffix }}.json
-          cache-db: false
+          IMAGE_REFERENCE: ${{ env.IMAGE_NAME }}@${{ needs.stage-image.outputs.digest }}
+          REPORT: grype-fixable-high-${{ matrix.suffix }}.json
+        run: |
+          set -euo pipefail
+          status=0
+          grype "registry:${IMAGE_REFERENCE}" --only-fixed --fail-on high --output json --file "${REPORT}" || status=$?
+          test -s "${REPORT}"
+          exit "${status}"
 
       - name: Upload vulnerability reports
         if: always()
@@ -510,9 +731,10 @@ jobs:
           fi
 
   supply-chain:
-    name: Attest and sign image
+    name: Attest and sign image and CLI
     needs:
       - validate
+      - build-cli
       - stage-image
       - scan-image
     runs-on: ubuntu-24.04
@@ -541,7 +763,7 @@ jobs:
           PATH="${tool_bin}:${PATH}" python3 scripts/release-preflight.py tools
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -729,6 +951,145 @@ jobs:
               --predicate-type https://spdx.dev/Document/v2.3 >/dev/null
           done
 
+      - name: Download CLI archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-cli
+          path: cli
+
+      # The archives are attested and the checksums file signed on every path,
+      # including stable promotion: the stable archives are a fresh build whose
+      # reproducibility against the RC was asserted in build-cli.
+      - name: Verify CLI archives and record binary digests
+        id: cli
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          GO_VERSION: ${{ needs.build-cli.outputs.go_version }}
+        run: |
+          set -euo pipefail
+          checksums="layerleak_${RELEASE_VERSION}_checksums.txt"
+          python3 scripts/release-preflight.py binaries \
+            --version "${RELEASE_VERSION}" --checksums "cli/${checksums}" --dir cli
+          test "$(find cli -mindepth 1 -maxdepth 1 | wc -l)" -eq 6
+
+          # One record per archive: the archive digest from the checksums file
+          # and the digest of the binary inside it, which stable promotion uses
+          # to prove its rebuild reproduces the soaked RC binary.
+          : > cli-binaries.jsonl
+          while read -r digest archive; do
+            extract="$(mktemp -d "${RUNNER_TEMP}/cli-extract.XXXXXX")"
+            if [[ "${archive}" == *.zip ]]; then
+              unzip -q "cli/${archive}" -d "${extract}"
+              binary=layerleak.exe
+            else
+              tar -xzf "cli/${archive}" -C "${extract}"
+              binary=layerleak
+            fi
+            test "$(find "${extract}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort | paste -sd' ')" = \
+              "LICENSE THIRD_PARTY_NOTICES.md ${binary}"
+            [[ "${archive}" =~ ^layerleak_.+_([a-z]+)_([a-z0-9]+)\.(tar\.gz|zip)$ ]]
+            jq -n -c \
+              --arg os "${BASH_REMATCH[1]}" --arg arch "${BASH_REMATCH[2]}" \
+              --arg archive "${archive}" --arg archive_sha256 "${digest}" \
+              --arg binary "${binary}" \
+              --arg binary_sha256 "$(sha256sum "${extract}/${binary}" | awk '{print $1}')" \
+              '{os: $os, arch: $arch, archive: $archive, archive_sha256: $archive_sha256, binary: $binary, binary_sha256: $binary_sha256}' \
+              >> cli-binaries.jsonl
+          done < "cli/${checksums}"
+          test "$(wc -l < cli-binaries.jsonl)" -eq 5
+
+          # SLSA v1 provenance for the archives, in the shape GitHub's own
+          # build-provenance attestations use, naming both the workflow commit
+          # (what the Sigstore certificate binds) and the released source commit.
+          jq -n \
+            --arg repository "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --arg workflow_ref "${GITHUB_REF}" \
+            --arg workflow_path ".github/workflows/container-release.yml" \
+            --arg workflow_sha "${GITHUB_SHA}" \
+            --arg event_name "${GITHUB_EVENT_NAME}" \
+            --arg repository_id "${GITHUB_REPOSITORY_ID}" \
+            --arg owner_id "${GITHUB_REPOSITORY_OWNER_ID}" \
+            --arg runner_environment "${RUNNER_ENVIRONMENT}" \
+            --arg invocation "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
+            --arg version "${RELEASE_VERSION}" \
+            --arg source_sha "${SOURCE_SHA}" \
+            --arg go_version "${GO_VERSION}" \
+            --arg targets "${CLI_TARGETS}" \
+            '{
+              buildDefinition: {
+                buildType: "https://actions.github.io/buildtypes/workflow/v1",
+                externalParameters: {
+                  workflow: {ref: $workflow_ref, repository: $repository, path: $workflow_path},
+                  inputs: {version: $version, source_sha: $source_sha}
+                },
+                internalParameters: {
+                  github: {
+                    event_name: $event_name,
+                    repository_id: $repository_id,
+                    repository_owner_id: $owner_id,
+                    runner_environment: $runner_environment
+                  },
+                  layerleak: {
+                    go_version: $go_version,
+                    targets: ($targets | split(" ")),
+                    build: "CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags \"-s -w -X github.com/brumbelow/layerleak/v3/internal/version.Version=<version>\" ."
+                  }
+                },
+                resolvedDependencies: [
+                  {uri: ("git+" + $repository + "@" + $workflow_ref), digest: {gitCommit: $workflow_sha}},
+                  {uri: ("git+" + $repository + "@refs/tags/" + $version), digest: {gitCommit: $source_sha}}
+                ]
+              },
+              runDetails: {
+                builder: {id: ($repository + "/" + $workflow_path + "@" + $workflow_ref)},
+                metadata: {invocationId: $invocation}
+              }
+            }' > cli-provenance-predicate.json
+          echo "checksums=${checksums}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest CLI archive provenance
+        id: cli_attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            cli/*.tar.gz
+            cli/*.zip
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: cli-provenance-predicate.json
+
+      - name: Sign and verify the CLI checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKSUMS: ${{ steps.cli.outputs.checksums }}
+          CLI_ATTESTATION_BUNDLE: ${{ steps.cli_attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container-release.yml@refs/heads/main"
+          cosign sign-blob --yes --bundle "cli/${CHECKSUMS}.sigstore.json" "cli/${CHECKSUMS}"
+          cosign verify-blob \
+            --bundle "cli/${CHECKSUMS}.sigstore.json" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "cli/${CHECKSUMS}" >/dev/null
+
+          test -s "${CLI_ATTESTATION_BUNDLE}"
+          cp "${CLI_ATTESTATION_BUNDLE}" release-assets/attestation-cli-binaries.jsonl
+          cp "cli/${CHECKSUMS}.sigstore.json" "release-assets/${CHECKSUMS}.sigstore.json"
+          # The certificate binds the workflow commit, so --source-digest names
+          # GITHUB_SHA here (equal to the source commit for a new RC).
+          while read -r _ archive; do
+            gh attestation verify "cli/${archive}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --bundle release-assets/attestation-cli-binaries.jsonl \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/container-release.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "${GITHUB_SHA}" \
+              --deny-self-hosted-runners >/dev/null
+          done < "cli/${CHECKSUMS}"
+
       - name: Create release manifest
         shell: bash
         env:
@@ -741,22 +1102,37 @@ jobs:
           INDEX_ATTESTATION_BUNDLE: ${{ steps.index_attestation.outputs.bundle-path }}
           AMD64_ATTESTATION_BUNDLE: ${{ steps.amd64_attestation.outputs.bundle-path }}
           ARM64_ATTESTATION_BUNDLE: ${{ steps.arm64_attestation.outputs.bundle-path }}
+          CHECKSUMS: ${{ steps.cli.outputs.checksums }}
+          CLI_ATTESTATION_ID: ${{ steps.cli_attestation.outputs.attestation-id }}
+          CLI_ATTESTATION_URL: ${{ steps.cli_attestation.outputs.attestation-url }}
+          GO_VERSION: ${{ needs.build-cli.outputs.go_version }}
         run: |
           set -euo pipefail
+          # schema_version 2 adds workflow_sha, the cli object and tools.go to
+          # the schema 1 fields, which keep their names and meaning.
           jq -n \
             --arg version "${RELEASE_VERSION}" \
             --arg source_sha "${SOURCE_SHA}" \
+            --arg workflow_sha "${GITHUB_SHA}" \
             --arg workflow_run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg candidate_version "${CANDIDATE_VERSION}" \
             --arg index_digest "${IMAGE_DIGEST}" \
             --arg amd64_digest "${AMD64_DIGEST}" \
             --arg arm64_digest "${ARM64_DIGEST}" \
+            --arg checksums "${CHECKSUMS}" \
+            --arg checksums_sha256 "$(sha256sum "cli/${CHECKSUMS}" | awk '{print $1}')" \
+            --arg attestation_sha256 "$(sha256sum release-assets/attestation-cli-binaries.jsonl | awk '{print $1}')" \
+            --arg attestation_id "${CLI_ATTESTATION_ID}" \
+            --arg attestation_url "${CLI_ATTESTATION_URL}" \
+            --slurpfile binaries cli-binaries.jsonl \
             --arg grype_version "${GRYPE_VERSION}" \
-            --arg cosign_version "v3.0.2" \
+            --arg cosign_version "$(cosign version 2>&1 | awk '/^GitVersion:/ { print $2 }')" \
+            --arg go_version "${GO_VERSION}" \
             '{
-              schema_version: 1,
+              schema_version: 2,
               version: $version,
               source_sha: $source_sha,
+              workflow_sha: $workflow_sha,
               workflow_run: $workflow_run,
               candidate_version: (if $candidate_version == "" then null else $candidate_version end),
               image: {
@@ -767,11 +1143,26 @@ jobs:
                   "linux/arm64": $arm64_digest
                 }
               },
+              cli: {
+                checksums: $checksums,
+                checksums_sha256: $checksums_sha256,
+                signature_bundle: ($checksums + ".sigstore.json"),
+                attestation: {
+                  bundle: "attestation-cli-binaries.jsonl",
+                  sha256: $attestation_sha256,
+                  predicate_type: "https://slsa.dev/provenance/v1",
+                  id: (if $attestation_id == "" then null else $attestation_id end),
+                  url: (if $attestation_url == "" then null else $attestation_url end)
+                },
+                binaries: $binaries
+              },
               tools: {
+                go: $go_version,
                 grype: $grype_version,
                 cosign: $cosign_version
               }
             }' > release-assets/release-manifest.json
+          jq -e '.cli.binaries | length == 5' release-assets/release-manifest.json >/dev/null
 
           if [[ -n "${INDEX_ATTESTATION_BUNDLE}" ]]; then
             cp "${INDEX_ATTESTATION_BUNDLE}" release-assets/attestation-image-index.jsonl
@@ -817,7 +1208,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -861,7 +1252,7 @@ jobs:
             -e POSTGRES_DB=layerleak \
             -e POSTGRES_USER=layerleak \
             -e POSTGRES_PASSWORD=layerleak-release-test \
-            postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50 >/dev/null
+            postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea >/dev/null
           for attempt in {1..30}; do
             if docker exec "${database}" pg_isready -h 127.0.0.1 -U layerleak -d layerleak >/dev/null 2>&1; then
               break
@@ -885,7 +1276,6 @@ jobs:
             --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
             -p 127.0.0.1:18080:8080 \
             -e LAYERLEAK_DATABASE_URL="${database_url}" \
-            -e LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings \
             "${image}" >/dev/null
           for attempt in {1..60}; do
             if curl --fail --silent http://127.0.0.1:18080/readyz >/dev/null; then
@@ -898,6 +1288,36 @@ jobs:
             sleep 1
           done
           curl --fail --silent http://127.0.0.1:18080/health
+          # The staged image was built with LAYERLEAK_VERSION set to the version
+          # it was first staged under: the candidate's version when a stable
+          # release promotes an accepted RC digest, otherwise this version.
+          test "$(curl --fail --silent http://127.0.0.1:18080/health | jq -r '.version')" = "${CANDIDATE_VERSION:-${RELEASE_VERSION}}"
+
+          # API contract smoke: every response is a JSON envelope, including
+          # 400/404/405, and the read endpoints answer against the real schema.
+          api_check() {
+            local method="$1" path="$2" expected_status="$3" jq_filter="$4"
+            shift 4
+            local response status body
+            response="$(curl --silent --show-error --output - --write-out '\n%{http_code}' \
+              -X "${method}" "$@" "http://127.0.0.1:18080${path}")"
+            status="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            if [[ "${status}" != "${expected_status}" ]] || ! jq -e "${jq_filter}" <<<"${body}" >/dev/null; then
+              echo "unexpected response for ${method} ${path}: status=${status} body=${body}" >&2
+              exit 1
+            fi
+          }
+          api_check POST /api/v1/scans 400 '.error.code == "invalid_request"' \
+            -H 'Content-Type: application/json' --data '{"reference":"https://not-a-reference"}'
+          api_check GET /api/v1/repositories 200 '(.repositories | type) == "array" and (.repositories | length) == 0'
+          api_check GET /api/v1/scans/999999999 404 '.error.code == "not_found"'
+          api_check GET /definitely-not-a-route 404 '.error.code == "not_found"'
+          api_check PUT /api/v1/scans 405 '.error.code == "method_not_allowed"'
+          curl --silent --output /dev/null --dump-header - -X PUT http://127.0.0.1:18080/api/v1/scans \
+            | grep -qi '^Allow: POST'
+          curl --silent --output /dev/null --dump-header - http://127.0.0.1:18080/health \
+            | grep -qi '^X-Content-Type-Options: nosniff'
 
   publish:
     name: Publish protected release
@@ -932,7 +1352,7 @@ jobs:
           PATH="${tool_bin}:${PATH}" python3 scripts/release-preflight.py tools
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -950,6 +1370,28 @@ jobs:
           pattern: release-*
           path: release-assets
           merge-multiple: true
+
+      - name: Verify CLI archives against the release manifest
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          checksums="release-assets/layerleak_${RELEASE_VERSION}_checksums.txt"
+          python3 scripts/release-preflight.py binaries \
+            --version "${RELEASE_VERSION}" --checksums "${checksums}" --dir release-assets
+          test -s "${checksums}.sigstore.json"
+          test -s release-assets/attestation-cli-binaries.jsonl
+          manifest=release-assets/release-manifest.json
+          test "$(jq -r .schema_version "${manifest}")" = 2
+          test "$(jq -r .cli.checksums "${manifest}")" = "layerleak_${RELEASE_VERSION}_checksums.txt"
+          test "$(jq -r .cli.checksums_sha256 "${manifest}")" = "$(sha256sum "${checksums}" | awk '{print $1}')"
+          test "$(jq -r .cli.attestation.sha256 "${manifest}")" = \
+            "$(sha256sum release-assets/attestation-cli-binaries.jsonl | awk '{print $1}')"
+          # Every archive digest the manifest records must be the one in the signed checksums file.
+          while read -r digest archive; do
+            test "$(jq -r --arg archive "${archive}" '.cli.binaries[] | select(.archive == $archive) | .archive_sha256' "${manifest}")" = "${digest}"
+          done < "${checksums}"
 
       - name: Create checksums
         shell: bash
@@ -1023,6 +1465,7 @@ jobs:
           RELEASE_EXISTS: ${{ needs.validate.outputs.release_exists }}
           SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
           IMAGE_DIGEST: ${{ needs.stage-image.outputs.digest }}
+          NOTES_BASELINE: ${{ needs.validate.outputs.notes_baseline }}
         run: |
           set -euo pipefail
           if [[ "${RELEASE_EXISTS}" == true ]]; then
@@ -1034,17 +1477,27 @@ jobs:
             exit 0
           fi
 
+          # Generated notes compare against the newest published release unless an
+          # explicit baseline was supplied: the previous stable for a stable release,
+          # the previous RC (or the previous stable) for a release candidate.
+          notes_baseline="${NOTES_BASELINE}"
+          if [[ -z "${notes_baseline}" ]]; then
+            if [[ "${PRERELEASE}" == true ]]; then
+              notes_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+                --jq '[.[] | select(.draft == false and .tag_name != "'"${RELEASE_VERSION}"'")] | sort_by(.published_at) | last | .tag_name // empty')"
+            else
+              notes_baseline="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name // empty')"
+            fi
+          fi
+          notes_args=(-f tag_name="${RELEASE_VERSION}")
+          if [[ -n "${notes_baseline}" ]]; then
+            notes_args+=(-f previous_tag_name="${notes_baseline}")
+          fi
           notes_file="${RUNNER_TEMP}/release-notes.md"
           generated_notes="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="${RELEASE_VERSION}" \
-            -f previous_tag_name=v1.0.0 \
-            --jq .body)"
+            "${notes_args[@]}" --jq .body)"
           {
-            echo "Canonical Go module releases continue on v1.x."
-            echo
-            echo "Historical v2.0.0-v2.5.0 GitHub and container releases did not use a /v2 module path and are not installable as v2 Go modules. This release contains and supersedes those changes; the v1 version is not a source downgrade."
-            echo
-            echo "The attached release manifest records the source commit, multi-platform image digests, scanner versions, SBOMs, and provenance."
+            cat .github/release-notes-preamble.md
             echo
             printf '%s\n' "${generated_notes}"
           } > "${notes_file}"
@@ -1109,16 +1562,20 @@ jobs:
       - stage-image
       - publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # proxy.golang.org may serve a cached negative answer for up to 30 minutes.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
       attestations: read
     steps:
-      - name: Checkout released source
+      # Verification needs only the reviewed release scripts, so this job runs
+      # them from the workflow's own trusted commit, like supply-chain and
+      # registry-smoke, never from the release source.
+      - name: Checkout release workflow commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.validate.outputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Provision reviewed release tools
@@ -1136,7 +1593,7 @@ jobs:
           cache: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
         with:
           version: ${{ env.BUILDX_VERSION }}
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -1162,7 +1619,7 @@ jobs:
           install_bin="${RUNNER_TEMP}/public-install"
           mkdir -p "${install_bin}"
           for attempt in {1..30}; do
-            if GOBIN="${install_bin}" GOPROXY=https://proxy.golang.org go install "github.com/brumbelow/layerleak@${RELEASE_VERSION}"; then
+            if GOBIN="${install_bin}" GOPROXY=https://proxy.golang.org go install "${MODULE_PATH}@${RELEASE_VERSION}"; then
               break
             fi
             if [[ "${attempt}" -eq 30 ]]; then
@@ -1171,23 +1628,30 @@ jobs:
             fi
             sleep 10
           done
-          "${install_bin}/layerleak" --version | grep -F "${RELEASE_VERSION}"
-          if [[ "${PRERELEASE}" == true ]]; then
-            latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' github.com/brumbelow/layerleak@latest)"
-            test "${latest_module}" != "${RELEASE_VERSION}"
+          test "$("${install_bin}/layerleak" --version)" = "layerleak version ${RELEASE_VERSION}"
+
+          # Go resolves @latest to the highest release version, or to the highest
+          # prerelease while the module has no release version at all. The first RC
+          # of a new major is therefore expected to be @latest; once a stable
+          # release exists an RC must never become @latest.
+          stable_versions="$(GOPROXY=https://proxy.golang.org go list -m -versions "${MODULE_PATH}" 2>/dev/null | tr ' ' '\n' | grep -E "^v${RELEASE_MAJOR}\.[0-9]+\.[0-9]+$" || true)"
+          highest_stable="$(printf '%s\n' "${stable_versions}" | sort -V | tail -n 1)"
+          if [[ "${PRERELEASE}" == true && -n "${highest_stable}" ]]; then
+            expected_latest="${highest_stable}"
           else
-            for attempt in {1..30}; do
-              latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' github.com/brumbelow/layerleak@latest)"
-              if [[ "${latest_module}" == "${RELEASE_VERSION}" ]]; then
-                break
-              fi
-              if [[ "${attempt}" -eq 30 ]]; then
-                echo "The Go proxy did not advance @latest within five minutes." >&2
-                exit 1
-              fi
-              sleep 10
-            done
+            expected_latest="${RELEASE_VERSION}"
           fi
+          for attempt in {1..70}; do
+            latest_module="$(GOPROXY=https://proxy.golang.org go list -m -f '{{.Version}}' "${MODULE_PATH}@latest" 2>/dev/null || true)"
+            if [[ "${latest_module}" == "${expected_latest}" ]]; then
+              break
+            fi
+            if [[ "${attempt}" -eq 70 ]]; then
+              echo "The Go proxy reports @latest=${latest_module:-<none>}, expected ${expected_latest}, after 35 minutes." >&2
+              exit 1
+            fi
+            sleep 30
+          done
 
           docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_VERSION}" --raw > release-index.json
           release_digest="sha256:$(sha256sum release-index.json | awk '{print $1}')"
@@ -1229,3 +1693,48 @@ jobs:
           else
             test "${latest_release}" = "${RELEASE_VERSION}"
           fi
+
+      - name: Verify published CLI archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          checksums="layerleak_${RELEASE_VERSION}_checksums.txt"
+          mkdir -p published-cli
+          gh release download "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --dir published-cli \
+            --pattern "layerleak_${RELEASE_VERSION}_*" \
+            --pattern attestation-cli-binaries.jsonl \
+            --pattern release-manifest.json
+          for asset in published-cli/*; do
+            gh release verify-asset "${RELEASE_VERSION}" "${asset}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          done
+          # The manifest shares no prefix with the archives, so the stray check still applies.
+          mv published-cli/release-manifest.json published-manifest.json
+          python3 scripts/release-preflight.py binaries \
+            --version "${RELEASE_VERSION}" --checksums "published-cli/${checksums}" --dir published-cli
+          test "$(jq -r .cli.checksums_sha256 published-manifest.json)" = \
+            "$(sha256sum "published-cli/${checksums}" | awk '{print $1}')"
+
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container-release.yml@refs/heads/main"
+          cosign verify-blob \
+            --bundle "published-cli/${checksums}.sigstore.json" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "published-cli/${checksums}" >/dev/null
+          # Verified through the GitHub attestations API, as a downloader would.
+          while read -r _ archive; do
+            gh attestation verify "published-cli/${archive}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/container-release.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$(jq -r .workflow_sha published-manifest.json)" \
+              --deny-self-hosted-runners >/dev/null
+          done < "published-cli/${checksums}"
+
+          mkdir -p published-native
+          tar -xzf "published-cli/layerleak_${RELEASE_VERSION}_linux_amd64.tar.gz" -C published-native
+          test "$(published-native/layerleak --version)" = "layerleak version ${RELEASE_VERSION}"
+          test "$(sha256sum published-native/layerleak | awk '{print $1}')" = \
+            "$(jq -r '.cli.binaries[] | select(.os == "linux" and .arch == "amd64") | .binary_sha256' published-manifest.json)"

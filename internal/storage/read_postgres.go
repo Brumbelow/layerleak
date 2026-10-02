@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 	"github.com/lib/pq"
 )
 
@@ -26,23 +26,41 @@ func normalizeRegistryFilter(registry string) string {
 	}
 }
 
-func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error) {
+// listRepositoriesQuery renders the repository listing. With a cursor the
+// page starts strictly after that row in the (last_seen_at DESC, repository
+// ASC, registry ASC) ordering; the mixed directions rule out a row-value
+// comparison, so the predicate is expanded term by term.
+func listRepositoriesQuery(limit, offset int, after *RepositoryCursor) (string, []any) {
+	args := []any{limit, offset}
+	where := ""
+	if after != nil {
+		where = `
+		WHERE last_seen_at < $3
+			OR (last_seen_at = $3 AND repository > $4)
+			OR (last_seen_at = $3 AND repository = $4 AND registry > $5)`
+		args = append(args, after.LastSeenAt, after.Repository, after.Registry)
+	}
+	return `
+		SELECT registry, repository, first_seen_at, last_seen_at
+		FROM repositories` + where + `
+		ORDER BY last_seen_at DESC, repository ASC, registry ASC
+		LIMIT $1 OFFSET $2
+	`, args
+}
+
+func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int, after *RepositoryCursor) ([]RepositorySummary, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("postgres store is not initialized")
 	}
 	ctx, cancel := withTimeout(ctx, s.queryTimeout)
 	defer cancel()
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT registry, repository, first_seen_at, last_seen_at
-		FROM repositories
-		ORDER BY last_seen_at DESC, repository ASC, registry ASC
-		LIMIT $1 OFFSET $2
-	`, limit, offset)
+	query, args := listRepositoriesQuery(limit, offset, after)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list repositories: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]RepositorySummary, 0)
 	for rows.Next() {
@@ -59,20 +77,17 @@ func (s *PostgresStore) ListRepositories(ctx context.Context, limit, offset int)
 	return items, nil
 }
 
-func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int) ([]ScanRunSummary, error) {
-	if s == nil || s.db == nil {
-		return nil, fmt.Errorf("postgres store is not initialized")
+// listRepositoryScansQuery renders the scan history listing; a cursor adds a
+// row-value comparison on the (scanned_at DESC, id DESC) ordering.
+func listRepositoryScansQuery(registry, repository string, limit, offset int, after *ScanRunCursor) (string, []any) {
+	args := []any{registry, repository, limit, offset}
+	keyset := ""
+	if after != nil {
+		keyset = `
+			AND (sr.scanned_at, sr.id) < ($5, $6)`
+		args = append(args, after.ScannedAt, after.ID)
 	}
-	ctx, cancel := withTimeout(ctx, s.queryTimeout)
-	defer cancel()
-
-	registry = normalizeRegistryFilter(registry)
-	repository = strings.TrimSpace(repository)
-	if repository == "" {
-		return nil, fmt.Errorf("repository is required")
-	}
-
-	rows, err := s.db.QueryContext(ctx, `
+	return `
 		SELECT
 			sr.id,
 			sr.requested_reference,
@@ -98,14 +113,31 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repos
 			sr.suppressed_unique_fingerprints
 		FROM scan_runs sr
 		JOIN repositories r ON r.id = sr.repository_id
-		WHERE r.registry = $1 AND r.repository = $2
+		WHERE r.registry = $1 AND r.repository = $2` + keyset + `
 		ORDER BY sr.scanned_at DESC, sr.id DESC
 		LIMIT $3 OFFSET $4
-	`, registry, repository, limit, offset)
+	`, args
+}
+
+func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int, after *ScanRunCursor) ([]ScanRunSummary, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store is not initialized")
+	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
+
+	registry = normalizeRegistryFilter(registry)
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return nil, fmt.Errorf("repository is required")
+	}
+
+	query, args := listRepositoryScansQuery(registry, repository, limit, offset, after)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list repository scans: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]ScanRunSummary, 0)
 	for rows.Next() {
@@ -122,21 +154,18 @@ func (s *PostgresStore) ListRepositoryScans(ctx context.Context, registry, repos
 	return items, nil
 }
 
-func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error) {
-	if s == nil || s.db == nil {
-		return nil, fmt.Errorf("postgres store is not initialized")
+// listRepositoryFindingsQuery renders the deduplicated finding listing. The
+// keyset predicate on (last_seen_at DESC, id DESC) is applied to the finding
+// rows before the GROUP BY, so only the page's occurrences are aggregated.
+func listRepositoryFindingsQuery(registry, repository string, disposition FindingDispositionFilter, limit, offset int, after *FindingCursor) (string, []any) {
+	args := []any{registry, repository, string(findings.DispositionActionable), string(findings.DispositionExample), string(disposition), limit, offset}
+	keyset := ""
+	if after != nil {
+		keyset = `
+			AND (f.last_seen_at, f.id) < ($8, $9)`
+		args = append(args, after.LastSeenAt, after.ID)
 	}
-	ctx, cancel := withTimeout(ctx, s.queryTimeout)
-	defer cancel()
-
-	disposition = normalizeFindingDispositionFilter(disposition)
-	registry = normalizeRegistryFilter(registry)
-	repository = strings.TrimSpace(repository)
-	if repository == "" {
-		return nil, fmt.Errorf("repository is required")
-	}
-
-	rows, err := s.db.QueryContext(ctx, `
+	return `
 		SELECT
 			f.id,
 			f.manifest_digest,
@@ -152,7 +181,7 @@ func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, re
 		JOIN repository_manifests rm ON rm.repository_id = r.id
 		JOIN findings f ON f.manifest_digest = rm.manifest_digest
 		JOIN finding_occurrences fo ON fo.finding_id = f.id
-		WHERE r.registry = $1 AND r.repository = $2
+		WHERE r.registry = $1 AND r.repository = $2` + keyset + `
 		GROUP BY f.id
 		HAVING
 			CASE $5
@@ -162,11 +191,29 @@ func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, re
 			END
 		ORDER BY f.last_seen_at DESC, f.id DESC
 		LIMIT $6 OFFSET $7
-	`, registry, repository, string(findings.DispositionActionable), string(findings.DispositionExample), string(disposition), limit, offset)
+	`, args
+}
+
+func (s *PostgresStore) ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int, after *FindingCursor) ([]FindingSummary, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("postgres store is not initialized")
+	}
+	ctx, cancel := withTimeout(ctx, s.queryTimeout)
+	defer cancel()
+
+	disposition = normalizeFindingDispositionFilter(disposition)
+	registry = normalizeRegistryFilter(registry)
+	repository = strings.TrimSpace(repository)
+	if repository == "" {
+		return nil, fmt.Errorf("repository is required")
+	}
+
+	query, args := listRepositoryFindingsQuery(registry, repository, disposition, limit, offset, after)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list repository findings: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	items := make([]FindingSummary, 0)
 	for rows.Next() {
@@ -324,7 +371,7 @@ func (s *PostgresStore) GetFinding(ctx context.Context, id int64) (FindingDetail
 	if err != nil {
 		return FindingDetail{}, fmt.Errorf("query finding occurrences: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	occurrences := make([]FindingOccurrence, 0)
 	for rows.Next() {

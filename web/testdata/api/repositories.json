@@ -1,0 +1,19 @@
+{
+  "limit": 2,
+  "next_cursor": "eyJrIjoiciIsInQiOjE3ODgyNDk2MDAwMDAwMDAsInJlcG8iOiJicnVtYmVsb3cvbGF5ZXJsZWFrIiwicmVnIjoiZ2hjci5pbyJ9",
+  "offset": 0,
+  "repositories": [
+    {
+      "first_seen_at": "2026-09-01T08:00:00Z",
+      "last_seen_at": "2026-09-30T17:30:00Z",
+      "registry": "docker.io",
+      "repository": "library/example"
+    },
+    {
+      "first_seen_at": "2026-09-01T08:00:00Z",
+      "last_seen_at": "2026-09-01T08:00:00Z",
+      "registry": "ghcr.io",
+      "repository": "brumbelow/layerleak"
+    }
+  ]
+}

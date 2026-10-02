@@ -3,8 +3,8 @@ package findings
 import (
 	"strings"
 
-	"github.com/brumbelow/layerleak/internal/detectionpolicy"
-	"github.com/brumbelow/layerleak/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/detectionpolicy"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
 )
 
 func Classify(input Input, match detectors.Match) (Disposition, DispositionReason) {
@@ -55,6 +55,8 @@ func mapDispositionReason(reason string) DispositionReason {
 		return DispositionReasonReservedHost
 	case detectionpolicy.ReasonKnownDummyValue:
 		return DispositionReasonKnownDummyValue
+	case detectionpolicy.ReasonDefaultCredentials:
+		return DispositionReasonDefaultCredentials
 	default:
 		return DispositionReasonNone
 	}

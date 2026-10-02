@@ -1,0 +1,14 @@
+{
+  "name": "file_wordpress_config_actionable",
+  "source_type": "file_final",
+  "path": "var/www/html/wp-config.php",
+  "key": "",
+  "content": "<?php\ndefine( 'DB_NAME', 'wordpress' );\ndefine( 'DB_PASSWORD', 'Sup3rS3cretPwXyz' );\ndefine( 'AUTH_KEY',         'x!7$k9@p2#mQ8v%R4t^Y7w&Z1a*B3c(D5e-F6g_H8j=K0l+M2n)' );\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "php_define_password",
+    "wordpress_auth_salt"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

@@ -1,13 +1,25 @@
 ---
 engines:
-  tslint:
-    # npm metadata is strict JSON, not TypeScript with trailing commas.
-    exclude_paths:
-      - "scripts/tests/package.json"
-      - "scripts/tests/package-lock.json"
   revive:
     exclude_paths:
+      - "go.mod"
       - "go.sum"
+  # Lizard's function-length and complexity limits are applied to production
+  # code. Test files are excluded: table-driven tests and fixture builders are
+  # long by design, and splitting them would not make them safer to read.
+  lizard:
+    exclude_paths:
+      - "**/*_test.go"
+      - "scripts/tests/**"
+      - "scripts/test_*.py"
+  # Codacy's default Stylelint patterns name two rules that do not exist, so
+  # every stylesheet gets two "Unknown rule" errors. The site CSS is linted in
+  # CI instead, with stylelint-config-standard (a superset of the rules Codacy
+  # enables). Remove this block if Codacy's Stylelint is switched to the
+  # repository configuration.
+  stylelint:
+    exclude_paths:
+      - "web/**"
 exclude_paths:
   - ".github/**"
   - "migrations/**"

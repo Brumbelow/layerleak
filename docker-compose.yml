@@ -2,8 +2,8 @@ name: layerleak
 
 services:
   db:
-    # postgres:16.13-alpine, pinned to its multi-platform manifest digest.
-    image: postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    # postgres:16.15-alpine, pinned to its multi-platform manifest digest.
+    image: postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
     environment:
       POSTGRES_DB: ${LAYERLEAK_DB_NAME:-layerleak}
       POSTGRES_USER: ${LAYERLEAK_DB_USER:-layerleak}
@@ -17,6 +17,23 @@ services:
       retries: 12
       start_period: 10s
     restart: unless-stopped
+    # The official entrypoint starts as root, fixes ownership of the data and
+    # socket directories, then drops to the postgres user; these five
+    # capabilities are what that needs and nothing else is granted.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    tmpfs:
+      - /run/postgresql:mode=1777,size=16m
+      - /tmp:mode=1777,size=64m
+    # PostgreSQL's dynamic shared memory lives in /dev/shm; Docker's 64 MiB
+    # default is too small for parallel queries on larger scan histories.
+    shm_size: 256m
     security_opt:
       - no-new-privileges:true
 
@@ -24,10 +41,18 @@ services:
     image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
     environment:
       LAYERLEAK_API_ADDR: 0.0.0.0:8080
+      # Opt-in bearer tokens; prefer a mounted secret file over inline values.
+      LAYERLEAK_API_BEARER_TOKENS: "${LAYERLEAK_API_BEARER_TOKENS:-}"
+      LAYERLEAK_API_BEARER_TOKENS_FILE: "${LAYERLEAK_API_BEARER_TOKENS_FILE:-}"
+      # Optional Prometheus listener, e.g. 0.0.0.0:9090; add a ports: entry to
+      # publish it, preferably on a private interface.
+      LAYERLEAK_API_METRICS_ADDR: "${LAYERLEAK_API_METRICS_ADDR:-}"
       LAYERLEAK_API_IDLE_TIMEOUT: ${LAYERLEAK_API_IDLE_TIMEOUT:-60s}
       LAYERLEAK_API_MAX_CONCURRENT_SCANS: ${LAYERLEAK_API_MAX_CONCURRENT_SCANS:-1}
       LAYERLEAK_API_MAX_REQUEST_BYTES: ${LAYERLEAK_API_MAX_REQUEST_BYTES:-16384}
       LAYERLEAK_API_READINESS_TIMEOUT: ${LAYERLEAK_API_READINESS_TIMEOUT:-2s}
+      LAYERLEAK_API_READINESS_CACHE_TTL: ${LAYERLEAK_API_READINESS_CACHE_TTL:-5s}
+      LAYERLEAK_API_PRESTOP_DELAY: ${LAYERLEAK_API_PRESTOP_DELAY:-0s}
       LAYERLEAK_API_READ_HEADER_TIMEOUT: ${LAYERLEAK_API_READ_HEADER_TIMEOUT:-5s}
       LAYERLEAK_API_READ_TIMEOUT: ${LAYERLEAK_API_READ_TIMEOUT:-15s}
       LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT: ${LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT:-30s}
@@ -41,10 +66,13 @@ services:
       LAYERLEAK_DATABASE_MAX_IDLE_CONNS: ${LAYERLEAK_DATABASE_MAX_IDLE_CONNS:-5}
       LAYERLEAK_DATABASE_MAX_OPEN_CONNS: ${LAYERLEAK_DATABASE_MAX_OPEN_CONNS:-10}
       LAYERLEAK_DATABASE_QUERY_TIMEOUT: ${LAYERLEAK_DATABASE_QUERY_TIMEOUT:-10s}
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      # sslmode=disable is acceptable only on the Compose-internal network; the
+      # password travels as PGPASSWORD rather than inside the URL.
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
-      LAYERLEAK_FINDINGS_DIR: ${LAYERLEAK_FINDINGS_DIR:-/tmp/layerleak/findings}
       LAYERLEAK_HTTP_TIMEOUT: ${LAYERLEAK_HTTP_TIMEOUT:-30s}
+      LAYERLEAK_LOG_FORMAT: ${LAYERLEAK_LOG_FORMAT:-json}
       LAYERLEAK_LOG_LEVEL: ${LAYERLEAK_LOG_LEVEL:-info}
       LAYERLEAK_MAX_AUTH_RESPONSE_BYTES: ${LAYERLEAK_MAX_AUTH_RESPONSE_BYTES:-1048576}
       LAYERLEAK_MAX_CONFIG_BYTES: ${LAYERLEAK_MAX_CONFIG_BYTES:-8388608}
@@ -56,8 +84,11 @@ services:
       LAYERLEAK_MAX_IMAGE_LAYERS: ${LAYERLEAK_MAX_IMAGE_LAYERS:-512}
       LAYERLEAK_MAX_IMAGE_MANIFESTS: ${LAYERLEAK_MAX_IMAGE_MANIFESTS:-64}
       LAYERLEAK_MAX_LAYER_BYTES: ${LAYERLEAK_MAX_LAYER_BYTES:-536870912}
+      LAYERLEAK_MAX_LAYER_CACHE_BYTES: ${LAYERLEAK_MAX_LAYER_CACHE_BYTES:-0}
       LAYERLEAK_MAX_LAYER_ENTRIES: ${LAYERLEAK_MAX_LAYER_ENTRIES:-50000}
       LAYERLEAK_MAX_MANIFEST_BYTES: ${LAYERLEAK_MAX_MANIFEST_BYTES:-8388608}
+      LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES: ${LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES:-67108864}
+      LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES: ${LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES:-10000}
       LAYERLEAK_MAX_REPOSITORY_TAGS: ${LAYERLEAK_MAX_REPOSITORY_TAGS:-1000}
       LAYERLEAK_MAX_REPOSITORY_TARGETS: ${LAYERLEAK_MAX_REPOSITORY_TARGETS:-250}
       LAYERLEAK_MAX_RETAINED_BYTES: ${LAYERLEAK_MAX_RETAINED_BYTES:-1073741824}
@@ -66,12 +97,23 @@ services:
       LAYERLEAK_REGISTRY_AUTH_URL: "${LAYERLEAK_REGISTRY_AUTH_URL:-}"
       LAYERLEAK_REGISTRY_BASE_URL: "${LAYERLEAK_REGISTRY_BASE_URL:-}"
       LAYERLEAK_REGISTRY_MAX_REDIRECTS: ${LAYERLEAK_REGISTRY_MAX_REDIRECTS:-3}
+      # Optional private-registry credential, applied only to the registry pinned
+      # by LAYERLEAK_REGISTRY_BASE_URL. LAYERLEAK_DOCKER_CONFIG must name a path
+      # inside the container: mount the file read-only (for example under
+      # /run/secrets) and point the variable at it.
+      LAYERLEAK_REGISTRY_USERNAME: "${LAYERLEAK_REGISTRY_USERNAME:-}"
+      LAYERLEAK_REGISTRY_PASSWORD: "${LAYERLEAK_REGISTRY_PASSWORD:-}"
+      LAYERLEAK_DOCKER_CONFIG: "${LAYERLEAK_DOCKER_CONFIG:-}"
       LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS: ${LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS:-2}
       LAYERLEAK_SCAN_TIMEOUT: ${LAYERLEAK_SCAN_TIMEOUT:-30m}
       LAYERLEAK_TAG_PAGE_SIZE: ${LAYERLEAK_TAG_PAGE_SIZE:-100}
     depends_on:
       db:
         condition: service_healthy
+      # A fresh volume becomes ready without a manual migration step; the
+      # migration command is idempotent, so restarts are safe.
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${LAYERLEAK_API_HOST:-127.0.0.1}:${LAYERLEAK_API_PORT:-8080}:8080"
     healthcheck:
@@ -81,32 +123,47 @@ services:
       retries: 6
       start_period: 10s
     read_only: true
+    # An unsized tmpfs may grow to half of host RAM; the API stores at most
+    # LAYERLEAK_MAX_RAW_FINDING_BYTES of material under /tmp per scan.
     tmpfs:
-      - /tmp:mode=1777
+      - /tmp:mode=1777,size=256m
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Resource ceilings for a service that decompresses untrusted layers.
+    # `docker compose` (v2) honours mem_limit and pids_limit directly; Swarm
+    # stacks read deploy.resources.limits instead, so set the same values there
+    # when deploying with `docker stack`. Raise mem_limit together with the
+    # LAYERLEAK_MAX_*_BYTES bounds above if you lift them.
+    mem_limit: 2g
+    pids_limit: 256
+    # Must exceed LAYERLEAK_API_SHUTDOWN_TIMEOUT so an in-flight scan can be
+    # persisted before the container is killed.
+    stop_grace_period: ${LAYERLEAK_API_STOP_GRACE_PERIOD:-35s}
     restart: unless-stopped
 
   migrate:
     image: ${LAYERLEAK_IMAGE:-ghcr.io/brumbelow/layerleak:latest}
     entrypoint: ["/usr/local/bin/layerleak-migrate-up"]
     environment:
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      # sslmode=disable is acceptable only on the Compose-internal network; the
+      # password travels as PGPASSWORD rather than inside the URL.
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_MIGRATIONS_DIR: ${LAYERLEAK_MIGRATIONS_DIR:-/app/migrations}
+      LAYERLEAK_MIGRATION_TIMEOUT: ${LAYERLEAK_MIGRATION_TIMEOUT:-30m}
+      LAYERLEAK_MIGRATION_LOCK_TIMEOUT: ${LAYERLEAK_MIGRATION_LOCK_TIMEOUT:-15s}
     depends_on:
       db:
         condition: service_healthy
     read_only: true
     tmpfs:
-      - /tmp:mode=1777
+      - /tmp:mode=1777,size=64m
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    profiles:
-      - tools
     restart: "no"
 
   purge-raw-secrets:
@@ -118,14 +175,18 @@ services:
       LAYERLEAK_DATABASE_MAX_IDLE_CONNS: ${LAYERLEAK_DATABASE_MAX_IDLE_CONNS:-5}
       LAYERLEAK_DATABASE_MAX_OPEN_CONNS: ${LAYERLEAK_DATABASE_MAX_OPEN_CONNS:-10}
       LAYERLEAK_DATABASE_QUERY_TIMEOUT: ${LAYERLEAK_DATABASE_QUERY_TIMEOUT:-10s}
-      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}:${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      # sslmode=disable is acceptable only on the Compose-internal network; the
+      # password travels as PGPASSWORD rather than inside the URL.
+      LAYERLEAK_DATABASE_URL: postgres://${LAYERLEAK_DB_USER:-layerleak}@db:5432/${LAYERLEAK_DB_NAME:-layerleak}?sslmode=disable
+      PGPASSWORD: ${LAYERLEAK_DB_PASSWORD:?set LAYERLEAK_DB_PASSWORD in .env}
       LAYERLEAK_DATABASE_WRITE_TIMEOUT: ${LAYERLEAK_DATABASE_WRITE_TIMEOUT:-2m}
+      LAYERLEAK_PURGE_TIMEOUT: ${LAYERLEAK_PURGE_TIMEOUT:-30m}
     depends_on:
       db:
         condition: service_healthy
     read_only: true
     tmpfs:
-      - /tmp:mode=1777
+      - /tmp:mode=1777,size=64m
     cap_drop:
       - ALL
     security_opt:

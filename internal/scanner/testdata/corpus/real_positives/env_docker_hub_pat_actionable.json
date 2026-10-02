@@ -1,0 +1,13 @@
+{
+  "name": "env_docker_hub_pat_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "DOCKER_HUB_TOKEN",
+  "content_base64": "RE9DS0VSX0hVQl9UT0tFTj1kY2tyX3BhdF9BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "docker_hub_personal_access_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

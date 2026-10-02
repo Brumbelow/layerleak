@@ -5,7 +5,7 @@
   "key": "PYPI_TOKEN",
   "content": "PYPI_TOKEN=pypi-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm",
   "expected_outcome": "actionable",
-  "expected_detectors": ["keyword_entropy", "pypi_api_token"],
+  "expected_detectors": ["pypi_api_token"],
   "expected_confidence_floor": "medium",
   "expected_reason": ""
 }

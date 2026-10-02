@@ -1,0 +1,11 @@
+{
+  "name": "file_yaml_uuid_token_actionable",
+  "source_type": "file_final",
+  "path": "app/config/production.yaml",
+  "key": "",
+  "content": "mail:\n  postmark_token: 7f3c2a1e-9b8d-4c6f-a5e2-1d0b9c8a7f6e\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["keyword_entropy"],
+  "expected_confidence_floor": "low",
+  "expected_reason": ""
+}

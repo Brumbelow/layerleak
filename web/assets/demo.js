@@ -71,14 +71,15 @@
     setTabsEnabled(false);
     renderStatsPlaceholder("Replaying simulated scan");
     tableMetaEl.textContent = "Replay in progress";
-    tableWrapEl.innerHTML = '<div class="table-empty">The fake local Postgres snapshot will appear after the replay completes.</div>';
+    tableWrapEl.innerHTML = '<div class="table-empty">The Postgres-style rows derived from this scan appear after the replay completes.</div>';
     renderStatus("booting replay");
 
     stepFrame(0);
   }
 
   function stepFrame(index) {
-    const frame = state.data.frames[index];
+    const frame = state.data.frames.at(index);
+    if (!frame) return;
     terminalEl.textContent = frame.terminal;
     renderStatus(frame.status);
     terminalEl.scrollTop = terminalEl.scrollHeight;
@@ -122,17 +123,17 @@
     replayButton.disabled = true;
     terminalEl.textContent =
       "$ " +
-      (state.data ? state.data.command : "layerleak scan vulnerableHost:latest --platform linux/amd64") +
-      "\n\n# Click \"Try it out\" to replay a static layerleak run.\n# The transcript and the database rows below are simulated.";
+      (state.data ? state.data.command : "layerleak scan oci:payments-api:1.4.2 --progress plain --no-db") +
+      "\n\n# Click \"Try it out\" to replay a recorded layerleak run.\n# The image and its secrets are synthetic; nothing is scanned in your browser.";
     renderStatus("waiting to replay");
     renderStatsPlaceholder("Awaiting replay");
     tableMetaEl.textContent = "Run the replay to load rows";
-    tableWrapEl.innerHTML = '<div class="table-empty">Run the simulated scan to load the fake Postgres snapshot.</div>';
+    tableWrapEl.innerHTML = '<div class="table-empty">Run the replay to load the Postgres-style rows.</div>';
   }
 
   function renderStatsPlaceholder(text) {
     statsEl.innerHTML = "";
-    const labels = ["Status", "Coverage", "Actionable findings", "Saved artifacts"];
+    const labels = ["Status", "Coverage", "Actionable findings", "Diagnostics", "Scan record"];
     labels.forEach((label) => {
       const card = document.createElement("article");
       card.className = "stat-card";
@@ -159,24 +160,51 @@
     });
   }
 
+  function selectTable(tableName) {
+    if (!state.complete || state.activeTable === tableName) {
+      return;
+    }
+    state.activeTable = tableName;
+    renderTabs();
+    renderTable(tableName);
+  }
+
   function buildTabs() {
     tabsEl.innerHTML = "";
-    state.data.table_order.forEach((tableName) => {
+    state.data.table_order.forEach((tableName, index) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "tab-button";
+      button.id = `demo-tab-${index}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", "false");
+      button.setAttribute("aria-controls", "demo-table-wrap");
+      button.tabIndex = -1;
       button.dataset.table = tableName;
       button.textContent = tableName;
       button.disabled = true;
-      button.addEventListener("click", () => {
-        if (!state.complete || state.activeTable === tableName) {
-          return;
-        }
-        state.activeTable = tableName;
-        renderTabs();
-        renderTable(tableName);
-      });
+      button.addEventListener("click", () => selectTable(tableName));
       tabsEl.appendChild(button);
+    });
+
+    // WAI-ARIA tabs pattern: arrow keys move between tabs, Home/End jump.
+    tabsEl.addEventListener("keydown", (event) => {
+      const tabs = Array.from(tabsEl.querySelectorAll(".tab-button")).filter((tab) => !tab.disabled);
+      const current = tabs.indexOf(document.activeElement);
+      if (current === -1 || tabs.length === 0) {
+        return;
+      }
+      let next = current;
+      if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      const target = tabs.at(next);
+      if (!target) return;
+      target.focus();
+      selectTable(target.dataset.table);
     });
   }
 
@@ -185,6 +213,10 @@
       const active = button.dataset.table === state.activeTable;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+      if (active) {
+        tableWrapEl.setAttribute("aria-labelledby", button.id);
+      }
     });
   }
 

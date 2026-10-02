@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math"
-	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -12,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/brumbelow/layerleak/internal/detectionpolicy"
+	"github.com/brumbelow/layerleak/v3/internal/detectionpolicy"
 )
 
 type Confidence string
@@ -27,6 +26,10 @@ type ScanInput struct {
 	Content string
 	Path    string
 	Key     string
+
+	// lowered caches the ASCII-lowercased content for the case-insensitive
+	// literal prefilters; Set.Scan fills it once for every detector.
+	lowered string
 }
 
 type Match struct {
@@ -38,9 +41,20 @@ type Match struct {
 	Priority   int
 }
 
+// Detector is one detection strategy. Name identifies the strategy; IDs lists
+// every identifier its matches can carry in Match.Detector, which is the
+// public contract (finding.detector_name, the API detectors array, SARIF rule
+// ids). For most strategies IDs is just the name; the structured AWS and git
+// credential readers emit per-field sub-identifiers.
 type Detector interface {
 	Name() string
+	IDs() []string
 	Scan(input ScanInput) []Match
+}
+
+// singleID is the IDs() of a strategy that reports under its own name.
+func singleID(name string) []string {
+	return []string{name}
 }
 
 type Set struct {
@@ -48,112 +62,163 @@ type Set struct {
 }
 
 const (
-	priorityEntropy    = 1
+	priorityEntropy = 1
+	// priorityAssigned ranks the generic assigned_sensitive_value rule above
+	// keyword_entropy but below every self-identifying rule, so an identical
+	// span is labelled github_token rather than by the generic name.
+	priorityAssigned   = 2
 	priorityLocal      = 3
 	priorityStructured = 4
 )
 
 func Default() Set {
-	return Set{
-		detectors: []Detector{
-			awsSharedCredentialsDetector{},
-			gitCredentialsDetector{},
-			newTerraformCredentialsDetector(),
-			newPathRegexDetector("docker_auth_blob", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"auth"\s*:\s*"([A-Za-z0-9+/=]{8,})"`), 1, ConfidenceHigh, looksLikeDockerAuth),
-			newPathRegexDetector("docker_config_identitytoken", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"identitytoken"\s*:\s*"([^"\s]{16,})"`), 1, ConfidenceHigh, looksLikeAssignedSensitiveValue),
-			newKeyValueDetector("assigned_sensitive_value", regexp.MustCompile(`(?i)client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token`), regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9+/=_.:-]{15,}`), ConfidenceMedium, looksLikeAssignedSensitiveValue),
-			newHerokuTokenDetector(),
-			newSnykTokenDetector(),
-			newRegexDetector("pem_private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), 0, ConfidenceHigh, nil),
-			newRegexDetector("github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("gitlab_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9\-_]{20,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("slack_token", regexp.MustCompile(`\bxox(?:a|b|p|r|s)-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9-]{16,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("slack_webhook", regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{16,}`), 0, ConfidenceHigh, nil),
-			newRegexDetector("stripe_key", regexp.MustCompile(`\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("aws_access_key_id", regexp.MustCompile(`\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("aws_secret_access_key", regexp.MustCompile(`(?i)(?:aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)\s*(?:=|:|=>)\s*["']?([A-Za-z0-9/+=]{40})`), 1, ConfidenceHigh, looksLikeAWSSecretAccessKey),
-			newKeyValueDetector("aws_secret_access_key", regexp.MustCompile(`aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key`), regexp.MustCompile(`[A-Za-z0-9/+=]{40}`), ConfidenceHigh, looksLikeAWSSecretAccessKey),
-			newRegexDetector("google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("sendgrid_api_key", regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{16,64}\.[A-Za-z0-9_-]{16,64}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("shopify_access_token", regexp.MustCompile(`\bshpat_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("npm_token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), 0, ConfidenceHigh, nil),
-			newPathRegexDetector("npmrc_auth_token", regexp.MustCompile(`(^|/)\.npmrc$`), regexp.MustCompile(`(?im)^\s*(?:\/\/[^\s=]+:)?_authToken\s*=\s*([^\s#;]+)\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
-			newPathRegexDetector("npmrc_auth", regexp.MustCompile(`(^|/)\.npmrc$`), regexp.MustCompile(`(?im)^\s*(?:\/\/[^\s=]+:)?_auth\s*=\s*([A-Za-z0-9+/=]{8,})\s*$`), 1, ConfidenceHigh, looksLikeBase64Credential),
-			newRegexDetector("docker_auth_blob", regexp.MustCompile(`(?i)"auth"\s*:\s*"([A-Za-z0-9+/=]{8,})"`), 1, ConfidenceHigh, looksLikeDockerAuth),
-			newRegexDetector("jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), 0, ConfidenceMedium, looksLikeJWT),
-			newPathRegexDetector("netrc_password", regexp.MustCompile(`(^|/)\.netrc$`), regexp.MustCompile(`(?im)\bpassword\s+([^\s#]+)`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
-			newPathRegexDetector("pypirc_password", regexp.MustCompile(`(^|/)\.pypirc$`), regexp.MustCompile(`(?im)^\s*password\s*=\s*([^\s#;]+)\s*$`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
-			newRegexDetector("basic_auth_url", regexp.MustCompile(`https?://[^/\s:@]+:[^/\s@]+@[^/\s]+`), 0, ConfidenceHigh, looksLikeBasicAuthURL),
-			newRegexDetector("huggingface_token", regexp.MustCompile(`\b(?:hf_|api_org_)[A-Za-z0-9]{34,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("digitalocean_pat", regexp.MustCompile(`\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("mailchimp_api_key", regexp.MustCompile(`\b[0-9a-f]{32}-us[0-9]{1,2}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("hashicorp_vault_token", regexp.MustCompile(`\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("anthropic_api_key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{30,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("openai_api_key", regexp.MustCompile(`\bsk-(?:(?:proj|admin)-[A-Za-z0-9_-]{100,}|[A-Za-z0-9]{48}\b)`), 0, ConfidenceHigh, nil),
-			newRegexDetector("pypi_api_token", regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{32,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("linear_api_key", regexp.MustCompile(`\blin_api_[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("doppler_token", regexp.MustCompile(`\bdp\.(?:st|pt|sa|ct)\.[A-Za-z0-9._-]{20,}`), 0, ConfidenceHigh, nil),
-			newRegexDetector("grafana_service_account_token", regexp.MustCompile(`\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
-			newPathRegexDetector("kubeconfig_token", regexp.MustCompile(`(^|/)\.kube/config$`), regexp.MustCompile(`(?im)^\s+token:\s+([^\s#]+)\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
-			newPathRegexDetector("vault_token_file", regexp.MustCompile(`(^|/)\.vault-token$`), regexp.MustCompile(`((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}|s\.[A-Za-z0-9]{24,})`), 0, ConfidenceHigh, hasMinPrintableLength(24)),
-			newRegexDetector("twilio_account_sid", regexp.MustCompile(`\bAC[a-f0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("databricks_token", regexp.MustCompile(`\bdapi[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("azure_storage_account_key", regexp.MustCompile(`(?i)AccountKey=([A-Za-z0-9+/]{86}==)`), 1, ConfidenceHigh, nil),
-			newKeyValueDetector("datadog_api_key",
-				regexp.MustCompile(`(?i)(?:dd[_-]?api[_-]?key|datadog[_-]?api[_-]?key)`),
-				regexp.MustCompile(`\b[a-f0-9]{32}\b`),
-				ConfidenceHigh, nil),
-			newRegexDetector("notion_integration_token", regexp.MustCompile(`\bsecret_[A-Za-z0-9]{40,60}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("pulumi_access_token", regexp.MustCompile(`\bpul-[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("age_secret_key", regexp.MustCompile(`\bAGE-SECRET-KEY-1[a-z0-9]{58}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("render_api_key", regexp.MustCompile(`\brnd_[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("twilio_auth_token", regexp.MustCompile(`(?i)twilio[_-]?auth[_-]?token\s*(?:=|:)\s*["']?([a-f0-9]{32})`), 1, ConfidenceHigh, nil),
-			newRegexDetector("new_relic_user_api_key", regexp.MustCompile(`\bNRAK-[A-Z0-9]{27}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("okta_api_token", regexp.MustCompile(`\bSSWS[ \t]+([A-Za-z0-9_-]{20,})`), 1, ConfidenceHigh, nil),
-			newRegexDetector("square_application_secret", regexp.MustCompile(`\bsq0csp-[0-9A-Za-z_-]{43}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("square_oauth_token", regexp.MustCompile(`\bsq0atp-[0-9A-Za-z_-]{22}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("gitlab_deploy_token", regexp.MustCompile(`\bgldt-[A-Za-z0-9_-]{20,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("gitlab_runner_token", regexp.MustCompile(`\bglrt-[A-Za-z0-9_-]{20,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("discord_webhook", regexp.MustCompile(`(?:^|[^A-Za-z0-9+.-])(https://discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{68})(?:$|[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-])`), 1, ConfidenceHigh, nil),
-			newRegexDetector("discord_bot_token", regexp.MustCompile(`\b([A-Za-z0-9]{23,28})\.([A-Za-z0-9_-]{6,8})\.([A-Za-z0-9_-]{27,38})`), 0, ConfidenceHigh, looksLikeDiscordBotToken),
-			newRegexDetector("sentry_dsn", regexp.MustCompile(`https://[0-9a-f]{16,32}(?::[0-9a-f]{16,32})?@(?:o\d+\.ingest(?:\.us|\.de)?\.sentry\.io|(?:[a-z0-9-]+\.)?sentry\.io)/\d+`), 0, ConfidenceHigh, nil),
-			newRegexDetector("shopify_shared_secret", regexp.MustCompile(`\bshpss_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("shopify_partner_key", regexp.MustCompile(`\bshppa_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("telegram_bot_token", regexp.MustCompile(`\b\d{8,10}:[A-Za-z0-9_-]{35}`), 0, ConfidenceHigh, nil),
-			newRegexDetector("postman_api_key", regexp.MustCompile(`\bPMAK-[0-9a-fA-F]{24}-[0-9a-fA-F]{34}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("stripe_webhook_secret", regexp.MustCompile(`\bwhsec_[A-Za-z0-9]{32,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("mapbox_secret_token", regexp.MustCompile(`\bsk\.eyJ[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("airtable_personal_access_token", regexp.MustCompile(`\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("planetscale_token", regexp.MustCompile(`\bpscale_tkn_[A-Za-z0-9_]{43,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("fly_api_token", regexp.MustCompile(`\bfo1_[A-Za-z0-9._-]{43,}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("circleci_personal_api_token", regexp.MustCompile(`\bCCIPAT_[A-Za-z0-9]{22}_[A-Fa-f0-9]{40}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("openrouter_api_key", regexp.MustCompile(`\bsk-or-v1-[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("sentry_user_token", regexp.MustCompile(`\bsntryu_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("cloudflare_api_token", regexp.MustCompile(`\bcf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("sonarcloud_token", regexp.MustCompile(`\bsqco_[A-Za-z0-9]{59}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("google_oauth_access_token", regexp.MustCompile(`\b(ya29\.(?i:[a-z0-9_-]{10,}))(?:[^A-Za-z0-9_-]|$)`), 1, ConfidenceHigh, nil),
-			newRegexDetector("netlify_personal_access_token", regexp.MustCompile(`\bnfp_[A-Za-z0-9_]{36}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("prefect_api_key", regexp.MustCompile(`\bpnu_[A-Za-z0-9]{36}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("nightfall_api_key", regexp.MustCompile(`\bNF-[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
-			newRegexDetector("tailscale_key", regexp.MustCompile(`\btskey-[a-z]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\b`), 0, ConfidenceHigh, nil),
-			newKeyValueDetector("cloudflare_api_token",
-				regexp.MustCompile(`(?i)(?:cf[_-]?api[_-]?(?:token|key)|cloudflare[_-]?(?:api[_-]?(?:token|key)|token))`),
-				regexp.MustCompile(`(?:cf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}|\b[A-Za-z0-9_-]{37,45}\b)`),
-				ConfidenceHigh, looksLikeAssignedSensitiveValue),
-			newKeyValueDetector("vercel_access_token",
-				regexp.MustCompile(`(?i)(?:vercel|zeit)[_-]?(?:api[_-]?)?token`),
-				regexp.MustCompile(`[A-Za-z0-9]{24,}`),
-				ConfidenceMedium, looksLikeAssignedSensitiveValue),
-			contextEntropyDetector{},
-		},
+	rules := []Detector{
+		awsSharedCredentialsDetector{},
+		gitCredentialsDetector{},
+		newTerraformCredentialsDetector(),
+		newPathRegexDetector("docker_auth_blob", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"auth"\s*:\s*"([A-Za-z0-9+/=]{8,})"`), 1, ConfidenceHigh, looksLikeDockerAuth),
+		newPathRegexDetector("docker_config_identity_token", regexp.MustCompile(`(^|/)\.docker/config\.json$`), regexp.MustCompile(`(?i)"identitytoken"\s*:\s*"([^"\s]{16,})"`), 1, ConfidenceHigh, looksLikeAssignedSensitiveValue),
+		// The key regex always satisfies sensitiveKey, so every match would be
+		// promoted to high anyway; declare high so the catalog is truthful.
+		newKeyValueDetector("assigned_sensitive_value", regexp.MustCompile(`(?i)client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token`), regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9+/_.:-]{15,}={0,2}`), ConfidenceHigh, looksLikeAssignedSensitiveValue),
+		newHerokuTokenDetector(),
+		newSnykTokenDetector(),
+		pemPrivateKeyDetector{},
+		newRegexDetector("github_token", regexp.MustCompile(`\b(?:ghr_[A-Za-z0-9]{36,76}|gh[pous]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`), 0, ConfidenceHigh, nil).requiring("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
+		newRegexDetector("gitlab_personal_access_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,300}`+gitlabRoutableTail+`\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("slack_token", regexp.MustCompile(`\b(?:xox[abeprs]-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9-]{16,}|xapp-\d-[A-Z0-9]+-\d+-[a-z0-9]+|xoxe\.xox[bp]-\d-[A-Z0-9]{100,}|xoxe-\d-[A-Z0-9]{100,})\b`), 0, ConfidenceHigh, nil).requiring("xox", "xapp-"),
+		// A search pattern, not a URL validator: the webhook is found anywhere in
+		// arbitrary text, so it is deliberately unanchored. The dots of the host
+		// are written as [.] (identical to \.) so the rule reads as the search
+		// it is rather than as a host check.
+		newRegexDetector("slack_webhook", regexp.MustCompile(`https://hooks[.]slack[.]com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{16,}`), 0, ConfidenceHigh, nil).requiring("hooks.slack.com"),
+		newRegexDetector("stripe_api_key", regexp.MustCompile(`\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b`), 0, ConfidenceHigh, nil).requiring("sk_live_", "sk_test_", "rk_live_", "rk_test_"),
+		newRegexDetector("aws_access_key_id", regexp.MustCompile(`\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b`), 0, ConfidenceHigh, nil).requiring("AKIA", "ASIA", "ABIA", "ACCA"),
+		// Matched on the lowercased content: the optional aws[_-]? prefix only moved
+		// the match start, never the captured value, so it is left out to keep a
+		// literal prefix.
+		newRegexDetector("aws_secret_access_key", regexp.MustCompile(assignedValuePattern(`secret[_-]?access[_-]?key`, `[a-z0-9/+=]{40}`, `(?:[^a-z0-9/+=]|$)`)), 1, ConfidenceHigh, looksLikeAWSSecretAccessKey).onLoweredContent(),
+		newKeyValueDetector("aws_secret_access_key", regexp.MustCompile(`aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key`), regexp.MustCompile(`[A-Za-z0-9/+=]{40}`), ConfidenceHigh, looksLikeAWSSecretAccessKey),
+		newRegexDetector("google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("sendgrid_api_key", regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{16,64}\.[A-Za-z0-9_-]{16,64}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("shopify_access_token", regexp.MustCompile(`\bshpat_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("npm_token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), 0, ConfidenceHigh, nil),
+		newPathRegexDetector("npmrc_auth_token", regexp.MustCompile(`(^|/)\.npmrc$`), regexp.MustCompile(`(?im)^\s*(?:\/\/[^\s=]+:)?_authToken\s*=\s*["']?([^\s#;"']+)["']?\s*$`), 1, ConfidenceHigh, hasMinPrintableLength(8)),
+		newPathRegexDetector("npmrc_basic_auth", regexp.MustCompile(`(^|/)\.npmrc$`), regexp.MustCompile(`(?im)^\s*(?:\/\/[^\s=]+:)?_auth\s*=\s*([A-Za-z0-9+/=]{8,})\s*$`), 1, ConfidenceHigh, looksLikeBase64Credential),
+		newRegexDetector("docker_auth_blob", regexp.MustCompile(`"auth"\s*:\s*"([a-z0-9+/=]{8,})"`), 1, ConfidenceHigh, looksLikeDockerAuth).onLoweredContent(),
+		newRegexDetector("json_web_token", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`), 0, ConfidenceMedium, looksLikeJWT),
+		// A netrc password token must start its line or follow whitespace on a
+		// line with no comment marker before it, so prose in comments is ignored.
+		newPathRegexDetector("netrc_password", regexp.MustCompile(`(^|/)\.netrc$`), regexp.MustCompile(`(?im)^(?:[^#\n]*\s)?password\s+([^\s#]+)`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
+		newPathRegexDetector("pypirc_password", regexp.MustCompile(`(^|/)\.pypirc$`), regexp.MustCompile(`(?im)^\s*password\s*=\s*([^\s#;]+)\s*$`), 1, ConfidenceMedium, hasMinPrintableLength(4)),
+		newCredentialedURLDetector("basic_auth_url", basicAuthURLSchemes, urlHostClass),
+		newCredentialedURLDetector("connection_url_credentials", connectionURLSchemes, urlHostListClass),
+		newRegexDetector("huggingface_token", regexp.MustCompile(`\b(?:hf_|api_org_)[A-Za-z0-9]{34,}\b`), 0, ConfidenceHigh, nil).requiring("hf_", "api_org_"),
+		newRegexDetector("digitalocean_personal_access_token", regexp.MustCompile(`\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil).requiring("dop_v1_", "doo_v1_", "dor_v1_"),
+		newRegexDetector("mailchimp_api_key", regexp.MustCompile(`\b[0-9a-f]{32}-us[0-9]{1,2}\b`), 0, ConfidenceHigh, nil).requiring("-us"),
+		newRegexDetector("vault_token", regexp.MustCompile(`\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}\b`), 0, ConfidenceHigh, nil).requiring("hvs.", "hvb.", "hvr."),
+		newRegexDetector("anthropic_api_key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{30,}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("openai_api_key", regexp.MustCompile(`\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{100,}|[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{48}\b)`), 0, ConfidenceHigh, nil),
+		newRegexDetector("pypi_api_token", regexp.MustCompile(`\bpypi-[A-Za-z0-9_-]{32,}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("linear_api_key", regexp.MustCompile(`\blin_api_[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("doppler_token", regexp.MustCompile(`\bdp\.(?:st|pt|sa|ct)\.[A-Za-z0-9._-]{20,}`), 0, ConfidenceHigh, nil),
+		newRegexDetector("grafana_service_account_token", regexp.MustCompile(`\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b`), 0, ConfidenceHigh, nil),
+		newPathRegexDetector("vault_token_file", regexp.MustCompile(`(^|/)\.vault-token$`), regexp.MustCompile(`((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{24,}|s\.[A-Za-z0-9]{24,})`), 0, ConfidenceHigh, hasMinPrintableLength(24)),
+		// An Account SID is a public identifier, not a credential (DET-21).
+		newRegexDetector("twilio_account_sid", regexp.MustCompile(`\bAC[a-f0-9]{32}\b`), 0, ConfidenceMedium, nil),
+		newRegexDetector("databricks_token", regexp.MustCompile(`\bdapi[A-Za-z0-9]{32}(?:-\d)?\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("azure_storage_account_key", regexp.MustCompile(`accountkey=([a-z0-9+/]{86}==)`), 1, ConfidenceHigh, nil).onLoweredContent(),
+		newKeyValueDetector("datadog_api_key",
+			regexp.MustCompile(`(?i)(?:dd[_-]?api[_-]?key|datadog[_-]?api[_-]?key)`),
+			regexp.MustCompile(`\b[a-f0-9]{32}\b`),
+			ConfidenceHigh, nil),
+		newRegexDetector("notion_integration_token", regexp.MustCompile(`\b(?:secret_[A-Za-z0-9]{40,60}|ntn_[0-9]{11}[A-Za-z0-9]{35})\b`), 0, ConfidenceHigh, nil).requiring("secret_", "ntn_"),
+		newRegexDetector("pulumi_access_token", regexp.MustCompile(`\bpul-[A-Za-z0-9]{40}\b`), 0, ConfidenceHigh, nil),
+		// age identities are Bech32 with HRP AGE-SECRET-KEY-; age-keygen and SOPS
+		// write them uppercase, and Bech32 also permits an all-lowercase form.
+		newRegexDetector("age_secret_key", regexp.MustCompile(`\bAGE-SECRET-KEY-1(?:[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}|[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58})\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("render_api_key", regexp.MustCompile(`\brnd_[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("twilio_auth_token", regexp.MustCompile(assignedValuePattern(`twilio[_-]?auth[_-]?token`, `[a-f0-9]{32}`, `\b`)), 1, ConfidenceHigh, nil).onLoweredContent(),
+		newRegexDetector("new_relic_user_api_key", regexp.MustCompile(`\bNRAK-[A-Z0-9]{27}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("okta_api_token", regexp.MustCompile(`\bSSWS[ \t]+([A-Za-z0-9_-]{20,})`), 1, ConfidenceHigh, nil),
+		newRegexDetector("square_application_secret", regexp.MustCompile(`\bsq0csp-[0-9A-Za-z_-]{43}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("square_oauth_token", regexp.MustCompile(`\bsq0atp-[0-9A-Za-z_-]{22}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("gitlab_deploy_token", regexp.MustCompile(`\bgldt-[A-Za-z0-9_-]{20,300}`+gitlabRoutableTail+`\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("gitlab_runner_token", regexp.MustCompile(`\bglrt-[A-Za-z0-9_-]{20,300}`+gitlabRoutableTail+`\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("discord_webhook", regexp.MustCompile(`(?:^|[^A-Za-z0-9+.-])(https://discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{68})(?:$|[^A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-])`), 1, ConfidenceHigh, nil).requiring("https://discord"),
+		discordBotTokenDetector{},
+		// A DSN is designed to ship in client applications; identifier, not credential (DET-21).
+		newRegexDetector("sentry_dsn", regexp.MustCompile(`https://[0-9a-f]{16,32}(?::[0-9a-f]{16,32})?@(?:o\d+\.ingest(?:\.us|\.de)?\.sentry\.io|(?:[a-z0-9-]+\.)?sentry\.io)/\d+`), 0, ConfidenceMedium, nil).requiring("sentry.io"),
+		newRegexDetector("shopify_shared_secret", regexp.MustCompile(`\bshpss_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("shopify_partner_key", regexp.MustCompile(`\bshppa_[a-fA-F0-9]{32}\b`), 0, ConfidenceHigh, nil),
+		telegramBotTokenDetector{},
+		newRegexDetector("postman_api_key", regexp.MustCompile(`\bPMAK-[0-9a-fA-F]{24}-[0-9a-fA-F]{34}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("stripe_webhook_secret", regexp.MustCompile(`\bwhsec_[A-Za-z0-9]{32,}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("mapbox_secret_token", regexp.MustCompile(`\bsk\.eyJ[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("airtable_personal_access_token", regexp.MustCompile(`\bpat[A-Za-z0-9]{14}\.[0-9a-f]{64}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("planetscale_service_token", regexp.MustCompile(`\bpscale_tkn_[A-Za-z0-9_]{43,}\b`), 0, ConfidenceHigh, nil),
+		// Fly.io API tokens: the fo1_ shape and the fm1a_/fm1r_/fm2_ macaroons
+		// (the "FlyV1 " prefix flyctl prints is not part of the value).
+		newRegexDetector("fly_api_token", regexp.MustCompile(`\b(?:fo1_[A-Za-z0-9._-]{43,}|fm1[ar]_[A-Za-z0-9+/]{100,}={0,3}|fm2_[A-Za-z0-9+/]{100,}={0,3})`), 0, ConfidenceHigh, nil).requiring("fo1_", "fm1a_", "fm1r_", "fm2_"),
+		newRegexDetector("circleci_personal_api_token", regexp.MustCompile(`\bCCIPAT_[A-Za-z0-9]{22}_[A-Fa-f0-9]{40}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("openrouter_api_key", regexp.MustCompile(`\bsk-or-v1-[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("sentry_user_token", regexp.MustCompile(`\bsntryu_[a-f0-9]{64}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("cloudflare_api_token", regexp.MustCompile(`\bcf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}\b`), 0, ConfidenceHigh, nil).requiring("cfut_", "cfat_"),
+		newRegexDetector("sonarcloud_token", regexp.MustCompile(`\bsqco_[A-Za-z0-9]{59}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("google_oauth_access_token", regexp.MustCompile(`\b(ya29\.(?i:[a-z0-9_-]{10,}))(?:[^A-Za-z0-9_-]|$)`), 1, ConfidenceHigh, nil),
+		newRegexDetector("netlify_personal_access_token", regexp.MustCompile(`\bnfp_[A-Za-z0-9_]{36}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("prefect_api_key", regexp.MustCompile(`\bpnu_[A-Za-z0-9]{36}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("nightfall_api_key", regexp.MustCompile(`\bNF-[A-Za-z0-9]{32}\b`), 0, ConfidenceHigh, nil),
+		newRegexDetector("tailscale_key", regexp.MustCompile(`\btskey-[a-z]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\b`), 0, ConfidenceHigh, nil),
+		newKeyValueDetector("cloudflare_api_token",
+			regexp.MustCompile(`(?i)(?:cf[_-]?api[_-]?(?:token|key)|cloudflare[_-]?(?:api[_-]?(?:token|key)|token))`),
+			regexp.MustCompile(`(?:cf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}|\b[A-Za-z0-9_-]{37,45}\b)`),
+			ConfidenceHigh, looksLikeAssignedSensitiveValue),
+		newKeyValueDetector("vercel_access_token",
+			regexp.MustCompile(`(?i)(?:vercel|zeit)[_-]?(?:api[_-]?)?token`),
+			regexp.MustCompile(`[A-Za-z0-9]{24,}`),
+			ConfidenceMedium, looksLikeAssignedSensitiveValue),
 	}
+	rules = append(rules, vendorTokenDetectors()...)
+	rules = append(rules, registryCredentialDetectors()...)
+	rules = append(rules, httpHeaderCredentialDetectors()...)
+	rules = append(rules, cloudStateDetectors()...)
+	rules = append(rules, cloudFormatDetectors()...)
+	rules = append(rules, frameworkSecretDetectors()...)
+	rules = append(rules, saasTokenDetectors()...)
+	// Path-only classification runs through Set.ScanPath, never Set.Scan.
+	rules = append(rules, sensitiveFileDetector{})
+	rules = append(rules, contextEntropyDetector{})
+	return Set{detectors: rules}
 }
 
 func (s Set) Len() int {
 	return len(s.detectors)
 }
 
+// Catalog returns the sorted, de-duplicated detector identifiers this set can
+// report in Match.Detector, built from every strategy's IDs. Several strategies
+// may share one identifier (docker_auth_blob is matched by path and by shape)
+// and one strategy may emit several (aws_shared_credentials_*), so the catalog
+// is the public identifier list rather than the strategy list.
+func (s Set) Catalog() []string {
+	seen := make(map[string]struct{}, len(s.detectors))
+	catalog := make([]string, 0, len(s.detectors))
+	for _, detector := range s.detectors {
+		for _, id := range detector.IDs() {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			catalog = append(catalog, id)
+		}
+	}
+	sort.Strings(catalog)
+	return catalog
+}
+
 func (s Set) Scan(input ScanInput) []Match {
+	input.lowered = asciiLower(input.Content)
 	matches := make([]Match, 0)
 	for _, detector := range s.detectors {
 		matches = append(matches, detector.Scan(input)...)
@@ -216,57 +281,198 @@ func (s Set) Scan(input ScanInput) []Match {
 		deduped = append(deduped, match)
 	}
 
-	return deduped
+	return dropNestedLowerPriorityMatches(deduped)
+}
+
+// dropNestedLowerPriorityMatches removes a match that lies strictly inside a
+// match of higher priority: keyword_entropy on the password inside a
+// basic_auth_url match is the same credential reported twice with two
+// fingerprints. A higher-priority inner match (git_credentials_password inside
+// basic_auth_url) is intentional nesting and is kept. The input order is
+// preserved.
+func dropNestedLowerPriorityMatches(matches []Match) []Match {
+	if len(matches) < 2 {
+		return matches
+	}
+	dropped := make([]bool, len(matches))
+	markNestedLowerPriorityMatches(matches, outerSpansFirstOrder(matches), dropped)
+
+	result := make([]Match, 0, len(matches))
+	for index, match := range matches {
+		if !dropped[index] {
+			result = append(result, match)
+		}
+	}
+	return result
+}
+
+// outerSpansFirstOrder returns the match indexes ordered outer spans first: by
+// start, then by the longest end, then by priority.
+func outerSpansFirstOrder(matches []Match) []int {
+	order := make([]int, len(matches))
+	for index := range order {
+		order[index] = index
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		left, right := matches[order[i]], matches[order[j]]
+		if left.Start != right.Start {
+			return left.Start < right.Start
+		}
+		if left.End != right.End {
+			return left.End > right.End
+		}
+		return left.Priority > right.Priority
+	})
+	return order
+}
+
+// markNestedLowerPriorityMatches walks matches in order and sets dropped for
+// each match index that lies inside a still-open match of higher priority.
+func markNestedLowerPriorityMatches(matches []Match, order []int, dropped []bool) {
+	active := make([]int, 0, 4)
+	for _, index := range order {
+		match := matches[index]
+		active = activeMatchesEndingAfter(matches, active, match.Start)
+		dropped[index] = nestedInHigherPriorityMatch(matches, active, match)
+		if !dropped[index] {
+			active = append(active, index)
+		}
+	}
+}
+
+// activeMatchesEndingAfter filters active in place to the matches that end
+// after start.
+func activeMatchesEndingAfter(matches []Match, active []int, start int) []int {
+	kept := active[:0]
+	for _, candidate := range active {
+		if matches[candidate].End > start {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
+}
+
+// nestedInHigherPriorityMatch reports whether match lies inside one of the
+// active matches with a higher priority.
+func nestedInHigherPriorityMatch(matches []Match, active []int, match Match) bool {
+	for _, candidate := range active {
+		outer := matches[candidate]
+		if outer.Priority > match.Priority && outer.Start <= match.Start && outer.End >= match.End {
+			return true
+		}
+	}
+	return false
 }
 
 type regexDetector struct {
-	name       string
-	expression *regexp.Regexp
-	group      int
-	base       Confidence
-	validator  func(string) bool
+	name      string
+	rule      compiledRule
+	group     int
+	base      Confidence
+	validator func(string) bool
+	// lowered runs the rule over the ASCII-lowercased content; the rule must
+	// then be written in lowercase without (?i), which keeps a literal prefix.
+	lowered bool
+	// skip drops a match by its position in the haystack (the lowered
+	// content for a lowered rule), for context the value alone cannot show,
+	// such as the name of the constant a value is assigned to.
+	skip func(content string, start int) bool
 }
 
 func newRegexDetector(name string, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool) regexDetector {
 	return regexDetector{
-		name:       name,
-		expression: expression,
-		group:      group,
-		base:       base,
-		validator:  validator,
+		name:      name,
+		rule:      compileRule(expression),
+		group:     group,
+		base:      base,
+		validator: validator,
 	}
+}
+
+// requiring declares literals one of which must occur in the content before
+// the rule's regular expression runs; use it for rules whose pattern has no
+// literal prefix of its own (alternations, character classes, (?i) flags).
+func (d regexDetector) requiring(literals ...string) regexDetector {
+	d.rule = d.rule.withLiterals(literals...)
+	return d
+}
+
+// onLoweredContent makes the rule case-insensitive by matching the lowercased
+// content instead of carrying a (?i) flag, which has no literal prefix.
+func (d regexDetector) onLoweredContent() regexDetector {
+	d.lowered = true
+	return d
+}
+
+// skipping returns the detector with a positional filter applied after the
+// value validator.
+func (d regexDetector) skipping(skip func(content string, start int) bool) regexDetector {
+	d.skip = skip
+	return d
 }
 
 func (d regexDetector) Name() string {
 	return d.name
 }
 
+func (d regexDetector) IDs() []string {
+	return singleID(d.name)
+}
+
 func (d regexDetector) Scan(input ScanInput) []Match {
-	return scanRegexMatches(d.name, d.expression, d.group, d.base, priorityLocal, d.validator, input)
+	haystack := input
+	if d.lowered {
+		haystack = input.loweredView()
+	}
+	matches := scanRegexMatches(d.name, d.rule, d.group, d.base, priorityLocal, d.validator, input, haystack)
+	if d.skip == nil {
+		return matches
+	}
+	kept := matches[:0]
+	for _, match := range matches {
+		if !d.skip(haystack.Content, match.Start) {
+			kept = append(kept, match)
+		}
+	}
+	return kept
 }
 
 type pathRegexDetector struct {
 	name           string
 	pathExpression *regexp.Regexp
-	expression     *regexp.Regexp
+	rule           compiledRule
 	group          int
 	base           Confidence
 	validator      func(string) bool
+	// skip drops a match by its position in the content, for context the
+	// value alone cannot show (an XML comment around it).
+	skip func(content string, start int) bool
 }
 
 func newPathRegexDetector(name string, pathExpression, expression *regexp.Regexp, group int, base Confidence, validator func(string) bool) pathRegexDetector {
 	return pathRegexDetector{
 		name:           name,
 		pathExpression: pathExpression,
-		expression:     expression,
+		rule:           compileRule(expression),
 		group:          group,
 		base:           base,
 		validator:      validator,
 	}
 }
 
+// skipping returns the detector with a positional filter applied after the
+// value validator.
+func (d pathRegexDetector) skipping(skip func(content string, start int) bool) pathRegexDetector {
+	d.skip = skip
+	return d
+}
+
 func (d pathRegexDetector) Name() string {
 	return d.name
+}
+
+func (d pathRegexDetector) IDs() []string {
+	return singleID(d.name)
 }
 
 func (d pathRegexDetector) Scan(input ScanInput) []Match {
@@ -274,19 +480,19 @@ func (d pathRegexDetector) Scan(input ScanInput) []Match {
 	if pathValue == "" || !d.pathExpression.MatchString(pathValue) {
 		return nil
 	}
-	priority := priorityLocal
-	if d.name == "docker_auth_blob" ||
-		strings.HasPrefix(d.name, "docker_config_") ||
-		d.name == "terraform_cloud_token" ||
-		d.name == "npmrc_auth_token" ||
-		d.name == "npmrc_auth" ||
-		d.name == "netrc_password" ||
-		d.name == "pypirc_password" ||
-		d.name == "kubeconfig_token" ||
-		d.name == "vault_token_file" {
-		priority = priorityStructured
+	// A rule gated on a file format knows what it is reading, so it outranks
+	// the shape-only rules on the same span.
+	matches := scanRegexMatches(d.name, d.rule, d.group, d.base, priorityStructured, d.validator, input, input)
+	if d.skip == nil {
+		return matches
 	}
-	return scanRegexMatches(d.name, d.expression, d.group, d.base, priority, d.validator, input)
+	kept := matches[:0]
+	for _, match := range matches {
+		if !d.skip(input.Content, match.Start) {
+			kept = append(kept, match)
+		}
+	}
+	return kept
 }
 
 type keyValueDetector struct {
@@ -309,6 +515,10 @@ func newKeyValueDetector(name string, keyExpression, valueExpression *regexp.Reg
 
 func (d keyValueDetector) Name() string {
 	return d.name
+}
+
+func (d keyValueDetector) IDs() []string {
+	return singleID(d.name)
 }
 
 func (d keyValueDetector) Scan(input ScanInput) []Match {
@@ -349,8 +559,10 @@ func (d keyValueDetector) Scan(input ScanInput) []Match {
 	return matches
 }
 
-func scanRegexMatches(name string, expression *regexp.Regexp, group int, base Confidence, priority int, validator func(string) bool, input ScanInput) []Match {
-	indexes := expression.FindAllStringSubmatchIndex(input.Content, -1)
+// scanRegexMatches runs rule over haystack (the input itself, or its lowered
+// view) and reports values from input at the matched offsets.
+func scanRegexMatches(name string, rule compiledRule, group int, base Confidence, priority int, validator func(string) bool, input, haystack ScanInput) []Match {
+	indexes := rule.findAll(haystack)
 	matches := make([]Match, 0, len(indexes))
 	for _, index := range indexes {
 		start := index[0]
@@ -385,7 +597,16 @@ func (contextEntropyDetector) Name() string {
 	return "keyword_entropy"
 }
 
+func (d contextEntropyDetector) IDs() []string {
+	return singleID(d.Name())
+}
+
 func (contextEntropyDetector) Scan(input ScanInput) []Match {
+	lowered := input.loweredContent()
+	keyIsSensitive := sensitiveKey(input.Key)
+	if !keyIsSensitive && !containsSecretKeyword(lowered) {
+		return nil
+	}
 	lines := splitLinesWithOffsets(input.Content)
 	matches := make([]Match, 0)
 	for _, line := range lines {
@@ -393,34 +614,51 @@ func (contextEntropyDetector) Scan(input ScanInput) []Match {
 		if trimmed == "" {
 			continue
 		}
-		lowerLine := strings.ToLower(line.Value)
-		if !secretKeywordExpression.MatchString(lowerLine) && !sensitiveKey(input.Key) {
+		// asciiLower preserves byte offsets, so the lowered line is a slice.
+		if !keyIsSensitive && !containsSecretKeyword(lowered[line.Offset:line.Offset+len(line.Value)]) {
 			continue
 		}
-		candidates := entropyCandidateExpression.FindAllStringIndex(line.Value, -1)
-		for _, candidate := range candidates {
-			value := line.Value[candidate[0]:candidate[1]]
-			if !hasEntropyContext(line.Value, input.Key, candidate[0], candidate[1]) {
-				continue
-			}
-			if shouldSuppressEntropyCandidate(value) {
-				continue
-			}
-			if !passesEntropy(value) {
-				continue
-			}
-			matches = append(matches, Match{
-				Detector:   "keyword_entropy",
-				Value:      value,
-				Start:      line.Offset + candidate[0],
-				End:        line.Offset + candidate[1],
-				Confidence: adjustConfidence(ConfidenceLow, input.Path, input.Key, value),
-				Priority:   priorityEntropy,
-			})
-		}
+		matches = appendEntropyLineMatches(matches, input, line)
 	}
 
 	return matches
+}
+
+// appendEntropyLineMatches appends a keyword_entropy match for every
+// entropy candidate on line that isEntropyLineCandidate accepts.
+func appendEntropyLineMatches(matches []Match, input ScanInput, line lineWithOffset) []Match {
+	candidates := entropyCandidateExpression.FindAllStringIndex(line.Value, -1)
+	for _, candidate := range candidates {
+		value := line.Value[candidate[0]:candidate[1]]
+		if !isEntropyLineCandidate(input, line.Value, value, candidate[0], candidate[1]) {
+			continue
+		}
+		matches = append(matches, Match{
+			Detector:   "keyword_entropy",
+			Value:      value,
+			Start:      line.Offset + candidate[0],
+			End:        line.Offset + candidate[1],
+			Confidence: adjustConfidence(ConfidenceLow, input.Path, input.Key, value),
+			Priority:   priorityEntropy,
+		})
+	}
+	return matches
+}
+
+// isEntropyLineCandidate applies, in order, the context, suppression,
+// content-digest and entropy checks to the candidate value at
+// lineValue[start:end].
+func isEntropyLineCandidate(input ScanInput, lineValue, value string, start, end int) bool {
+	if !hasEntropyContext(lineValue, input.Key, start, end) {
+		return false
+	}
+	if shouldSuppressEntropyCandidate(value) {
+		return false
+	}
+	if looksLikeContentDigest(lineValue[:start], value, input.Path) {
+		return false
+	}
+	return passesEntropy(value)
 }
 
 type lineWithOffset struct {
@@ -429,9 +667,16 @@ type lineWithOffset struct {
 }
 
 var (
-	secretKeywordExpression    = regexp.MustCompile(`secret|token|password|passwd|pwd|api[_-]?key|auth|authorization|credential|private[_-]?key|access[_-]?key|client[_-]?secret`)
-	entropyCandidateExpression = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9+/=_-]{19,}`)
+	secretKeywordExpression = regexp.MustCompile(`secret|token|password|passwd|pwd|api[_-]?key|auth|authorization|credential|private[_-]?key|access[_-]?key|client[_-]?secret`)
+	// entropyCandidateExpression keeps '=' out of the repeating class so an
+	// unquoted KEY=VALUE line yields the value as its own candidate instead of
+	// one KEY=VALUE token whose prefix is empty; base64 padding is still
+	// allowed at the end of a value.
+	entropyCandidateExpression = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9+/_-]{19,}={0,2}`)
 	wordyCandidateExpression   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*$`)
+	// dockerfileSpaceAssignmentExpression matches the legacy Dockerfile
+	// `ENV KEY value` form, whose separator is whitespace rather than '='.
+	dockerfileSpaceAssignmentExpression = regexp.MustCompile(`(?i)(?:^|\s)(?:ENV|ARG)\s+[A-Za-z_][A-Za-z0-9_.]*\s+$`)
 )
 
 func splitLinesWithOffsets(value string) []lineWithOffset {
@@ -491,9 +736,17 @@ func sensitivePath(value string) bool {
 	case ".env", ".env.local", ".npmrc", ".netrc", ".pypirc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "config.json":
 		return true
 	}
-	for _, token := range []string{"secret", "token", "credential", "key", ".docker"} {
-		if strings.Contains(value, token) {
+	// Match whole words of the path, so keycloak, keyrings, tokenizer and
+	// monkey do not promote unrelated findings.
+	for _, segment := range strings.Split(value, "/") {
+		if segment == ".docker" {
 			return true
+		}
+		for _, word := range strings.FieldsFunc(segment, func(r rune) bool { return !unicode.IsLetter(r) }) {
+			switch word {
+			case "secret", "secrets", "token", "tokens", "credential", "credentials", "key", "keys", "apikey", "password", "passwd":
+				return true
+			}
 		}
 	}
 	return false
@@ -562,31 +815,6 @@ func looksLikeJWT(value string) bool {
 	return hasAlg || hasTyp
 }
 
-func looksLikeBasicAuthURL(value string) bool {
-	if !isPrintableText(value) {
-		return false
-	}
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return false
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return false
-	}
-	if parsed.User == nil {
-		return false
-	}
-	username := parsed.User.Username()
-	password, ok := parsed.User.Password()
-	if !ok || username == "" || password == "" {
-		return false
-	}
-	if parsed.Hostname() == "" {
-		return false
-	}
-	return isPrintableText(username) && isPrintableText(password) && isPrintableText(parsed.Hostname())
-}
-
 func looksLikeAWSSecretAccessKey(value string) bool {
 	if len(value) != 40 || !isPrintableText(value) {
 		return false
@@ -634,9 +862,17 @@ func hasEntropyContext(line, key string, start, end int) bool {
 	return secretKeywordExpression.MatchString(lowerPrefix)
 }
 
+// hasAssignedValuePrefix reports whether the text before a candidate ends in
+// an assignment operator, ignoring any run of whitespace and opening quotes
+// between the operator and the value (`"key": "value"`, `key = "value"`,
+// `key => 'value'`), or in a legacy Dockerfile `ENV KEY ` separator.
 func hasAssignedValuePrefix(prefix string) bool {
-	trimmed := strings.TrimRightFunc(prefix, unicode.IsSpace)
-	trimmed = strings.TrimRight(trimmed, "\"'`")
+	trimmed := strings.TrimRightFunc(prefix, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '"' || r == '\'' || r == '`'
+	})
+	if trimmed != prefix && dockerfileSpaceAssignmentExpression.MatchString(prefix) {
+		return true
+	}
 	switch {
 	case strings.HasSuffix(trimmed, ":="):
 		return true
@@ -678,21 +914,60 @@ func shouldSuppressEntropyCandidate(value string) bool {
 	return false
 }
 
+// lowercaseWordExpression matches a segment that reads as a word (python3,
+// amd64, headers) rather than as random material.
+var lowercaseWordExpression = regexp.MustCompile(`^[a-z]{3,}[0-9]{0,2}$`)
+
+// isLowercaseSeparatorCandidate suppresses slugs and package names such as
+// base-passwd/user-change-gecos or linux-headers-5-15-0-generic: lowercase
+// letters, digits and separators with few digits or mostly word-like
+// segments. Random lowercase secrets (UUIDs, Mailgun key-... values,
+// base64url tokens) carry many digits and few words, so they pass through to
+// the entropy check instead of being discarded regardless of context.
 func isLowercaseSeparatorCandidate(value string) bool {
 	if value == "" || !strings.ContainsAny(value, "-_/") {
 		return false
 	}
+	if !isLowercaseSlugAlphabet(value) {
+		return false
+	}
+	if digitCount(value) <= 2 {
+		return true
+	}
+	return hasMostlyWordSegments(value)
+}
+
+// isLowercaseSlugAlphabet reports whether value holds only lowercase
+// letters, digits and slug separators, with at least one letter.
+func isLowercaseSlugAlphabet(value string) bool {
 	hasLetter := false
 	for _, r := range value {
 		switch {
 		case unicode.IsLower(r):
 			hasLetter = true
-		case unicode.IsDigit(r), r == '-', r == '_', r == '/':
+		case unicode.IsDigit(r), isSlugSeparator(r):
 		default:
 			return false
 		}
 	}
 	return hasLetter
+}
+
+func isSlugSeparator(r rune) bool {
+	return r == '-' || r == '_' || r == '/'
+}
+
+// hasMostlyWordSegments reports whether at least two separator-delimited
+// segments of value, and at least half of them, read as words.
+func hasMostlyWordSegments(value string) bool {
+	segments := strings.FieldsFunc(value, isSlugSeparator)
+	wordy := 0
+	for _, segment := range segments {
+		if lowercaseWordExpression.MatchString(segment) {
+			wordy++
+		}
+	}
+	return wordy >= 2 && wordy*2 >= len(segments)
 }
 
 func looksPathLikeCandidate(value string) bool {
@@ -721,7 +996,7 @@ func looksLikeWordCompound(value string) bool {
 		}
 	})
 	if len(segments) < 2 {
-		return false
+		return isCamelCaseCompound(value)
 	}
 	for _, segment := range segments {
 		if segment == "" || !wordyCandidateExpression.MatchString(segment) {
@@ -729,6 +1004,29 @@ func looksLikeWordCompound(value string) bool {
 		}
 	}
 	return true
+}
+
+// isCamelCaseCompound reports a letters-only value made of two or more
+// capitalised words of at least three letters (RootManageSharedAccessKey,
+// defaultServiceAccount): a name, not key material. Random mixed-case
+// strings break into one- and two-letter runs and are kept.
+func isCamelCaseCompound(value string) bool {
+	segments := 0
+	run := 0
+	for index, r := range value {
+		if !unicode.IsLetter(r) {
+			return false
+		}
+		if unicode.IsUpper(r) && index > 0 {
+			if run < 3 {
+				return false
+			}
+			segments++
+			run = 0
+		}
+		run++
+	}
+	return segments >= 1 && run >= 3
 }
 
 func hasStrongEntropyShape(value string) bool {
@@ -816,6 +1114,11 @@ func looksLikeDiscordBotToken(value string) bool {
 	return true
 }
 
+// genericEntropyThreshold is the Shannon-entropy floor (bits per symbol) for
+// values drawn from a mixed alphabet; a random 20-character alphanumeric value
+// clears it about 96% of the time.
+const genericEntropyThreshold = 3.75
+
 func passesEntropy(value string) bool {
 	if len(value) < 20 {
 		return false
@@ -837,7 +1140,66 @@ func passesEntropy(value string) bool {
 		probability := count / total
 		entropy += -probability * math.Log2(probability)
 	}
-	return entropy >= 3.75
+	return entropy >= entropyThreshold(value)
+}
+
+// entropyThreshold returns the entropy floor for a value's alphabet. A hex
+// string cannot exceed 4 bits per symbol and its plug-in entropy for n symbols
+// is well below that (about 3.6 bits at 32 characters), so the fixed generic
+// floor rejected most 32- and 40-hex API keys and UUIDs. For single-case hex,
+// optionally dashed (UUIDs), the floor is 4 - 24/n, which sits at the first
+// percentile of genuinely random hex at every length from 20 to 64. Digit-only
+// values keep the generic floor and so never pass.
+func entropyThreshold(value string) float64 {
+	if isHexAlphabet(value) {
+		return 4 - 24/float64(len(value))
+	}
+	return genericEntropyThreshold
+}
+
+// isHexAlphabet reports whether value is single-case hexadecimal, allowing the
+// dashes of a UUID, with at least one hex letter so digit-only strings are
+// excluded.
+func isHexAlphabet(value string) bool {
+	hasLetter := false
+	hasLower := false
+	hasUpper := false
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9', r == '-':
+		case r >= 'a' && r <= 'f':
+			hasLetter = true
+			hasLower = true
+		case r >= 'A' && r <= 'F':
+			hasLetter = true
+			hasUpper = true
+		default:
+			return false
+		}
+	}
+	return hasLetter && (!hasLower || !hasUpper)
+}
+
+var (
+	// contentDigestPrefixExpression matches text that introduces a content
+	// digest or revision rather than a credential: an algorithm label
+	// (sha256:, md5=), or a digest/checksum/commit/etag key, ending with the
+	// assignment operator and any opening quote.
+	contentDigestPrefixExpression = regexp.MustCompile(`(?i)(?:sha-?(?:1|224|256|384|512)|md5|blake2[bs]?|digest|checksum|integrity|etag|commit|revision|hash)(?:_?sha)?(?:sum)?\s*(?:[:=]|=>|:=)?\s*["'` + "`" + `]*$`)
+	// lockFileNameExpression matches dependency lock files, whose hex is
+	// package digests and never a credential.
+	lockFileNameExpression = regexp.MustCompile(`(?i)(?:^|/)(?:go\.sum|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|pipfile\.lock|poetry\.lock|pdm\.lock|uv\.lock|cargo\.lock|composer\.lock|gemfile\.lock|packages\.lock\.json|flake\.lock|mix\.lock|pubspec\.lock|podfile\.lock|[^/]+\.lockfile|[^/]+\.lock)$`)
+)
+
+// looksLikeContentDigest reports whether a candidate is a content digest
+// rather than a secret: any candidate in a dependency lock file (package
+// digests, go.sum h1: hashes, yarn.lock #sha1 fragments), or hex that follows
+// a digest marker (sha256:, md5=, a checksum/commit/etag key).
+func looksLikeContentDigest(prefix, value, pathValue string) bool {
+	if lockFileNameExpression.MatchString(strings.ToLower(strings.TrimSpace(pathValue))) {
+		return true
+	}
+	return isHexAlphabet(value) && contentDigestPrefixExpression.MatchString(prefix)
 }
 
 func confidenceRank(value Confidence) int {
@@ -856,7 +1218,7 @@ func confidenceRank(value Confidence) int {
 func priorityForKeyValueDetector(name string) int {
 	switch name {
 	case "assigned_sensitive_value":
-		return priorityStructured
+		return priorityAssigned
 	default:
 		return priorityLocal
 	}

@@ -37,9 +37,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(go list -m)" = "github.com/brumbelow/layerleak"
+          test "$(go list -m)" = "github.com/brumbelow/layerleak/v3"
           go mod verify
           go mod tidy -diff
+
+      - name: Verify the Dockerfile builder matches the go.mod toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          go_directive="$(go list -m -f '{{.GoVersion}}')"
+          dockerfile_go="$(grep -oP '^FROM --platform=[$]BUILDPLATFORM golang:\K[0-9][0-9.]*(?=-bookworm@sha256:[0-9a-f]{64} AS build$)' Dockerfile || true)"
+          if [[ -z "${dockerfile_go}" || "${go_directive}" != "${dockerfile_go}" ]]; then
+            echo "go.mod declares go ${go_directive} but the Dockerfile builds with golang:${dockerfile_go:-<unparsed>}; keep them identical." >&2
+            exit 1
+          fi
 
       - name: Verify formatting and whitespace
         shell: bash
@@ -57,10 +68,28 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test -short ./... -count=1
+        run: go test -short -shuffle=on ./... -count=1
 
       - name: Race test
         run: go test -short -race ./... -count=1
+
+      - name: Cross-compile and vet for the other supported CLI platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in darwin/arm64 darwin/amd64 windows/amd64 linux/arm64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
+
+      - name: Fuzz every target briefly
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each Fuzz function runs for a short, bounded time beyond its seed corpus.
+          while IFS=: read -r file func; do
+            go test "./$(dirname "${file}")" -run '^$' -fuzz "^${func}\$" -fuzztime 30s -fuzzminimizetime 5s
+          done < <(grep -rEo --include='*_test.go' '^func Fuzz[A-Za-z0-9_]+' . | sed -E 's#^\./([^:]+):func (Fuzz[A-Za-z0-9_]+)$#\1:\2#')
 
       - name: Install and exercise CLI
         shell: bash
@@ -72,6 +101,39 @@ jobs:
           "${install_bin}/layerleak" --help
           "${install_bin}/layerleak" scan --help
           "${install_bin}/layerleak" --version
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned golangci-lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/lint-tools"
+          mkdir -p "${tool_dir}"
+          # Built from source with the go.mod toolchain so it can type-check this module.
+          GOBIN="${tool_dir}" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+
+      - name: Run golangci-lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/lint-tools/golangci-lint" version
+          "${RUNNER_TEMP}/lint-tools/golangci-lint" run ./...
 
   documentation:
     name: OpenAPI and static documentation
@@ -91,14 +153,14 @@ jobs:
           cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: requirements-docs.lock
+          cache-dependency-path: requirements-docs.txt
 
       - name: Install pinned documentation validators
-        run: python -m pip install --require-hashes -r requirements-docs.lock
+        run: python -m pip install --require-hashes -r requirements-docs.txt
 
       - name: Verify handler-backed API examples are current
         run: go test ./internal/api -run '^TestDocumentedScanResponsesMatchHandler$' -count=1
@@ -108,6 +170,15 @@ jobs:
 
       - name: Validate OpenAPI and static documentation
         run: python scripts/validate_docs.py
+
+      - name: Validate SARIF fixtures against the OASIS 2.1.0 schema
+        run: python scripts/validate_sarif.py internal/sarif/testdata/*.sarif.json
+
+      - name: Test JSON Schema validation failures
+        run: python -m unittest scripts/tests/test_validate_schemas.py
+
+      - name: Validate CLI and API fixtures against the published JSON Schemas
+        run: python scripts/validate_schemas.py
 
       - name: Test release and container validation
         run: python3 -m unittest discover -s scripts/tests -v
@@ -121,6 +192,9 @@ jobs:
 
       - name: Install browser test dependencies
         run: npm ci --prefix scripts/tests
+
+      - name: Lint the site stylesheet
+        run: npm run lint:css --prefix scripts/tests
 
       - name: Install test browser
         run: |
@@ -180,7 +254,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+        image: postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
           POSTGRES_DB: layerleak_test
           POSTGRES_USER: layerleak
@@ -233,7 +307,20 @@ jobs:
           fi
 
       - name: Run full test suite with PostgreSQL
-        run: go test ./... -count=1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${LAYERLEAK_TEST_DATABASE_URL}"
+          # The integration tests skip themselves without a database; in this
+          # job a skip means the service wiring is broken, so fail on it.
+          go test ./internal/storage/... -count=1 -v 2>&1 | tee "${RUNNER_TEMP}/storage-tests.log" | grep -E '^(--- FAIL|FAIL|ok)' || true
+          if grep -q 'LAYERLEAK_TEST_DATABASE_URL is not set' "${RUNNER_TEMP}/storage-tests.log"; then
+            echo "storage integration tests skipped although a database is configured" >&2
+            exit 1
+          fi
+          grep -q '^ok' "${RUNNER_TEMP}/storage-tests.log"
+          go test ./... -count=1
+          go test -race ./internal/storage/... ./internal/scanservice/... ./cmd/... -count=1
 
   compose:
     name: Compose configuration
@@ -274,13 +361,13 @@ jobs:
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
 
       - name: Build platform image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -314,7 +401,7 @@ jobs:
             -e POSTGRES_DB=layerleak \
             -e POSTGRES_USER=layerleak \
             -e POSTGRES_PASSWORD=layerleak-test-only \
-            postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50 >/dev/null
+            postgres:16.15-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea >/dev/null
 
           for attempt in {1..30}; do
             if docker exec "${database}" pg_isready -h 127.0.0.1 -U layerleak -d layerleak >/dev/null 2>&1; then
@@ -340,7 +427,6 @@ jobs:
             --read-only --tmpfs /tmp:mode=1777 --cap-drop ALL --security-opt no-new-privileges \
             -p 127.0.0.1:18080:8080 \
             -e LAYERLEAK_DATABASE_URL="${database_url}" \
-            -e LAYERLEAK_FINDINGS_DIR=/tmp/layerleak/findings \
             "${TEST_IMAGE}" >/dev/null
 
           for attempt in {1..60}; do
@@ -355,6 +441,32 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:18080/health
           test "$(docker exec "${database}" psql -U layerleak -d layerleak -tAc "SELECT to_regclass('public.scan_runs') IS NOT NULL")" = "t"
+
+          # API contract smoke: every response is a JSON envelope, including
+          # 400/404/405, and the read endpoints answer against the real schema.
+          api_check() {
+            local method="$1" path="$2" expected_status="$3" jq_filter="$4"
+            shift 4
+            local response status body
+            response="$(curl --silent --show-error --output - --write-out '\n%{http_code}' \
+              -X "${method}" "$@" "http://127.0.0.1:18080${path}")"
+            status="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            if [[ "${status}" != "${expected_status}" ]] || ! jq -e "${jq_filter}" <<<"${body}" >/dev/null; then
+              echo "unexpected response for ${method} ${path}: status=${status} body=${body}" >&2
+              exit 1
+            fi
+          }
+          api_check POST /api/v1/scans 400 '.error.code == "invalid_request"' \
+            -H 'Content-Type: application/json' --data '{"reference":"https://not-a-reference"}'
+          api_check GET /api/v1/repositories 200 '(.repositories | type) == "array" and (.repositories | length) == 0'
+          api_check GET /api/v1/scans/999999999 404 '.error.code == "not_found"'
+          api_check GET /definitely-not-a-route 404 '.error.code == "not_found"'
+          api_check PUT /api/v1/scans 405 '.error.code == "method_not_allowed"'
+          curl --silent --output /dev/null --dump-header - -X PUT http://127.0.0.1:18080/api/v1/scans \
+            | grep -qi '^Allow: POST'
+          curl --silent --output /dev/null --dump-header - http://127.0.0.1:18080/health \
+            | grep -qi '^X-Content-Type-Options: nosniff'
 
   vulnerability:
     name: Reachable Go vulnerabilities
@@ -374,7 +486,7 @@ jobs:
           cache: true
 
       - name: Install pinned govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
 
       - name: Gate reachable vulnerabilities
         run: govulncheck ./...

@@ -1,0 +1,13 @@
+{
+  "name": "file_gcloud_adc_refresh_token_actionable",
+  "source_type": "file_final",
+  "path": "root/.config/gcloud/application_default_credentials.json",
+  "key": "",
+  "content_base64": "eyJjbGllbnRfaWQiOiIxMjM0LWFiYy5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbSIsInJlZnJlc2hfdG9rZW4iOiIxLy8wZVhrOWZMMm1ROHZSNHRZN3daMWFCM2NENWVGNmdIOGpLMGxNMm5PNHBRNnJTOHRVMHZXMnhZNHoiLCJ0eXBlIjoiYXV0aG9yaXplZF91c2VyIn0=",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "google_oauth_refresh_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

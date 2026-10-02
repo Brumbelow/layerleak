@@ -22,7 +22,22 @@ const (
 	MediaTypeDockerSchema2LayerGzip        = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 	MediaTypeDockerSchema2ForeignLayer     = "application/vnd.docker.image.rootfs.foreign.diff.tar"
 	MediaTypeDockerSchema2ForeignLayerGzip = "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"
+
+	// Non-distributable (foreign) layers are referenced by URL instead of being
+	// served by the registry. They are syntactically valid layer descriptors
+	// that Layerleak does not download.
+	MediaTypeOCIImageLayerNonDistributable     = "application/vnd.oci.image.layer.nondistributable.v1.tar"
+	MediaTypeOCIImageLayerNonDistributableGzip = "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip"
+	MediaTypeOCIImageLayerNonDistributableZstd = "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd"
+
+	// Common non-image index entries that are skipped rather than scanned.
+	MediaTypeOCIEmptyJSON = "application/vnd.oci.empty.v1+json"
+	MediaTypeInTotoJSON   = "application/vnd.in-toto+json"
 )
+
+// DefaultPlatformOS is the operating system whose manifests are selected from
+// an image index when no platform selector is given.
+const DefaultPlatformOS = "linux"
 
 type Platform struct {
 	OS           string `json:"os,omitempty"`
@@ -165,6 +180,8 @@ func ParseImageConfig(body []byte) (ImageConfig, error) {
 	return cfg, nil
 }
 
+// ParsePlatformSelector parses an os, os/arch or os/arch/variant selector.
+// Omitted components act as wildcards when the selector is matched.
 func ParsePlatformSelector(raw string) (Platform, error) {
 	if raw == "" {
 		return Platform{}, fmt.Errorf("platform selector is required")
@@ -174,15 +191,20 @@ func ParsePlatformSelector(raw string) (Platform, error) {
 	}
 
 	parts := strings.Split(raw, "/")
-	if len(parts) < 2 || len(parts) > 3 {
-		return Platform{}, fmt.Errorf("platform selector must be os/arch or os/arch/variant")
+	if len(parts) > 3 {
+		return Platform{}, fmt.Errorf("platform selector must be os, os/arch or os/arch/variant")
+	}
+	for _, part := range parts {
+		if part == "" {
+			return Platform{}, fmt.Errorf("platform selector components must not be empty")
+		}
 	}
 
-	platform := Platform{
-		OS:           parts[0],
-		Architecture: parts[1],
+	platform := Platform{OS: parts[0]}
+	if len(parts) > 1 {
+		platform.Architecture = parts[1]
 	}
-	if len(parts) == 3 {
+	if len(parts) > 2 {
 		platform.Variant = parts[2]
 	}
 
@@ -193,9 +215,15 @@ func ParsePlatformSelector(raw string) (Platform, error) {
 	return platform, nil
 }
 
-func ValidatePlatform(platform Platform, requireOSAndArchitecture bool) error {
-	if requireOSAndArchitecture && (platform.OS == "" || platform.Architecture == "") {
-		return fmt.Errorf("platform selector must include os and architecture")
+// ValidatePlatform checks the syntax of every platform component. A selector
+// must name an operating system and may only carry a variant alongside an
+// architecture; descriptor platforms may leave every component empty.
+func ValidatePlatform(platform Platform, selector bool) error {
+	if selector && platform.OS == "" {
+		return fmt.Errorf("platform selector must include an operating system")
+	}
+	if selector && platform.Variant != "" && platform.Architecture == "" {
+		return fmt.Errorf("platform selector variant requires an architecture")
 	}
 	for _, field := range []struct {
 		name  string
@@ -205,87 +233,73 @@ func ValidatePlatform(platform Platform, requireOSAndArchitecture bool) error {
 		{name: "architecture", value: platform.Architecture},
 		{name: "variant", value: platform.Variant},
 	} {
-		name, value := field.name, field.value
-		if value == "" {
-			continue
-		}
-		if len(value) > MaxPlatformComponentBytes {
-			return fmt.Errorf("platform %s exceeds %d bytes", name, MaxPlatformComponentBytes)
-		}
-		if value != strings.TrimSpace(value) || !platformComponentPattern.MatchString(value) {
-			return fmt.Errorf("platform %s contains invalid characters", name)
+		if err := validatePlatformComponent(field.name, field.value); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func SelectDescriptors(index ImageIndex, selector string) ([]Descriptor, error) {
-	if strings.TrimSpace(selector) == "" {
-		selected := slices.Clone(index.Manifests)
-		selected = slices.DeleteFunc(selected, func(item Descriptor) bool {
-			return !IsScannableManifestDescriptor(item)
-		})
-		if len(selected) == 0 {
-			return nil, fmt.Errorf("image index does not contain supported image manifests")
-		}
-		return uniqueDescriptors(selected)
+// validatePlatformComponent checks the length and characters of one platform
+// component; an empty component is valid.
+func validatePlatformComponent(name, value string) error {
+	if value == "" {
+		return nil
 	}
-
-	platform, err := ParsePlatformSelector(selector)
-	if err != nil {
-		return nil, err
+	if len(value) > MaxPlatformComponentBytes {
+		return fmt.Errorf("platform %s exceeds %d bytes", name, MaxPlatformComponentBytes)
 	}
-
-	matches := make([]Descriptor, 0)
-	for _, candidate := range index.Manifests {
-		if !IsScannableManifestDescriptor(candidate) {
-			continue
-		}
-		if candidate.Platform.Matches(platform) {
-			matches = append(matches, candidate)
-		}
+	if value != strings.TrimSpace(value) || !platformComponentPattern.MatchString(value) {
+		return fmt.Errorf("platform %s contains invalid characters", name)
 	}
-
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("platform %s not found in manifest index", platform.String())
-	}
-
-	return uniqueDescriptors(matches)
+	return nil
 }
 
-func uniqueDescriptors(items []Descriptor) ([]Descriptor, error) {
-	selected := make([]Descriptor, 0, len(items))
-	seen := make(map[string]Descriptor, len(items))
-	for _, item := range items {
-		if previous, ok := seen[item.Digest]; ok {
-			if previous.MediaType != item.MediaType || previous.Size != item.Size || previous.Platform != item.Platform {
-				return nil, &IntegrityError{
-					Kind:     IntegrityInvalidDocument,
-					Subject:  item.Digest,
-					Expected: "one consistent descriptor per digest",
-					Actual:   "conflicting descriptors",
-				}
-			}
-			continue
-		}
-		seen[item.Digest] = item
-		selected = append(selected, item)
-	}
-	return selected, nil
-}
-
-func (p Platform) Matches(other Platform) bool {
-	if !equalFoldOrEmpty(p.OS, other.OS) {
+// Matches reports whether the descriptor platform p satisfies selector. An
+// empty selector architecture or variant acts as a wildcard, and variants are
+// normalised the way containerd does so linux/arm64/v8 and linux/arm64 are
+// interchangeable, linux/arm means linux/arm/v7, and amd64 microarchitecture
+// levels are ignored.
+func (p Platform) Matches(selector Platform) bool {
+	descriptor := normalizePlatform(p)
+	want := normalizePlatform(selector)
+	if want.OS == "" || descriptor.OS != want.OS {
 		return false
 	}
-	if !equalFoldOrEmpty(p.Architecture, other.Architecture) {
-		return false
-	}
-	if strings.TrimSpace(other.Variant) == "" {
+	if want.Architecture == "" {
 		return true
 	}
+	if descriptor.Architecture != want.Architecture {
+		return false
+	}
+	if strings.TrimSpace(selector.Variant) == "" {
+		return true
+	}
+	return descriptor.Variant == want.Variant
+}
 
-	return strings.EqualFold(strings.TrimSpace(p.Variant), strings.TrimSpace(other.Variant))
+func normalizePlatform(platform Platform) Platform {
+	normalized := Platform{
+		OS:           strings.ToLower(strings.TrimSpace(platform.OS)),
+		Architecture: strings.ToLower(strings.TrimSpace(platform.Architecture)),
+		Variant:      strings.ToLower(strings.TrimSpace(platform.Variant)),
+	}
+	switch normalized.Architecture {
+	case "amd64", "386":
+		normalized.Variant = ""
+	case "arm64":
+		if normalized.Variant == "v8" || normalized.Variant == "8" {
+			normalized.Variant = ""
+		}
+	case "arm":
+		switch normalized.Variant {
+		case "", "7":
+			normalized.Variant = "v7"
+		case "5", "6", "8":
+			normalized.Variant = "v" + normalized.Variant
+		}
+	}
+	return normalized
 }
 
 func IsScannableManifestDescriptor(descriptor Descriptor) bool {
@@ -316,13 +330,19 @@ func IsAttestationDescriptor(descriptor Descriptor) bool {
 }
 
 func (p Platform) String() string {
-	if p.OS == "" && p.Architecture == "" {
+	os := strings.ToLower(strings.TrimSpace(p.OS))
+	architecture := strings.ToLower(strings.TrimSpace(p.Architecture))
+	variant := strings.ToLower(strings.TrimSpace(p.Variant))
+	if os == "" && architecture == "" {
 		return ""
 	}
-	if p.Variant == "" {
-		return strings.ToLower(strings.TrimSpace(p.OS)) + "/" + strings.ToLower(strings.TrimSpace(p.Architecture))
+	if architecture == "" {
+		return os
 	}
-	return strings.ToLower(strings.TrimSpace(p.OS)) + "/" + strings.ToLower(strings.TrimSpace(p.Architecture)) + "/" + strings.ToLower(strings.TrimSpace(p.Variant))
+	if variant == "" {
+		return os + "/" + architecture
+	}
+	return os + "/" + architecture + "/" + variant
 }
 
 func IsIndexMediaType(mediaType string) bool {
@@ -361,20 +381,29 @@ func IsLayerMediaType(mediaType string) bool {
 	}
 }
 
+// IsForeignLayerMediaType reports Docker foreign and OCI non-distributable
+// layer media types. They are valid descriptors but cannot be scanned.
 func IsForeignLayerMediaType(mediaType string) bool {
 	switch normalizeMediaType(mediaType) {
-	case MediaTypeDockerSchema2ForeignLayer, MediaTypeDockerSchema2ForeignLayerGzip:
+	case MediaTypeDockerSchema2ForeignLayer, MediaTypeDockerSchema2ForeignLayerGzip,
+		MediaTypeOCIImageLayerNonDistributable, MediaTypeOCIImageLayerNonDistributableGzip, MediaTypeOCIImageLayerNonDistributableZstd:
 		return true
 	default:
 		return false
 	}
 }
 
+// IsLayerDescriptorMediaType reports every media type that may appear in an
+// image manifest's layers array, scannable or not.
+func IsLayerDescriptorMediaType(mediaType string) bool {
+	return IsLayerMediaType(mediaType) || IsForeignLayerMediaType(mediaType)
+}
+
 func LayerCompression(mediaType string) string {
 	switch normalizeMediaType(mediaType) {
-	case MediaTypeOCIImageLayerGzip, MediaTypeDockerSchema2LayerGzip, MediaTypeDockerSchema2ForeignLayerGzip:
+	case MediaTypeOCIImageLayerGzip, MediaTypeDockerSchema2LayerGzip, MediaTypeDockerSchema2ForeignLayerGzip, MediaTypeOCIImageLayerNonDistributableGzip:
 		return "gzip"
-	case MediaTypeOCIImageLayerZstd:
+	case MediaTypeOCIImageLayerZstd, MediaTypeOCIImageLayerNonDistributableZstd:
 		return "zstd"
 	default:
 		return ""
@@ -446,13 +475,4 @@ func normalizeMediaType(mediaType string) string {
 		value = value[:index]
 	}
 	return strings.TrimSpace(value)
-}
-
-func equalFoldOrEmpty(left, right string) bool {
-	left = strings.TrimSpace(left)
-	right = strings.TrimSpace(right)
-	if left == "" || right == "" {
-		return false
-	}
-	return strings.EqualFold(left, right)
 }

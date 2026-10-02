@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 )
 
 type ScanRecord struct {
@@ -74,12 +74,40 @@ type Store interface {
 	Name() string
 }
 
+// ReadStore serves the API's read endpoints. Each list method pages either by
+// offset or, when the cursor argument is non-nil, by keyset: the page then
+// holds the rows strictly after the cursor in the endpoint's total ordering,
+// so deep pages cost no more than the first. Offset still applies on top of a
+// cursor and callers normally pass zero with one.
 type ReadStore interface {
-	ListRepositories(ctx context.Context, limit, offset int) ([]RepositorySummary, error)
-	ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int) ([]ScanRunSummary, error)
-	ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int) ([]FindingSummary, error)
+	ListRepositories(ctx context.Context, limit, offset int, after *RepositoryCursor) ([]RepositorySummary, error)
+	ListRepositoryScans(ctx context.Context, registry, repository string, limit, offset int, after *ScanRunCursor) ([]ScanRunSummary, error)
+	ListRepositoryFindings(ctx context.Context, registry, repository string, disposition FindingDispositionFilter, limit, offset int, after *FindingCursor) ([]FindingSummary, error)
 	GetScanRun(ctx context.Context, id int64) (ScanRunDetail, error)
 	GetFinding(ctx context.Context, id int64) (FindingDetail, error)
+}
+
+// RepositoryCursor is a keyset position in ListRepositories, whose ordering is
+// last_seen_at DESC, repository ASC, registry ASC: the next page starts
+// strictly after the row with these values. (registry, repository) is unique.
+type RepositoryCursor struct {
+	LastSeenAt time.Time
+	Repository string
+	Registry   string
+}
+
+// ScanRunCursor is a keyset position in ListRepositoryScans, whose ordering
+// is scanned_at DESC, id DESC.
+type ScanRunCursor struct {
+	ScannedAt time.Time
+	ID        int64
+}
+
+// FindingCursor is a keyset position in ListRepositoryFindings, whose ordering
+// is last_seen_at DESC, id DESC.
+type FindingCursor struct {
+	LastSeenAt time.Time
+	ID         int64
 }
 
 type RepositorySummary struct {
@@ -197,12 +225,22 @@ type PostgresConfig struct {
 	RequireSchema     bool
 }
 
+// DefaultWriteTimeout bounds one SaveScan transaction when PostgresConfig
+// leaves WriteTimeout unset. Callers that persist a finished scan under a
+// context detached from the request (scanservice) use it as their fallback so
+// the write phase is never unbounded.
+const DefaultWriteTimeout = 2 * time.Minute
+
 const (
-	defaultMaxOpenConns    = 10
+	defaultMaxOpenConns = 10
+	// defaultMaxIdleConns mirrors LAYERLEAK_DATABASE_MAX_IDLE_CONNS in
+	// internal/config; database/sql treats 0 as "retain no idle connections",
+	// which made every statement outside a transaction dial and authenticate
+	// anew for callers that left the field unset.
+	defaultMaxIdleConns    = 5
 	defaultConnMaxLifetime = 30 * time.Minute
 	defaultConnMaxIdleTime = 5 * time.Minute
 	defaultQueryTimeout    = 10 * time.Second
-	defaultWriteTimeout    = 2 * time.Minute
 )
 
 func NewNoopStore() NoopStore {
@@ -219,28 +257,18 @@ func (NoopStore) Name() string {
 
 func (c PostgresConfig) Validate() error {
 	c = c.withDefaults()
-	if strings.TrimSpace(c.DatabaseURL) == "" {
+	dsn := strings.TrimSpace(c.DatabaseURL)
+	if dsn == "" {
 		return fmt.Errorf("database url is required")
 	}
-	parsed, err := url.Parse(strings.TrimSpace(c.DatabaseURL))
-	if err != nil {
-		return fmt.Errorf("database url is invalid")
-	}
-	if parsed.RawQuery != "" {
-		if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
-			return fmt.Errorf("database url is invalid")
+	// lib/pq accepts two grammars: a postgres:// URL and libpq keyword/value
+	// pairs. Neither error path echoes the value, which may carry a password.
+	if strings.Contains(dsn, "://") {
+		if err := validateDatabaseURL(dsn); err != nil {
+			return err
 		}
-	}
-	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
-	case "postgres", "postgresql":
-	default:
-		return fmt.Errorf("database url must use postgres scheme")
-	}
-	if strings.TrimSpace(parsed.Hostname()) == "" {
-		return fmt.Errorf("database url host is required")
-	}
-	if strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/" {
-		return fmt.Errorf("database url name is required")
+	} else if err := validateKeywordDSN(dsn); err != nil {
+		return err
 	}
 	if c.MaxOpenConns < 0 {
 		return fmt.Errorf("max open connections must be greater than zero")
@@ -267,9 +295,188 @@ func (c PostgresConfig) Validate() error {
 	return nil
 }
 
+func validateDatabaseURL(dsn string) error {
+	parsed, query, err := parseDatabaseURL(dsn)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+	case "postgres", "postgresql":
+	default:
+		return fmt.Errorf("database url must use postgres scheme")
+	}
+	if !databaseURLHasHost(parsed, query) {
+		return fmt.Errorf("database url host is required")
+	}
+	if !databaseURLHasName(parsed, query) {
+		return fmt.Errorf("database url name is required")
+	}
+	return nil
+}
+
+// parseDatabaseURL parses the URL and its query string. A failure is the one
+// fixed message: the parser's own error quotes the URL, password included.
+func parseDatabaseURL(dsn string) (*url.URL, url.Values, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("database url is invalid")
+	}
+	query := url.Values{}
+	if parsed.RawQuery != "" {
+		query, err = url.ParseQuery(parsed.RawQuery)
+		if err != nil {
+			return nil, nil, fmt.Errorf("database url is invalid")
+		}
+	}
+	return parsed, query, nil
+}
+
+// databaseURLHasHost reports whether the URL names a host. The host may live
+// in the query string instead of the authority, which is how libpq addresses
+// unix sockets (host=/var/run/postgresql) and how Cloud SQL Auth Proxy style
+// deployments are configured.
+func databaseURLHasHost(parsed *url.URL, query url.Values) bool {
+	return strings.TrimSpace(parsed.Hostname()) != "" || strings.TrimSpace(query.Get("host")) != "" || strings.TrimSpace(query.Get("hostaddr")) != ""
+}
+
+// databaseURLHasName reports whether the URL names a database, in its path or
+// in the dbname query parameter.
+func databaseURLHasName(parsed *url.URL, query url.Values) bool {
+	return (strings.TrimSpace(parsed.Path) != "" && parsed.Path != "/") || strings.TrimSpace(query.Get("dbname")) != ""
+}
+
+func validateKeywordDSN(dsn string) error {
+	pairs, err := parseKeywordDSN(dsn)
+	if err != nil {
+		return fmt.Errorf("database connection string is invalid")
+	}
+	if strings.TrimSpace(pairs["dbname"]) == "" {
+		return fmt.Errorf("database connection string dbname is required")
+	}
+	return nil
+}
+
+// parseKeywordDSN parses a libpq keyword/value connection string such as
+// "host=/var/run/postgresql dbname=layerleak password='p w'" into its pairs.
+// It mirrors libpq's grammar: whitespace-separated key=value pairs, optional
+// whitespace around '=', values either single-quoted (with \' and \\ escapes)
+// or an unquoted run up to the next whitespace, and an empty value allowed.
+func parseKeywordDSN(value string) (map[string]string, error) {
+	pairs := make(map[string]string)
+	parser := keywordDSNParser{value: value}
+	for {
+		parser.skipSpaces()
+		if parser.index >= len(value) {
+			return pairs, nil
+		}
+		key, err := parser.key()
+		if err != nil {
+			return nil, err
+		}
+		parsed, err := parser.pairValue(key)
+		if err != nil {
+			return nil, err
+		}
+		pairs[key] = parsed
+	}
+}
+
+// keywordDSNParser is the cursor parseKeywordDSN advances over the string.
+type keywordDSNParser struct {
+	value string
+	index int
+}
+
+func (p *keywordDSNParser) skipSpaces() {
+	for p.index < len(p.value) && isDSNSpace(p.value[p.index]) {
+		p.index++
+	}
+}
+
+// key reads a key and the '=' after it, with optional whitespace between.
+func (p *keywordDSNParser) key() (string, error) {
+	start := p.index
+	for p.index < len(p.value) && isDSNKeyByte(p.value[p.index]) {
+		p.index++
+	}
+	if p.index == start {
+		return "", fmt.Errorf("connection string key is missing")
+	}
+	key := p.value[start:p.index]
+	p.skipSpaces()
+	if p.index >= len(p.value) || p.value[p.index] != '=' {
+		return "", fmt.Errorf("connection string key %q is not followed by '='", key)
+	}
+	p.index++
+	return key, nil
+}
+
+// pairValue reads the value after "key=": single-quoted or an unquoted run up
+// to the next whitespace, possibly empty.
+func (p *keywordDSNParser) pairValue(key string) (string, error) {
+	p.skipSpaces()
+	if p.index < len(p.value) && p.value[p.index] == '\'' {
+		p.index++
+		return p.quotedValue(key)
+	}
+	return p.unquotedValue(), nil
+}
+
+// quotedValue reads up to the closing quote; the error names only the key,
+// never the value, which may be a password.
+func (p *keywordDSNParser) quotedValue(key string) (string, error) {
+	var builder strings.Builder
+	for p.index < len(p.value) {
+		character, escaped := p.nextValueByte()
+		if !escaped && character == '\'' {
+			return builder.String(), nil
+		}
+		builder.WriteByte(character)
+	}
+	return "", fmt.Errorf("connection string value for %q has an unterminated quote", key)
+}
+
+func (p *keywordDSNParser) unquotedValue() string {
+	var builder strings.Builder
+	for p.index < len(p.value) && !isDSNSpace(p.value[p.index]) {
+		character, _ := p.nextValueByte()
+		builder.WriteByte(character)
+	}
+	return builder.String()
+}
+
+// nextValueByte consumes one value byte, resolving a backslash escape of the
+// byte after it; a trailing backslash is kept literally.
+func (p *keywordDSNParser) nextValueByte() (byte, bool) {
+	character := p.value[p.index]
+	p.index++
+	if character == '\\' && p.index < len(p.value) {
+		character = p.value[p.index]
+		p.index++
+		return character, true
+	}
+	return character, false
+}
+
+func isDSNSpace(character byte) bool {
+	switch character {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
+}
+
+func isDSNKeyByte(character byte) bool {
+	return character == '_' || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')
+}
+
 func (c PostgresConfig) withDefaults() PostgresConfig {
 	if c.MaxOpenConns == 0 {
 		c.MaxOpenConns = defaultMaxOpenConns
+	}
+	if c.MaxIdleConns == 0 {
+		c.MaxIdleConns = min(defaultMaxIdleConns, c.MaxOpenConns)
 	}
 	if c.ConnMaxLifetime == 0 {
 		c.ConnMaxLifetime = defaultConnMaxLifetime
@@ -281,7 +488,7 @@ func (c PostgresConfig) withDefaults() PostgresConfig {
 		c.QueryTimeout = defaultQueryTimeout
 	}
 	if c.WriteTimeout == 0 {
-		c.WriteTimeout = defaultWriteTimeout
+		c.WriteTimeout = DefaultWriteTimeout
 	}
 	return c
 }

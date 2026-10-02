@@ -1,6 +1,12 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +17,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_API_ADDR", "")
 	t.Setenv("LAYERLEAK_REGISTRY_BASE_URL", "")
 	t.Setenv("LAYERLEAK_REGISTRY_AUTH_URL", "")
+	t.Setenv("LAYERLEAK_REGISTRY_USERNAME", "")
+	t.Setenv("LAYERLEAK_REGISTRY_PASSWORD", "")
+	t.Setenv("LAYERLEAK_DOCKER_CONFIG", "")
 	t.Setenv("LAYERLEAK_HTTP_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_SCAN_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_MAX_REQUEST_BYTES", "")
@@ -21,7 +30,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_API_RESPONSE_WRITE_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_IDLE_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_API_SHUTDOWN_TIMEOUT", "")
+	t.Setenv("LAYERLEAK_API_PRESTOP_DELAY", "")
 	t.Setenv("LAYERLEAK_API_READINESS_TIMEOUT", "")
+	t.Setenv("LAYERLEAK_API_READINESS_CACHE_TTL", "")
 	t.Setenv("LAYERLEAK_ALLOWED_PRIVATE_REGISTRY_HOSTS", "")
 	t.Setenv("LAYERLEAK_ALLOWED_PRIVATE_AUTH_HOSTS", "")
 	t.Setenv("LAYERLEAK_REGISTRY_MAX_REDIRECTS", "")
@@ -53,7 +64,6 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LAYERLEAK_DATABASE_CONN_MAX_IDLE_TIME", "")
 	t.Setenv("LAYERLEAK_DATABASE_QUERY_TIMEOUT", "")
 	t.Setenv("LAYERLEAK_DATABASE_WRITE_TIMEOUT", "")
-	t.Setenv("LAYERLEAK_MIGRATIONS_DIR", "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -72,6 +82,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.APIScanTimeout != 30*time.Minute || cfg.APIReadHeaderTimeout != 5*time.Second || cfg.APIReadTimeout != 15*time.Second || cfg.APIResponseWriteTimeout != 30*time.Second || cfg.APIIdleTimeout != time.Minute || cfg.APIShutdownTimeout != 30*time.Second || cfg.APIReadinessTimeout != 2*time.Second {
 		t.Fatalf("api timeouts = %#v", cfg)
 	}
+	if cfg.APIPreStopDelay != 0 {
+		t.Fatalf("cfg.APIPreStopDelay = %s", cfg.APIPreStopDelay)
+	}
+	if cfg.APIReadinessCacheTTL != 5*time.Second {
+		t.Fatalf("cfg.APIReadinessCacheTTL = %s", cfg.APIReadinessCacheTTL)
+	}
 
 	if cfg.RegistryBaseURL != "" {
 		t.Fatalf("cfg.RegistryBaseURL = %q", cfg.RegistryBaseURL)
@@ -79,6 +95,9 @@ func TestLoadDefaults(t *testing.T) {
 
 	if cfg.RegistryAuthURL != "" {
 		t.Fatalf("cfg.RegistryAuthURL = %q", cfg.RegistryAuthURL)
+	}
+	if cfg.RegistryUsername != "" || cfg.RegistryPassword != "" || cfg.DockerConfigPath != "" {
+		t.Fatalf("registry credential defaults = (%q, set=%v, %q)", cfg.RegistryUsername, cfg.RegistryPassword != "", cfg.DockerConfigPath)
 	}
 
 	if cfg.HTTPTimeout != 30*time.Second {
@@ -140,9 +159,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DatabaseMaxOpenConns != 10 || cfg.DatabaseMaxIdleConns != 5 || cfg.DatabaseConnMaxLifetime != 30*time.Minute || cfg.DatabaseConnMaxIdleTime != 5*time.Minute || cfg.DatabaseQueryTimeout != 10*time.Second || cfg.DatabaseWriteTimeout != 2*time.Minute {
 		t.Fatalf("database defaults = %#v", cfg)
 	}
-	if cfg.MigrationsDir != "/app/migrations" {
-		t.Fatalf("cfg.MigrationsDir = %q", cfg.MigrationsDir)
-	}
 }
 
 func TestLoadInvalidTimeout(t *testing.T) {
@@ -158,6 +174,38 @@ func TestLoadRejectsNonPositiveTimeout(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil")
+	}
+}
+
+func TestLoadNonNegativeDurationsAllowZeroRejectNegative(t *testing.T) {
+	tests := []struct {
+		key  string
+		read func(Config) time.Duration
+	}{
+		{key: "LAYERLEAK_API_PRESTOP_DELAY", read: func(cfg Config) time.Duration { return cfg.APIPreStopDelay }},
+		{key: "LAYERLEAK_API_READINESS_CACHE_TTL", read: func(cfg Config) time.Duration { return cfg.APIReadinessCacheTTL }},
+	}
+	for _, test := range tests {
+		t.Run(test.key, func(t *testing.T) {
+			t.Setenv(test.key, "0s")
+			cfg, err := Load()
+			if err != nil || test.read(cfg) != 0 {
+				t.Fatalf("Load() with 0s = (%s, %v)", test.read(cfg), err)
+			}
+
+			t.Setenv(test.key, "7s")
+			cfg, err = Load()
+			if err != nil || test.read(cfg) != 7*time.Second {
+				t.Fatalf("Load() with 7s = (%s, %v)", test.read(cfg), err)
+			}
+
+			for _, value := range []string{"-1s", "soon"} {
+				t.Setenv(test.key, value)
+				if _, err := Load(); err == nil {
+					t.Fatalf("Load() with %q error = nil", value)
+				}
+			}
+		})
 	}
 }
 
@@ -267,6 +315,38 @@ func TestLoadAllowsZeroResourceLimits(t *testing.T) {
 	}
 	if cfg.MaxLayerBytes != 0 || cfg.MaxLayerEntries != 0 || cfg.MaxImageLayers != 0 || cfg.MaxImageManifests != 0 || cfg.MaxImageLayerBytes != 0 || cfg.MaxImageArtifacts != 0 || cfg.MaxRetainedBytes != 0 || cfg.MaxRepositoryTags != 0 || cfg.MaxRepositoryTargets != 0 || cfg.MaxManifestBytes != 0 || cfg.MaxConfigBytes != 0 || cfg.MaxTagResponseBytes != 0 || cfg.MaxFindingsPerScan != 0 || cfg.MaxRawFindingBytes != 0 {
 		t.Fatalf("cfg = %#v", cfg)
+	}
+}
+
+// TestLoadLayerCacheBytes pins the per-sweep layer cache to off by default and
+// to a non-negative byte budget when set.
+func TestLoadLayerCacheBytes(t *testing.T) {
+	t.Setenv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MaxLayerCacheBytes != 0 {
+		t.Fatalf("cfg.MaxLayerCacheBytes = %d, want 0 (off)", cfg.MaxLayerCacheBytes)
+	}
+	if cfg.MaxNestedArchiveBytes != 64*(1<<20) || cfg.MaxNestedArchiveEntries != 10000 {
+		t.Fatalf("nested archive defaults = (%d, %d)", cfg.MaxNestedArchiveBytes, cfg.MaxNestedArchiveEntries)
+	}
+
+	t.Setenv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", "268435456")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MaxLayerCacheBytes != 256*(1<<20) {
+		t.Fatalf("cfg.MaxLayerCacheBytes = %d", cfg.MaxLayerCacheBytes)
+	}
+
+	for _, invalid := range []string{"-1", "abc", "1.5"} {
+		t.Setenv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", invalid)
+		if _, err := Load(); err == nil {
+			t.Fatalf("Load() with LAYERLEAK_MAX_LAYER_CACHE_BYTES=%q error = nil", invalid)
+		}
 	}
 }
 
@@ -395,5 +475,519 @@ func TestLoadRejectsIdleConnectionsAboveOpenConnections(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil")
+	}
+}
+
+// composeOnlyKeys are read by docker-compose.yml (or the migration command)
+// rather than by config.Load.
+var composeOnlyKeys = map[string]bool{
+	"LAYERLEAK_IMAGE":                 true,
+	"LAYERLEAK_API_HOST":              true,
+	"LAYERLEAK_API_PORT":              true,
+	"LAYERLEAK_API_STOP_GRACE_PERIOD": true,
+	"LAYERLEAK_DB_NAME":               true,
+	"LAYERLEAK_DB_USER":               true,
+	"LAYERLEAK_DB_PASSWORD":           true,
+	"LAYERLEAK_MIGRATIONS_DIR":        true,
+}
+
+// clearLayerleakEnv blanks every LAYERLEAK_* variable in the process plus the
+// given keys so Load() observes defaults only.
+func clearLayerleakEnv(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "LAYERLEAK_") {
+			t.Setenv(key, "")
+		}
+	}
+	for _, key := range keys {
+		t.Setenv(key, "")
+	}
+}
+
+func readEnvExample(t *testing.T) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".env.example"))
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	values := make(map[string]string)
+	for number, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(key, "LAYERLEAK_") {
+			t.Fatalf(".env.example line %d is not a LAYERLEAK_ assignment: %q", number+1, line)
+		}
+		if _, duplicate := values[key]; duplicate {
+			t.Fatalf(".env.example defines %s twice", key)
+		}
+		values[key] = value
+	}
+	return values
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestEnvExampleMatchesDefaults pins .env.example to config.Load: sourcing the
+// example must produce exactly the built-in defaults, and it must not ship a
+// live database URL or password.
+func TestEnvExampleMatchesDefaults(t *testing.T) {
+	example := readEnvExample(t)
+	keys := sortedKeys(example)
+	clearLayerleakEnv(t, keys...)
+	defaults, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with defaults error = %v", err)
+	}
+	for _, key := range keys {
+		if composeOnlyKeys[key] {
+			continue
+		}
+		t.Setenv(key, example[key])
+	}
+	fromExample, err := Load()
+	if err != nil {
+		t.Fatalf("Load() from .env.example error = %v", err)
+	}
+	if !reflect.DeepEqual(defaults, fromExample) {
+		t.Fatalf(".env.example differs from defaults:\n defaults: %+v\n example:  %+v", defaults, fromExample)
+	}
+	for _, key := range []string{"LAYERLEAK_DATABASE_URL", "LAYERLEAK_DB_PASSWORD", "LAYERLEAK_FINDINGS_DIR", "LAYERLEAK_MIGRATIONS_DIR"} {
+		value, present := example[key]
+		if !present {
+			t.Fatalf(".env.example must document %s", key)
+		}
+		if value != "" {
+			t.Fatalf(".env.example must leave %s empty, got %q", key, value)
+		}
+	}
+}
+
+// TestComposeDefaultsMatchConfig pins every ${VAR:-default} in
+// docker-compose.yml to the built-in defaults.
+func TestComposeDefaultsMatchConfig(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	pattern := regexp.MustCompile(`(?m)^\s+(LAYERLEAK_[A-Z_]+): "?\$\{(LAYERLEAK_[A-Z_]+):-([^}]*)\}"?\s*$`)
+	matches := pattern.FindAllStringSubmatch(string(raw), -1)
+	if len(matches) < 30 {
+		t.Fatalf("expected at least 30 defaulted compose variables, found %d", len(matches))
+	}
+	values := make(map[string]string)
+	for _, match := range matches {
+		name, reference, fallback := match[1], match[2], match[3]
+		if name != reference {
+			t.Fatalf("compose variable %s is populated from %s", name, reference)
+		}
+		if composeOnlyKeys[name] {
+			continue
+		}
+		if previous, seen := values[name]; seen && previous != fallback {
+			t.Fatalf("compose variable %s has defaults %q and %q", name, previous, fallback)
+		}
+		values[name] = fallback
+	}
+	keys := sortedKeys(values)
+	clearLayerleakEnv(t, keys...)
+	defaults, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with defaults error = %v", err)
+	}
+	for _, key := range keys {
+		t.Setenv(key, values[key])
+	}
+	fromCompose, err := Load()
+	if err != nil {
+		t.Fatalf("Load() from compose defaults error = %v", err)
+	}
+	if !reflect.DeepEqual(defaults, fromCompose) {
+		t.Fatalf("docker-compose.yml defaults differ from config defaults:\n defaults: %+v\n compose:  %+v", defaults, fromCompose)
+	}
+}
+
+func TestLoadRejectsZeroForPositiveOnlyBounds(t *testing.T) {
+	keys := []string{
+		"LAYERLEAK_API_MAX_REQUEST_BYTES",
+		"LAYERLEAK_API_MAX_CONCURRENT_SCANS",
+		"LAYERLEAK_REGISTRY_MAX_REDIRECTS",
+		"LAYERLEAK_REGISTRY_REQUEST_ATTEMPTS",
+		"LAYERLEAK_MAX_AUTH_RESPONSE_BYTES",
+		"LAYERLEAK_MAX_FILE_BYTES",
+		"LAYERLEAK_TAG_PAGE_SIZE",
+		"LAYERLEAK_DATABASE_MAX_OPEN_CONNS",
+	}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv(key, "0")
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "greater than zero") {
+				t.Fatalf("Load() error = %v, want %s rejection", err, key)
+			}
+		})
+	}
+}
+
+func TestLoadValidatesAPIAddr(t *testing.T) {
+	valid := []string{"0.0.0.0:8080", "[::]:8080", ":8080", "localhost:8080", "LOCALHOST:8080", "127.0.0.1:1", "api.internal.example:65535"}
+	for _, value := range valid {
+		t.Run("valid/"+value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_API_ADDR", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.APIAddr != value {
+				t.Fatalf("cfg.APIAddr = %q, want %q", cfg.APIAddr, value)
+			}
+		})
+	}
+	invalid := []string{"8080", "localhost", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:http", "http://127.0.0.1:8080", "bad host:8080", "::1:8080", "-bad.example:8080"}
+	for _, value := range invalid {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_API_ADDR", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_API_ADDR") {
+				t.Fatalf("Load() error = %v, want LAYERLEAK_API_ADDR rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsBooleanSpellings(t *testing.T) {
+	cases := map[string]bool{
+		"1": true, "t": true, "true": true, "TRUE": true, "True": true, "yes": true, "Yes": true, "y": true, "on": true, "ON": true,
+		"0": false, "f": false, "false": false, "FALSE": false, "no": false, "n": false, "off": false, " off ": false,
+	}
+	for value, want := range cases {
+		t.Run(value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_PERSIST_RAW_SECRETS", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.PersistRawSecrets != want {
+				t.Fatalf("PersistRawSecrets = %v for %q, want %v", cfg.PersistRawSecrets, value, want)
+			}
+		})
+	}
+	for _, value := range []string{"maybe", "2", "enabled", "yes please"} {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_PERSIST_RAW_SECRETS", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_PERSIST_RAW_SECRETS") {
+				t.Fatalf("Load() error = %v, want rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadRestrictsLogLevelNames(t *testing.T) {
+	for value, want := range map[string]string{"DEBUG": "debug", "Info": "info", "warn": "warn", "ERROR": "error"} {
+		t.Run(value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_LOG_LEVEL", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.LogLevel != want {
+				t.Fatalf("LogLevel = %q, want %q", cfg.LogLevel, want)
+			}
+		})
+	}
+	for _, value := range []string{"info+2", "warn-1", "warning", "trace", "fatal"} {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_LOG_LEVEL", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_LOG_LEVEL") {
+				t.Fatalf("Load() error = %v, want rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadRestrictsLogFormatNames(t *testing.T) {
+	clearLayerleakEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LogFormat != "json" {
+		t.Fatalf("default LogFormat = %q, want json", cfg.LogFormat)
+	}
+	for value, want := range map[string]string{"JSON": "json", "text": "text", " Text ": "text"} {
+		t.Run(value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_LOG_FORMAT", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.LogFormat != want {
+				t.Fatalf("LogFormat = %q, want %q", cfg.LogFormat, want)
+			}
+		})
+	}
+	for _, value := range []string{"logfmt", "yaml", "json,text", "pretty"} {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_LOG_FORMAT", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_LOG_FORMAT") {
+				t.Fatalf("Load() error = %v, want rejection", err)
+			}
+		})
+	}
+}
+
+// TestREADMEDocumentsEveryVariable keeps the README configuration tables and
+// .env.example in lockstep: every variable in one must appear in the other.
+func TestREADMEDocumentsEveryVariable(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	rowPattern := regexp.MustCompile("(?m)^\\| `(LAYERLEAK_[A-Z_]+)` \\|")
+	documented := make(map[string]bool)
+	for _, match := range rowPattern.FindAllStringSubmatch(string(readme), -1) {
+		if documented[match[1]] {
+			t.Fatalf("README documents %s twice", match[1])
+		}
+		documented[match[1]] = true
+	}
+	example := readEnvExample(t)
+	for key := range example {
+		if !documented[key] {
+			t.Errorf("%s is in .env.example but has no README table row", key)
+		}
+	}
+	for key := range documented {
+		if _, present := example[key]; !present {
+			t.Errorf("%s has a README table row but is missing from .env.example", key)
+		}
+	}
+	if len(documented) < 50 {
+		t.Fatalf("expected at least 50 documented variables, found %d", len(documented))
+	}
+}
+
+func TestLoadValidatesRegistryEndpointOverrides(t *testing.T) {
+	for _, key := range []string{"LAYERLEAK_REGISTRY_BASE_URL", "LAYERLEAK_REGISTRY_AUTH_URL"} {
+		for _, value := range []string{"https://registry.internal:5000", "http://127.0.0.1:5000/v2/", "https://auth.example.com/token", "https://[::1]:5000"} {
+			t.Run("valid/"+key+"/"+value, func(t *testing.T) {
+				clearLayerleakEnv(t)
+				t.Setenv(key, value)
+				cfg, err := Load()
+				if err != nil {
+					t.Fatalf("Load() error = %v", err)
+				}
+				got := cfg.RegistryBaseURL
+				if key == "LAYERLEAK_REGISTRY_AUTH_URL" {
+					got = cfg.RegistryAuthURL
+				}
+				if got != value {
+					t.Fatalf("loaded %q, want %q", got, value)
+				}
+			})
+		}
+		for _, value := range []string{"registry.internal:5000", "ftp://registry.internal", "https://user:secret@registry.internal", "https://registry.internal/#frag", "https://", "https://bad host/", "https://registry.internal:70000"} {
+			t.Run("invalid/"+key+"/"+value, func(t *testing.T) {
+				clearLayerleakEnv(t)
+				t.Setenv(key, value)
+				if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("Load() error = %v, want %s rejection", err, key)
+				}
+			})
+		}
+	}
+}
+
+func TestEndpointURLFromEnvReportsEachCheckInOrder(t *testing.T) {
+	const key = "LAYERLEAK_REGISTRY_BASE_URL"
+	for value, want := range map[string]string{
+		"   ":                                    "",
+		"https://bad host/":                      "parse " + key + ": endpoint url is invalid",
+		"ftp://user@registry.internal":           "parse " + key + ": endpoint url must use https or http",
+		"https://user@registry_internal":         "parse " + key + ": endpoint url must be absolute and must not include credentials or a fragment",
+		"https://registry_internal:0":            "parse " + key + ": hostname contains an invalid character",
+		"https://-registry.internal:5000":        "parse " + key + ": hostname labels must not start or end with a hyphen",
+		"https://registry.internal:0":            "parse " + key + ": port must be between 1 and 65535",
+		"  https://REGISTRY.internal:5000/v2/  ": "",
+	} {
+		t.Setenv(key, value)
+		got, err := endpointURLFromEnv(key)
+		if want == "" {
+			if err != nil || got != strings.TrimSpace(value) {
+				t.Fatalf("endpointURLFromEnv(%q) = %q, %v", value, got, err)
+			}
+			continue
+		}
+		if err == nil || err.Error() != want || got != "" {
+			t.Fatalf("endpointURLFromEnv(%q) = %q, %v; want error %q", value, got, err, want)
+		}
+	}
+}
+
+func TestLoadRegistryCredentials(t *testing.T) {
+	const password = "synthetic-password-not-real-0001"
+	t.Run("pair", func(t *testing.T) {
+		clearLayerleakEnv(t)
+		t.Setenv("LAYERLEAK_REGISTRY_USERNAME", "  scanner-bot  ")
+		t.Setenv("LAYERLEAK_REGISTRY_PASSWORD", password)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.RegistryUsername != "scanner-bot" || string(cfg.RegistryPassword) != password {
+			t.Fatalf("credentials = (%q, match=%v)", cfg.RegistryUsername, string(cfg.RegistryPassword) == password)
+		}
+	})
+	t.Run("password keeps surrounding whitespace", func(t *testing.T) {
+		clearLayerleakEnv(t)
+		t.Setenv("LAYERLEAK_REGISTRY_USERNAME", "scanner-bot")
+		t.Setenv("LAYERLEAK_REGISTRY_PASSWORD", " "+password+" ")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if string(cfg.RegistryPassword) != " "+password+" " {
+			t.Fatal("password was trimmed")
+		}
+	})
+	for name, env := range map[string]map[string]string{
+		"username only":            {"LAYERLEAK_REGISTRY_USERNAME": "scanner-bot"},
+		"password only":            {"LAYERLEAK_REGISTRY_PASSWORD": password},
+		"blank username, password": {"LAYERLEAK_REGISTRY_USERNAME": "   ", "LAYERLEAK_REGISTRY_PASSWORD": password},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			for key, value := range env {
+				t.Setenv(key, value)
+			}
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "LAYERLEAK_REGISTRY_USERNAME") || !strings.Contains(err.Error(), "LAYERLEAK_REGISTRY_PASSWORD") {
+				t.Fatalf("Load() error = %v, want both variable names", err)
+			}
+			if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "scanner-bot") {
+				t.Fatalf("Load() error echoes a credential: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadValidatesDockerConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"auths":{}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Run("regular file", func(t *testing.T) {
+		clearLayerleakEnv(t)
+		t.Setenv("LAYERLEAK_DOCKER_CONFIG", " "+path+" ")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.DockerConfigPath != path {
+			t.Fatalf("DockerConfigPath = %q, want %q", cfg.DockerConfigPath, path)
+		}
+	})
+	for name, value := range map[string]string{
+		"missing file": filepath.Join(dir, "absent.json"),
+		"directory":    dir,
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearLayerleakEnv(t)
+			t.Setenv("LAYERLEAK_DOCKER_CONFIG", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LAYERLEAK_DOCKER_CONFIG") {
+				t.Fatalf("Load() error = %v, want LAYERLEAK_DOCKER_CONFIG rejection", err)
+			}
+		})
+	}
+}
+
+func TestSecretFormattingRedacts(t *testing.T) {
+	const password = "synthetic-password-not-real-0001"
+	cfg := Config{RegistryUsername: "scanner-bot", RegistryPassword: Secret(password)}
+	for _, text := range []string{
+		fmt.Sprint(cfg.RegistryPassword),
+		fmt.Sprintf("%v", cfg),
+		fmt.Sprintf("%+v", cfg),
+		fmt.Sprintf("%#v", cfg),
+		fmt.Sprintf("%s %q", cfg.RegistryPassword, cfg.RegistryPassword),
+	} {
+		if strings.Contains(text, password) {
+			t.Fatalf("formatted config reveals the password: %q", text)
+		}
+	}
+	if string(cfg.RegistryPassword) != password {
+		t.Fatal("string(Secret) must return the value")
+	}
+	if fmt.Sprint(Secret("")) != "<redacted>" {
+		t.Fatalf("empty secret formats as %q", fmt.Sprint(Secret("")))
+	}
+}
+
+// composeAPINotForwarded lists the variables internal/config reads that the
+// Compose api service deliberately does not forward: the API never writes
+// local scan records.
+var composeAPINotForwarded = map[string]bool{
+	"LAYERLEAK_FINDINGS_DIR": true,
+}
+
+// TestComposeForwardsEveryAPIVariable keeps docker-compose.yml in step with
+// the variables the API reads, so a knob documented for the Compose
+// deployment cannot be silently dropped by the api service.
+func TestComposeForwardsEveryAPIVariable(t *testing.T) {
+	read := make(map[string]bool)
+	for _, name := range []string{"config.go", "bearer.go"} {
+		source, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, match := range regexp.MustCompile(`"(LAYERLEAK_[A-Z0-9_]+)"`).FindAllStringSubmatch(string(source), -1) {
+			read[match[1]] = true
+		}
+	}
+	if len(read) < 40 {
+		t.Fatalf("found only %d variables in internal/config; the pattern no longer matches how they are read", len(read))
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	service := regexp.MustCompile(`(?ms)^  api:\n(.*?)^  [a-z][a-z_-]*:\n`).FindStringSubmatch(string(raw))
+	if service == nil {
+		t.Fatal("docker-compose.yml has no api service")
+	}
+	forwarded := make(map[string]bool)
+	for _, match := range regexp.MustCompile(`(?m)^\s+(LAYERLEAK_[A-Z0-9_]+):`).FindAllStringSubmatch(service[1], -1) {
+		forwarded[match[1]] = true
+	}
+	names := make([]string, 0, len(read))
+	for name := range read {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !forwarded[name] && !composeAPINotForwarded[name] {
+			t.Errorf("the Compose api service does not forward %s", name)
+		}
 	}
 }

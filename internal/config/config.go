@@ -2,29 +2,57 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
 
+// Secret is a configuration value that must not be printed. Its String and
+// GoString methods redact it, so formatting a Config with %v, %+v or %#v (for
+// example in a test failure or a debug log) never reveals it. Convert with
+// string(secret) at the single point of use.
+type Secret string
+
+// String redacts the secret.
+func (Secret) String() string {
+	return "<redacted>"
+}
+
+// GoString redacts the secret for %#v.
+func (s Secret) GoString() string {
+	return s.String()
+}
+
 type Config struct {
-	LogLevel                    string
-	APIAddr                     string
-	APIMaxRequestBytes          int64
-	APIScanTimeout              time.Duration
-	APIMaxConcurrentScans       int
-	APIReadHeaderTimeout        time.Duration
-	APIReadTimeout              time.Duration
-	APIResponseWriteTimeout     time.Duration
-	APIIdleTimeout              time.Duration
-	APIShutdownTimeout          time.Duration
-	APIReadinessTimeout         time.Duration
+	LogLevel string
+	// LogFormat is the stderr log encoding shared by the CLI and the API:
+	// "json" (default) or "text"; see internal/logging.
+	LogFormat               string
+	APIAddr                 string
+	APIMaxRequestBytes      int64
+	APIScanTimeout          time.Duration
+	APIMaxConcurrentScans   int
+	APIReadHeaderTimeout    time.Duration
+	APIReadTimeout          time.Duration
+	APIResponseWriteTimeout time.Duration
+	APIIdleTimeout          time.Duration
+	APIShutdownTimeout      time.Duration
+	APIPreStopDelay         time.Duration
+	APIReadinessTimeout     time.Duration
+	APIReadinessCacheTTL    time.Duration
+	// APIBearerTokenDigests holds the SHA-256 digest of every accepted API
+	// bearer token (LAYERLEAK_API_BEARER_TOKENS or _FILE). Nil disables
+	// authentication; the plaintext tokens are never retained.
+	APIBearerTokenDigests [][]byte
+	// APIMetricsAddr is the optional host:port of the Prometheus /metrics
+	// listener (LAYERLEAK_API_METRICS_ADDR). Empty disables it.
+	APIMetricsAddr              string
 	RegistryBaseURL             string
 	RegistryAuthURL             string
+	RegistryUsername            string
+	RegistryPassword            Secret
+	DockerConfigPath            string
 	AllowedPrivateRegistryHosts []string
 	AllowedPrivateAuthHosts     []string
 	RegistryMaxRedirects        int
@@ -42,27 +70,60 @@ type Config struct {
 	MaxImageLayerBytes          int64
 	MaxImageArtifacts           int
 	MaxRetainedBytes            int64
-	MaxManifestBytes            int64
-	MaxConfigBytes              int64
-	MaxTagResponseBytes         int64
-	TagPageSize                 int
-	MaxRepositoryTags           int
-	MaxRepositoryTargets        int
-	RegistryRequestAttempts     int
-	MaxFindingsPerScan          int
-	FindingsDir                 string
-	DatabaseURL                 string
-	DatabaseMaxOpenConns        int
-	DatabaseMaxIdleConns        int
-	DatabaseConnMaxLifetime     time.Duration
-	DatabaseConnMaxIdleTime     time.Duration
-	DatabaseQueryTimeout        time.Duration
-	DatabaseWriteTimeout        time.Duration
-	MigrationsDir               string
+	// MaxNestedArchiveBytes bounds an archive stored in a layer (zip family,
+	// gzip, tar) that is expanded one level deep: both its stored size and the
+	// decompressed bytes read out of it. 0 disables nested expansion.
+	MaxNestedArchiveBytes int64
+	// MaxNestedArchiveEntries bounds the entries examined per nested archive;
+	// 0 disables this bound (the layer and image entry budgets still apply).
+	MaxNestedArchiveEntries int
+	// MaxLayerCacheBytes bounds the per-sweep layer cache that lets --all-tags
+	// skip re-fetching layers shared between tags. 0 (the default) disables it.
+	MaxLayerCacheBytes      int64
+	MaxManifestBytes        int64
+	MaxConfigBytes          int64
+	MaxTagResponseBytes     int64
+	TagPageSize             int
+	MaxRepositoryTags       int
+	MaxRepositoryTargets    int
+	RegistryRequestAttempts int
+	MaxFindingsPerScan      int
+	FindingsDir             string
+	DatabaseURL             string
+	DatabaseMaxOpenConns    int
+	DatabaseMaxIdleConns    int
+	DatabaseConnMaxLifetime time.Duration
+	DatabaseConnMaxIdleTime time.Duration
+	DatabaseQueryTimeout    time.Duration
+	DatabaseWriteTimeout    time.Duration
 }
 
 func Load() (Config, error) {
 	logLevel, err := logLevelFromEnv("LAYERLEAK_LOG_LEVEL", "info")
+	if err != nil {
+		return Config{}, err
+	}
+	logFormat, err := logFormatFromEnv("LAYERLEAK_LOG_FORMAT", "json")
+	if err != nil {
+		return Config{}, err
+	}
+	apiAddr, err := listenAddrFromEnv("LAYERLEAK_API_ADDR", "127.0.0.1:8080")
+	if err != nil {
+		return Config{}, err
+	}
+	registryBaseURL, err := endpointURLFromEnv("LAYERLEAK_REGISTRY_BASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	registryAuthURL, err := endpointURLFromEnv("LAYERLEAK_REGISTRY_AUTH_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	registryUsername, registryPassword, err := registryCredentialsFromEnv("LAYERLEAK_REGISTRY_USERNAME", "LAYERLEAK_REGISTRY_PASSWORD")
+	if err != nil {
+		return Config{}, err
+	}
+	dockerConfigPath, err := regularFilePathFromEnv("LAYERLEAK_DOCKER_CONFIG")
 	if err != nil {
 		return Config{}, err
 	}
@@ -98,9 +159,28 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	apiPreStopDelay, err := nonNegativeDurationFromEnv("LAYERLEAK_API_PRESTOP_DELAY", 0)
+	if err != nil {
+		return Config{}, err
+	}
 	apiReadinessTimeout, err := durationFromEnv("LAYERLEAK_API_READINESS_TIMEOUT", 2*time.Second)
 	if err != nil {
 		return Config{}, err
+	}
+	apiReadinessCacheTTL, err := nonNegativeDurationFromEnv("LAYERLEAK_API_READINESS_CACHE_TTL", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	apiBearerTokenDigests, err := bearerTokenDigestsFromEnv("LAYERLEAK_API_BEARER_TOKENS", "LAYERLEAK_API_BEARER_TOKENS_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+	apiMetricsAddr, err := optionalListenAddrFromEnv("LAYERLEAK_API_METRICS_ADDR")
+	if err != nil {
+		return Config{}, err
+	}
+	if apiMetricsAddr != "" && apiMetricsAddr == apiAddr {
+		return Config{}, fmt.Errorf("LAYERLEAK_API_METRICS_ADDR must differ from LAYERLEAK_API_ADDR; metrics are never served on the API port")
 	}
 	timeout, err := durationFromEnv("LAYERLEAK_HTTP_TIMEOUT", 30*time.Second)
 	if err != nil {
@@ -159,6 +239,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	maxRetainedBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_RETAINED_BYTES", 1<<30)
+	if err != nil {
+		return Config{}, err
+	}
+	maxNestedArchiveBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_NESTED_ARCHIVE_BYTES", 64*(1<<20))
+	if err != nil {
+		return Config{}, err
+	}
+	maxNestedArchiveEntries, err := nonNegativeIntFromEnv("LAYERLEAK_MAX_NESTED_ARCHIVE_ENTRIES", 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxLayerCacheBytes, err := nonNegativeInt64FromEnv("LAYERLEAK_MAX_LAYER_CACHE_BYTES", 0)
 	if err != nil {
 		return Config{}, err
 	}
@@ -232,7 +324,8 @@ func Load() (Config, error) {
 
 	return Config{
 		LogLevel:                    logLevel,
-		APIAddr:                     envOrDefault("LAYERLEAK_API_ADDR", "127.0.0.1:8080"),
+		LogFormat:                   logFormat,
+		APIAddr:                     apiAddr,
 		APIMaxRequestBytes:          apiMaxRequestBytes,
 		APIScanTimeout:              apiScanTimeout,
 		APIMaxConcurrentScans:       apiMaxConcurrentScans,
@@ -241,9 +334,16 @@ func Load() (Config, error) {
 		APIResponseWriteTimeout:     apiResponseWriteTimeout,
 		APIIdleTimeout:              apiIdleTimeout,
 		APIShutdownTimeout:          apiShutdownTimeout,
+		APIPreStopDelay:             apiPreStopDelay,
 		APIReadinessTimeout:         apiReadinessTimeout,
-		RegistryBaseURL:             envOrDefault("LAYERLEAK_REGISTRY_BASE_URL", ""),
-		RegistryAuthURL:             envOrDefault("LAYERLEAK_REGISTRY_AUTH_URL", ""),
+		APIReadinessCacheTTL:        apiReadinessCacheTTL,
+		APIBearerTokenDigests:       apiBearerTokenDigests,
+		APIMetricsAddr:              apiMetricsAddr,
+		RegistryBaseURL:             registryBaseURL,
+		RegistryAuthURL:             registryAuthURL,
+		RegistryUsername:            registryUsername,
+		RegistryPassword:            registryPassword,
+		DockerConfigPath:            dockerConfigPath,
 		AllowedPrivateRegistryHosts: allowedPrivateRegistryHosts,
 		AllowedPrivateAuthHosts:     allowedPrivateAuthHosts,
 		RegistryMaxRedirects:        registryMaxRedirects,
@@ -261,6 +361,9 @@ func Load() (Config, error) {
 		MaxImageLayerBytes:          maxImageLayerBytes,
 		MaxImageArtifacts:           maxImageArtifacts,
 		MaxRetainedBytes:            maxRetainedBytes,
+		MaxNestedArchiveBytes:       maxNestedArchiveBytes,
+		MaxNestedArchiveEntries:     maxNestedArchiveEntries,
+		MaxLayerCacheBytes:          maxLayerCacheBytes,
 		MaxManifestBytes:            maxManifestBytes,
 		MaxConfigBytes:              maxConfigBytes,
 		MaxTagResponseBytes:         maxTagResponseBytes,
@@ -277,67 +380,7 @@ func Load() (Config, error) {
 		DatabaseConnMaxIdleTime:     databaseConnMaxIdleTime,
 		DatabaseQueryTimeout:        databaseQueryTimeout,
 		DatabaseWriteTimeout:        databaseWriteTimeout,
-		MigrationsDir:               envOrDefault("LAYERLEAK_MIGRATIONS_DIR", "/app/migrations"),
 	}, nil
-}
-
-func logLevelFromEnv(key, fallback string) (string, error) {
-	value := strings.ToLower(envOrDefault(key, fallback))
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(value)); err != nil {
-		return "", fmt.Errorf("parse %s: %w", key, err)
-	}
-	return value, nil
-}
-
-func envOrDefault(key, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-
-	return value
-}
-
-func durationFromEnv(key string, fallback time.Duration) (time.Duration, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
-	}
-
-	if parsed <= 0 {
-		return 0, fmt.Errorf("%s must be greater than zero", key)
-	}
-
-	return parsed, nil
-}
-
-func hostListFromEnv(key string) ([]string, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return []string{}, nil
-	}
-
-	seen := make(map[string]struct{})
-	hosts := make([]string, 0)
-	for _, raw := range strings.Split(value, ",") {
-		host, err := normalizeAllowedHost(raw)
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", key, err)
-		}
-		if _, ok := seen[host]; ok {
-			continue
-		}
-		seen[host] = struct{}{}
-		hosts = append(hosts, host)
-	}
-	slices.Sort(hosts)
-	return hosts, nil
 }
 
 func normalizeAllowedHost(raw string) (string, error) {
@@ -409,94 +452,4 @@ func validateHostname(host string) error {
 		}
 	}
 	return nil
-}
-
-func validatePort(raw string) error {
-	port, err := strconv.Atoi(raw)
-	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("port must be between 1 and 65535")
-	}
-	return nil
-}
-
-func boolFromEnv(key string, fallback bool) (bool, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("parse %s: %w", key, err)
-	}
-
-	return parsed, nil
-}
-
-func int64FromEnv(key string, fallback int64) (int64, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
-	}
-	if parsed <= 0 {
-		return 0, fmt.Errorf("%s must be greater than zero", key)
-	}
-
-	return parsed, nil
-}
-
-func intFromEnv(key string, fallback int) (int, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
-	}
-	if parsed <= 0 {
-		return 0, fmt.Errorf("%s must be greater than zero", key)
-	}
-
-	return parsed, nil
-}
-
-func nonNegativeInt64FromEnv(key string, fallback int64) (int64, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
-	}
-	if parsed < 0 {
-		return 0, fmt.Errorf("%s must be greater than or equal to zero", key)
-	}
-
-	return parsed, nil
-}
-
-func nonNegativeIntFromEnv(key string, fallback int) (int, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback, nil
-	}
-
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
-	}
-	if parsed < 0 {
-		return 0, fmt.Errorf("%s must be greater than or equal to zero", key)
-	}
-
-	return parsed, nil
 }

@@ -6,9 +6,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"unicode"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 	"golang.org/x/term"
 )
 
@@ -48,6 +48,7 @@ type progressSnapshot struct {
 	tagsFailed       int
 	tagsTotal        int
 	targetsCompleted int
+	targetsPartial   int
 	targetsFailed    int
 	targetsTotal     int
 	findingsFound    int
@@ -97,6 +98,12 @@ func newProgressRendererWithMode(out io.Writer, mode progressMode) *progressRend
 		renderer.dynamic = isTerminal
 		renderer.plain = !isTerminal
 	}
+	// Windows consoles must opt in to ANSI processing; when that fails the
+	// dynamic block would print raw escape sequences, so use plain lines.
+	if renderer.dynamic && terminalFD >= 0 && !enableVirtualTerminal(terminalFD) {
+		renderer.dynamic = false
+		renderer.plain = true
+	}
 	renderer.widthFn = renderer.currentWidth
 	return renderer
 }
@@ -144,6 +151,7 @@ func (r *progressRenderer) UpdateFromJob(update jobs.ProgressUpdate) error {
 	state.tagsFailed = update.TagsFailed
 	state.tagsTotal = update.TagsTotal
 	state.targetsCompleted = update.TargetsCompleted
+	state.targetsPartial = update.TargetsPartial
 	state.targetsFailed = update.TargetsFailed
 	state.targetsTotal = update.TargetsTotal
 	state.findingsFound = update.FindingsFound
@@ -224,8 +232,8 @@ func (r *progressRenderer) render() error {
 }
 
 func (r *progressRenderer) buildLines(maxWidth int) []string {
-	tagLabel := progressLabel(r.state.tagsCompleted, r.state.tagsTotal, r.state.tagsFailed, "waiting for tag enumeration")
-	targetLabel := progressLabel(r.state.targetsCompleted, r.state.targetsTotal, r.state.targetsFailed, "waiting for target selection")
+	tagLabel := progressLabel(r.state.tagsCompleted, r.state.tagsTotal, 0, r.state.tagsFailed, "waiting for tag enumeration")
+	targetLabel := progressLabel(r.state.targetsCompleted, r.state.targetsTotal, r.state.targetsPartial, r.state.targetsFailed, "waiting for target selection")
 	progressCompleted, progressTotal := progressCounts(r.state)
 
 	return []string{
@@ -360,16 +368,21 @@ func terminalFileDescriptor(out io.Writer) (int, bool) {
 	return int(file.Fd()), true
 }
 
-func progressLabel(completed, total, failed int, waiting string) string {
+// progressLabel describes finished work. Partial targets count as done (the
+// scan reached them) and are called out separately so the bar can fill.
+func progressLabel(completed, total, partial, failed int, waiting string) string {
 	if total <= 0 {
 		return waiting
+	}
+	if partial > 0 {
+		return fmt.Sprintf("%d/%d done, %d partial, %d failed", completed+partial+failed, total, partial, failed)
 	}
 	return fmt.Sprintf("%d/%d complete, %d failed", completed, total, failed)
 }
 
 func progressCounts(state progressSnapshot) (int, int) {
 	if state.targetsTotal > 0 {
-		return state.targetsCompleted + state.targetsFailed, state.targetsTotal
+		return state.targetsCompleted + state.targetsPartial + state.targetsFailed, state.targetsTotal
 	}
 	if state.tagsTotal > 0 {
 		return state.tagsCompleted + state.tagsFailed, state.tagsTotal
@@ -390,11 +403,14 @@ func progressValue(value, fallback string) string {
 	return sanitized
 }
 
+// sanitizeProgressValue prepares untrusted registry and image text for the
+// terminal: whitespace and control runs collapse to one space, and Unicode
+// format characters (bidi overrides, zero-width joiners, soft hyphens) and
+// other non-printable runes are dropped. It is the same function that
+// sanitises PublicResult messages, so the summary, stdout JSON and the scan
+// record agree. Trusted local paths are printed with %q instead.
 func sanitizeProgressValue(value string) string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	})
-	return strings.Join(fields, " ")
+	return scanservice.SanitizeMessageText(value)
 }
 
 func clampProgressLine(line string, maxWidth int) string {

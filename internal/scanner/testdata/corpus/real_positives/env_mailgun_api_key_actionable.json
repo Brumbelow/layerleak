@@ -1,0 +1,13 @@
+{
+  "name": "env_mailgun_api_key_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "MAILGUN_API_KEY",
+  "content_base64": "TUFJTEdVTl9BUElfS0VZPWtleS0wMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "mailgun_api_key"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

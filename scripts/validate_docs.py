@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import html
 import json
+import os
+import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -238,6 +241,11 @@ def validate_local_references(root: Path):
             _validate_local_reference(root, html_path, attribute, reference)
 
 
+# One scan record per scan, named <utc-timestamp>-<reference-token>-<random>.json
+# directly in the record directory (internal/cli/results.go).
+DEMO_SCAN_RECORD_NAME = re.compile(r"^\d{8}T\d{6}Z-[A-Za-z0-9_-]+-[A-Z2-7]{26}\.json$")
+
+
 def _validate_demo_run_result(run_result):
     if run_result.get("raw_storage_enabled") is not False:
         raise ValidationFailure("demo-data.json raw_storage_enabled must be false")
@@ -249,14 +257,21 @@ def _validate_demo_run_result(run_result):
         raise ValidationFailure(
             "demo-data.json coverage.complete conflicts with status"
         )
+    if run_result.get("exit_code") not in {0, 1, 2, 3}:
+        raise ValidationFailure("demo-data.json run_result.exit_code must be 0, 1, 2 or 3")
+    for field in ("result_schema_version", "record_schema_version"):
+        if run_result.get(field) != 2:
+            raise ValidationFailure(f"demo-data.json run_result.{field} must be 2")
     artifacts = run_result.get("artifacts", {})
-    if set(artifacts) != {"findings", "scan_record"}:
+    if set(artifacts) != {"scan_record"}:
         raise ValidationFailure(
-            "demo-data.json must name findings and scan_record artifacts"
+            "demo-data.json must name exactly one scan_record artifact"
         )
-    if PurePosixPath(artifacts["scan_record"]).parent.name != "scans":
+    record = PurePosixPath(artifacts["scan_record"])
+    if "scans" in record.parts[:-1] or not DEMO_SCAN_RECORD_NAME.match(record.name):
         raise ValidationFailure(
-            "demo-data.json scan_record artifact must be under scans/"
+            "demo-data.json scan_record artifact must be "
+            "<dir>/<utc-timestamp>-<reference-token>-<random>.json"
         )
 
 
@@ -272,10 +287,10 @@ def _validate_demo_table(table_name, table):
                 f"demo-data.json table {table_name} row does not match columns"
             )
         for raw_field in ("value", "raw_snippet"):
-            if raw_field in row and row[raw_field] is not None:
+            if raw_field in row and row[raw_field] not in (None, ""):
                 raise ValidationFailure(
                     f"demo-data.json table {table_name} {raw_field} "
-                    "must be null when raw storage is disabled"
+                    "must be empty when raw storage is disabled"
                 )
 
 
@@ -314,6 +329,78 @@ def validate_demo(root: Path):
         )
 
 
+CHANGELOG_RELEASE_HEADING = re.compile(r"^## \[v(\d+\.\d+\.\d+)\]", re.MULTILINE)
+
+
+def validate_release_version(root: Path, spec):
+    """The OpenAPI info.version must match the newest CHANGELOG release heading."""
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    match = CHANGELOG_RELEASE_HEADING.search(changelog)
+    if not match:
+        raise ValidationFailure("CHANGELOG.md has no release heading of the form ## [vX.Y.Z]")
+    expected = match.group(1)
+    info_version = str(spec.get("info", {}).get("version"))
+    if info_version != expected:
+        raise ValidationFailure(
+            f"web/docs/openapi.yaml info.version {info_version} differs from "
+            f"the CHANGELOG release heading v{expected}"
+        )
+    if os.environ.get("GITHUB_REF_TYPE") == "tag":
+        tag_version = re.sub(r"-rc\.\d+$", "", os.environ.get("GITHUB_REF_NAME", "").lstrip("v"))
+        if tag_version != expected:
+            raise ValidationFailure(
+                f"release tag {os.environ.get('GITHUB_REF_NAME')} does not match "
+                f"the documented version {expected}"
+            )
+
+
+README_VARIABLE_ROW = re.compile(r"^\| `(LAYERLEAK_[A-Z_]+)` \|", re.MULTILINE)
+README_VARIABLE_DEFAULT = re.compile(r"^\| `(LAYERLEAK_[A-Z_]+)` \| (.*?) \|", re.MULTILINE)
+WEB_VARIABLE = re.compile(r"LAYERLEAK_[A-Z][A-Z_]+")
+WEB_VARIABLE_ROW = re.compile(r"<tr><td><code>(LAYERLEAK_[A-Z_]+)</code></td><td>(.*?)</td>")
+HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def _readme_default(cell):
+    return cell.replace("`", "").strip()
+
+
+def _web_default(cell):
+    return html.unescape(HTML_TAG.sub("", cell)).strip()
+
+
+def validate_web_variables(root: Path):
+    """Keep the site's configuration tables in step with README in both directions."""
+    # Every LAYERLEAK_* variable the site mentions must have a README table
+    # row, every README row must have a site table row, and both must state
+    # the same default.
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    documented = set(README_VARIABLE_ROW.findall(readme))
+    if len(documented) < 50:
+        raise ValidationFailure(
+            f"README documents only {len(documented)} LAYERLEAK_ variables; the tables look damaged"
+        )
+    site = (root / "web" / "docs" / "index.html").read_text(encoding="utf-8")
+    mentioned = set(WEB_VARIABLE.findall(site))
+    missing = sorted(mentioned - documented)
+    if missing:
+        raise ValidationFailure(
+            "web/docs/index.html mentions variables without a README table row: " + ", ".join(missing)
+        )
+    site_rows = {name: _web_default(cell) for name, cell in WEB_VARIABLE_ROW.findall(site)}
+    absent = sorted(documented - set(site_rows))
+    if absent:
+        raise ValidationFailure(
+            "README variables without a web/docs/index.html table row: " + ", ".join(absent)
+        )
+    for name, cell in README_VARIABLE_DEFAULT.findall(readme):
+        expected = _readme_default(cell)
+        if site_rows[name] != expected:
+            raise ValidationFailure(
+                f"{name} default {site_rows[name]!r} on the site differs from README {expected!r}"
+            )
+
+
 def validate_repository(root: Path):
     root = root.resolve()
     spec_path = root / "web" / "docs" / "openapi.yaml"
@@ -324,10 +411,12 @@ def validate_repository(root: Path):
         raise ValidationFailure(f"invalid OpenAPI 3.1 document: {error}") from error
     if spec.get("openapi") != "3.1.0":
         raise ValidationFailure("web/docs/openapi.yaml must remain OpenAPI 3.1.0")
+    validate_release_version(root, spec)
     fixtures = validate_contract_fixtures(root, spec)
     validate_documented_examples(root, spec, fixtures)
     validate_local_references(root)
     validate_demo(root)
+    validate_web_variables(root)
 
 
 def main() -> int:
@@ -338,7 +427,7 @@ def main() -> int:
         print(f"documentation validation failed: {error}", file=sys.stderr)
         return 1
     print(
-        "OpenAPI contract, response examples, local links, and synthetic demo are valid"
+        "OpenAPI contract, response examples, local links, variable tables, and synthetic demo are valid"
     )
     return 0
 

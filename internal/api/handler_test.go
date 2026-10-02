@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/limits"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanservice"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 func TestHandleHealthReturnsOK(t *testing.T) {
@@ -49,9 +49,9 @@ func TestHandleScanSuccess(t *testing.T) {
 						Disposition:    findings.DispositionActionable,
 						SourceType:     findings.SourceTypeEnv,
 						ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-						RedactedValue:  "ghp********************************56",
+						RedactedValue:  "ghp********",
 						Fingerprint:    "fingerprint",
-						ContextSnippet: "GH_TOKEN=ghp********************************56",
+						ContextSnippet: "GH_TOKEN=[REDACTED]",
 					},
 				},
 				TotalFindings:      1,
@@ -346,7 +346,7 @@ func TestHandleListRepositoryFindingsSupportsDispositionFilter(t *testing.T) {
 				ID:                        42,
 				ManifestDigest:            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				Fingerprint:               "fingerprint",
-				RedactedValue:             "ghp********************************56",
+				RedactedValue:             "ghp********",
 				FirstSeenAt:               time.Date(2026, time.March, 28, 14, 0, 0, 0, time.UTC),
 				LastSeenAt:                time.Date(2026, time.March, 28, 15, 0, 0, 0, time.UTC),
 				OccurrenceCount:           3,
@@ -465,7 +465,7 @@ func TestHandleGetScanReturnsDetail(t *testing.T) {
 			},
 			Registry:   "docker.io",
 			Repository: "library/app",
-			ResultJSON: json.RawMessage(`{"requested_reference":"library/app:latest","findings":[{"redacted_value":"ghp********************************56"}]}`),
+			ResultJSON: json.RawMessage(`{"requested_reference":"library/app:latest","findings":[{"redacted_value":"ghp********"}]}`),
 		},
 	}
 
@@ -495,7 +495,7 @@ func TestHandleGetFindingReturnsDetail(t *testing.T) {
 				ID:                        7,
 				ManifestDigest:            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				Fingerprint:               "fingerprint",
-				RedactedValue:             "ghp********************************56",
+				RedactedValue:             "ghp********",
 				FirstSeenAt:               time.Date(2026, time.March, 28, 14, 0, 0, 0, time.UTC),
 				LastSeenAt:                time.Date(2026, time.March, 28, 15, 0, 0, 0, time.UTC),
 				OccurrenceCount:           1,
@@ -512,7 +512,7 @@ func TestHandleGetFindingReturnsDetail(t *testing.T) {
 					Platform:            manifest.Platform{OS: "linux", Architecture: "amd64"},
 					Key:                 "GH_TOKEN",
 					LineNumber:          3,
-					ContextSnippet:      "GH_TOKEN=ghp********************************56",
+					ContextSnippet:      "GH_TOKEN=[REDACTED]",
 					SourceLocation:      "env:GH_TOKEN",
 					MatchStart:          9,
 					MatchEnd:            49,
@@ -601,32 +601,39 @@ type stubReadStore struct {
 	disposition storage.FindingDispositionFilter
 	scanID      int64
 	findingID   int64
+
+	repositoryAfter *storage.RepositoryCursor
+	scanAfter       *storage.ScanRunCursor
+	findingAfter    *storage.FindingCursor
 }
 
 func (s *stubReadStore) Ready(_ context.Context) error {
 	return s.readyErr
 }
 
-func (s *stubReadStore) ListRepositories(_ context.Context, limit, offset int) ([]storage.RepositorySummary, error) {
+func (s *stubReadStore) ListRepositories(_ context.Context, limit, offset int, after *storage.RepositoryCursor) ([]storage.RepositorySummary, error) {
 	s.limit = limit
 	s.offset = offset
+	s.repositoryAfter = after
 	return s.repositories, nil
 }
 
-func (s *stubReadStore) ListRepositoryFindings(_ context.Context, registry, repository string, disposition storage.FindingDispositionFilter, limit, offset int) ([]storage.FindingSummary, error) {
+func (s *stubReadStore) ListRepositoryFindings(_ context.Context, registry, repository string, disposition storage.FindingDispositionFilter, limit, offset int, after *storage.FindingCursor) ([]storage.FindingSummary, error) {
 	s.registry = registry
 	s.repository = repository
 	s.disposition = disposition
 	s.limit = limit
 	s.offset = offset
+	s.findingAfter = after
 	return s.findings, nil
 }
 
-func (s *stubReadStore) ListRepositoryScans(_ context.Context, registry, repository string, limit, offset int) ([]storage.ScanRunSummary, error) {
+func (s *stubReadStore) ListRepositoryScans(_ context.Context, registry, repository string, limit, offset int, after *storage.ScanRunCursor) ([]storage.ScanRunSummary, error) {
 	s.registry = registry
 	s.repository = repository
 	s.limit = limit
 	s.offset = offset
+	s.scanAfter = after
 	return s.scans, nil
 }
 

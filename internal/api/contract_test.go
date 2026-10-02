@@ -7,12 +7,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/scanner"
-	"github.com/brumbelow/layerleak/internal/scanservice"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
 )
 
 func TestDocumentedScanResponsesMatchHandler(t *testing.T) {
@@ -78,7 +80,10 @@ const contractDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 func contractResult(status jobs.ResultStatus) jobs.Result {
 	target := contractTargetResult(status)
 	result := jobs.Result{
-		ResultSchemaVersion:    1,
+		ResultSchemaVersion:    jobs.ResultSchemaVersion,
+		ScannedAt:              time.Date(2026, time.September, 30, 12, 0, 0, 0, time.UTC),
+		DurationMS:             4210,
+		Scanner:                jobs.ScannerInfo{Name: jobs.ScannerName, Version: "v3.0.0", DetectorSetVersion: "sha256:" + strings.Repeat("d", 64)},
 		Status:                 status,
 		RequestedReference:     "library/example:latest",
 		Repository:             "library/example",
@@ -169,9 +174,9 @@ func contractFinding() findings.Finding {
 		Disposition:         findings.DispositionActionable,
 		SourceType:          findings.SourceTypeEnv,
 		ManifestDigest:      contractDigest,
-		RedactedValue:       "ghp********************************56",
+		RedactedValue:       "ghp********",
 		Fingerprint:         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		ContextSnippet:      "GH_TOKEN=ghp********************************56",
+		ContextSnippet:      "GH_TOKEN=[REDACTED]",
 		MatchStart:          9,
 		MatchEnd:            49,
 		PresentInFinalImage: true,

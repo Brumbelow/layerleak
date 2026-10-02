@@ -16,9 +16,12 @@
       "files_scanned": 0,
       "files_seen": 2,
       "files_skipped_oversize": 0,
+      "files_transcoded_utf16": 0,
       "layers_completed": 0,
       "layers_seen": 1,
       "metadata_values_scanned": 1,
+      "nested_archives_expanded": 0,
+      "nested_entries_scanned": 0,
       "retained_bytes": 64
     },
     "diagnostics": [
@@ -29,6 +32,7 @@
         "subject": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       }
     ],
+    "duration_ms": 4210,
     "failed_manifest_count": 1,
     "failed_target_count": 1,
     "findings": [],
@@ -39,8 +43,19 @@
     "requested_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "requested_reference": "library/example:latest",
     "resolved_reference": "docker.io/library/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "result_schema_version": 1,
+    "result_schema_version": 2,
+    "scanned_at": "2026-09-30T12:00:00Z",
+    "scanner": {
+      "detector_set_version": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "name": "layerleak",
+      "version": "v3.0.0"
+    },
     "status": "failed",
+    "suppressed_findings_count": 0,
+    "suppressed_unique_fingerprints": 0,
+    "tags_enumerated": 0,
+    "tags_failed": 0,
+    "tags_resolved": 0,
     "target_count": 1,
     "targets": [
       {

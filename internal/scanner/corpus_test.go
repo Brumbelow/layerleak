@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brumbelow/layerleak/internal/detectors"
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/layers"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 )
 
 const (
@@ -27,11 +28,15 @@ var (
 )
 
 type corpusCase struct {
-	Name                    string               `json:"name"`
-	SourceType              findings.SourceType  `json:"source_type"`
-	Path                    string               `json:"path"`
-	Key                     string               `json:"key"`
-	Content                 string               `json:"content"`
+	Name       string              `json:"name"`
+	SourceType findings.SourceType `json:"source_type"`
+	Path       string              `json:"path"`
+	Key        string              `json:"key"`
+	Content    string              `json:"content"`
+	// ContentBase64 carries fixtures whose literal shape would trip secret
+	// scanners (vendor token prefixes); it is decoded into Content on load and
+	// exactly one of the two must be set.
+	ContentBase64           string               `json:"content_base64,omitempty"`
 	ExpectedOutcome         string               `json:"expected_outcome"`
 	ExpectedDetectors       []string             `json:"expected_detectors"`
 	ExpectedConfidenceFloor detectors.Confidence `json:"expected_confidence_floor"`
@@ -221,6 +226,17 @@ func loadCorpusCases(t *testing.T) []corpusCase {
 		var fixture corpusCase
 		if err := json.Unmarshal(body, &fixture); err != nil {
 			t.Fatalf("Unmarshal(%q) error = %v", path, err)
+		}
+		if fixture.ContentBase64 != "" {
+			if fixture.Content != "" {
+				t.Fatalf("%s: set either content or content_base64, not both", path)
+			}
+			decoded, err := base64.StdEncoding.DecodeString(fixture.ContentBase64)
+			if err != nil {
+				t.Fatalf("%s: content_base64 is not valid base64: %v", path, err)
+			}
+			fixture.Content = string(decoded)
+			fixture.ContentBase64 = ""
 		}
 		validateCorpusCase(t, path, fixture)
 		if _, ok := seenNames[fixture.Name]; ok {

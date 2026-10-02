@@ -4,13 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanner"
-	"github.com/brumbelow/layerleak/internal/scanservice"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 func buildScanRecord(t *testing.T, reference manifest.Reference, result jobs.Result, scannedAt time.Time) storage.ScanRecord {
@@ -221,9 +221,9 @@ func TestBuildScanRecordPreservesDistinctSourceLocations(t *testing.T) {
 					ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 					Platform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
 					FilePath:       "z.env",
-					RedactedValue:  "ghp********************************56",
+					RedactedValue:  "ghp********",
 					Fingerprint:    "fingerprint",
-					ContextSnippet: "TOKEN=ghp********************************56",
+					ContextSnippet: "TOKEN=ghp********",
 				},
 				Value:          "ghp_123456789012345678901234567890123456",
 				RawSnippet:     "TOKEN=ghp_123456789012345678901234567890123456",
@@ -239,9 +239,9 @@ func TestBuildScanRecordPreservesDistinctSourceLocations(t *testing.T) {
 					ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 					Platform:       manifest.Platform{OS: "linux", Architecture: "amd64"},
 					FilePath:       "a.env",
-					RedactedValue:  "ghp********************************56",
+					RedactedValue:  "ghp********",
 					Fingerprint:    "fingerprint",
-					ContextSnippet: "TOKEN=ghp********************************56",
+					ContextSnippet: "TOKEN=ghp********",
 				},
 				Value:          "ghp_123456789012345678901234567890123456",
 				RawSnippet:     "TOKEN=ghp_123456789012345678901234567890123456",
@@ -270,9 +270,9 @@ func testDetailedFindingForManifest(manifestDigest string, platform manifest.Pla
 			ManifestDigest:      manifestDigest,
 			Platform:            platform,
 			Key:                 "GH_TOKEN",
-			RedactedValue:       "ghp********************************56",
+			RedactedValue:       "ghp********",
 			Fingerprint:         manifestDigest,
-			ContextSnippet:      "GH_TOKEN=ghp********************************56",
+			ContextSnippet:      "GH_TOKEN=ghp********",
 			LineNumber:          1,
 			PresentInFinalImage: true,
 		},

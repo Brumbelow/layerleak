@@ -10,18 +10,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/detectors"
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/layers"
-	"github.com/brumbelow/layerleak/internal/limits"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
+	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
 )
 
 type Request struct {
-	Reference          manifest.Reference
-	Platform           string
-	Registry           *registry.Client
+	Reference manifest.Reference
+	Platform  string
+	// Registry is the BlobSource the image is read from: a *registry.Client
+	// for a registry reference or a local reader for an oci:, oci-archive:
+	// or docker-archive: reference.
+	Registry           BlobSource
 	Detectors          detectors.Set
 	Logger             *slog.Logger
 	MaxFileBytes       int64
@@ -33,6 +36,15 @@ type Request struct {
 	MaxImageLayerBytes int64
 	MaxImageArtifacts  int
 	MaxRetainedBytes   int64
+	// MaxNestedArchiveBytes and MaxNestedArchiveEntries bound the one-level
+	// expansion of archives stored in layers (layers.ReplayOptions).
+	MaxNestedArchiveBytes   int64
+	MaxNestedArchiveEntries int
+	// LayerCache, when set, is the sweep-scoped cache of layers whose files
+	// held no findings: such layers are replayed from it without a blob fetch
+	// and newly scanned clean layers are stored into it. Results are identical
+	// with and without it.
+	LayerCache         *layers.LayerCache
 	MaxFindings        int
 	ExistingFindings   int
 	RetainRawSecrets   bool
@@ -43,7 +55,17 @@ type Request struct {
 	Progress           ProgressFunc
 }
 
-const maxArchivePathBytes = 4096
+const (
+	maxArchivePathBytes = 4096
+	// maxProvenancePathBytes is the longest file path whose own detector
+	// matches are redacted: an archive path plus a nested entry path.
+	maxProvenancePathBytes = 2*maxArchivePathBytes + len(layers.NestedPathSeparator)
+	// maxNestedSkipDiagnostics bounds the per-platform nested_archive_skipped
+	// diagnostics; further skips are summed into one closing diagnostic.
+	maxNestedSkipDiagnostics = 32
+	// maxDiagnosticPathRunes bounds a file path quoted in a diagnostic message.
+	maxDiagnosticPathRunes = 256
+)
 
 type ResultStatus string
 
@@ -66,6 +88,15 @@ type Coverage struct {
 	ExpandedLayerBytes        int64 `json:"expanded_layer_bytes"`
 	RetainedBytes             int64 `json:"retained_bytes"`
 	DetectorInputBytesScanned int64 `json:"detector_input_bytes_scanned"`
+	// FilesTranscodedUTF16 counts scanned files whose UTF-16 content was
+	// transcoded to UTF-8 before detection (3.0.0; previously such files were
+	// excluded as binary).
+	FilesTranscodedUTF16 int `json:"files_transcoded_utf16"`
+	// NestedArchivesExpanded counts archives stored in layers that were opened
+	// one level deep; NestedEntriesScanned counts the regular files inside them
+	// that were classified and scanned by content or checked by path (3.0.0).
+	NestedArchivesExpanded int `json:"nested_archives_expanded"`
+	NestedEntriesScanned   int `json:"nested_entries_scanned"`
 }
 
 type Diagnostic struct {
@@ -75,6 +106,58 @@ type Diagnostic struct {
 	Message  string `json:"message"`
 	Limit    int64  `json:"limit,omitempty"`
 	Observed int64  `json:"observed,omitempty"`
+}
+
+// UnsupportedManifestError reports a selected manifest that Layerleak cannot
+// scan because its layers are foreign/non-distributable or use an unknown
+// media type. It is a coverage outcome (the platform is reported as failed
+// with a manifest_unsupported diagnostic and the scan continues), never an
+// integrity failure, so --allow-partial may accept it.
+type UnsupportedManifestError struct {
+	Digest   string
+	Platform manifest.Platform
+	Cause    error
+}
+
+func (e *UnsupportedManifestError) Error() string {
+	subject := strings.TrimSpace(e.Digest)
+	if platform := e.Platform.String(); platform != "" {
+		subject = platform + " (" + subject + ")"
+	}
+	return fmt.Sprintf("manifest %s is not supported: %v", subject, e.Cause)
+}
+
+func (e *UnsupportedManifestError) Unwrap() error {
+	return e.Cause
+}
+
+// IsUnsupportedManifest reports whether err describes a manifest that cannot
+// be scanned on this platform policy.
+func IsUnsupportedManifest(err error) bool {
+	var target *UnsupportedManifestError
+	return errors.As(err, &target)
+}
+
+// PlatformNotFoundError reports that a single-manifest image does not match
+// the requested platform selector.
+type PlatformNotFoundError struct {
+	Selector string
+	Actual   manifest.Platform
+}
+
+func (e *PlatformNotFoundError) Error() string {
+	actual := e.Actual.String()
+	if actual == "" {
+		actual = "unspecified"
+	}
+	return fmt.Sprintf("platform %s not found in image manifest (image platform is %s)", e.Selector, actual)
+}
+
+// IsPlatformNotFound reports whether err describes a platform selector that
+// matched no manifest.
+func IsPlatformNotFound(err error) bool {
+	var target *PlatformNotFoundError
+	return errors.As(err, &target)
 }
 
 type ProgressPhase string
@@ -127,7 +210,7 @@ type Result struct {
 
 type PlatformResult struct {
 	Status         ResultStatus      `json:"status"`
-	Platform       manifest.Platform `json:"platform,omitempty"`
+	Platform       manifest.Platform `json:"platform,omitzero"`
 	ManifestDigest string            `json:"manifest_digest"`
 	FindingsCount  int               `json:"findings_count"`
 	Error          string            `json:"error,omitempty"`
@@ -196,14 +279,22 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			manifest: &document.Manifest,
 		})
 	case manifest.DocumentKindIndex:
-		selected, err := manifest.SelectDescriptors(document.Index, request.Platform)
+		selection, err := manifest.SelectManifests(document.Index, request.Platform)
 		if err != nil {
 			return result, err
 		}
-		if request.MaxImageManifests > 0 && len(selected) > request.MaxImageManifests {
+		if request.MaxImageManifests > 0 && len(selection.Selected) > request.MaxImageManifests {
 			return result, limits.NewExceeded(limits.Kind("image_manifests"), int64(request.MaxImageManifests), "image index")
 		}
-		for _, descriptor := range selected {
+		for _, skipped := range selection.Skipped {
+			result.Diagnostics = appendDiagnostic(result.Diagnostics, Diagnostic{
+				Code:    string(skipped.Reason),
+				Scope:   "platform",
+				Subject: skipped.Descriptor.Digest,
+				Message: skipped.Detail,
+			})
+		}
+		for _, descriptor := range selection.Selected {
 			targets = append(targets, target{descriptor: descriptor})
 		}
 	default:
@@ -221,21 +312,19 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 	allDetailedFindings := make([]findings.DetailedFinding, 0)
 	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
+	platformErrors := make([]error, 0)
 	findingsFound := 0
+	budgetStopped := false
 	for _, target := range targets {
-		if budget.rawExceeded {
-			result.Coverage.Complete = false
-			result.Diagnostics = append(result.Diagnostics, budget.diagnostic())
-			break
-		}
 		if budget.exhausted() {
 			budget.markExceeded(target.descriptor.Digest)
+			budgetStopped = true
 			result.Coverage.Complete = false
-			result.Diagnostics = append(result.Diagnostics, budget.diagnostic())
+			result.Diagnostics = appendDiagnostic(result.Diagnostics, budget.diagnostic())
 			break
 		}
 		if err := ctx.Err(); err != nil {
-			finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+			finalizeScan(&result, budget, allDetailedFindings, allSuppressedDetailedFindings)
 			return result, err
 		}
 		emitProgress(request, ProgressUpdate{
@@ -270,8 +359,9 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 			}
 			result.PlatformResults = append(result.PlatformResults, platformResult)
 			result.Coverage = mergeCoverage(result.Coverage, platformResult.Coverage, result.CompletedManifestCount+result.FailedManifestCount > 0)
-			result.Diagnostics = append(result.Diagnostics, platformResult.Diagnostics...)
+			result.Diagnostics = appendDiagnostics(result.Diagnostics, platformResult.Diagnostics)
 			result.FailedManifestCount++
+			platformErrors = append(platformErrors, err)
 			emitProgress(request, ProgressUpdate{
 				Phase:                 ProgressPhaseManifestFailed,
 				Repository:            request.Reference.Repository,
@@ -285,7 +375,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 				Message:               err.Error(),
 			})
 			if limits.IsExceeded(err) || manifest.IsIntegrityError(err) || isCancellationError(err) || ctx.Err() != nil {
-				finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+				finalizeScan(&result, budget, allDetailedFindings, allSuppressedDetailedFindings)
 				return result, err
 			}
 			continue
@@ -293,7 +383,7 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 
 		result.PlatformResults = append(result.PlatformResults, platformResult)
 		result.Coverage = mergeCoverage(result.Coverage, platformResult.Coverage, result.CompletedManifestCount+result.FailedManifestCount > 0)
-		result.Diagnostics = append(result.Diagnostics, platformResult.Diagnostics...)
+		result.Diagnostics = appendDiagnostics(result.Diagnostics, platformResult.Diagnostics)
 		result.CompletedManifestCount++
 		emitProgress(request, ProgressUpdate{
 			Phase:                 ProgressPhaseManifestCompleted,
@@ -309,9 +399,17 @@ func Scan(ctx context.Context, request Request) (Result, error) {
 		})
 	}
 
-	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+	finalizeScan(&result, budget, allDetailedFindings, allSuppressedDetailedFindings)
 	if result.CompletedManifestCount == 0 {
-		return result, allSelectedManifestsFailedError(result.PlatformResults)
+		if budgetStopped && len(result.PlatformResults) == 0 {
+			// The findings budget carried in from earlier targets was already
+			// spent, so nothing was attempted. That is incomplete coverage, not
+			// a failure of the selected manifests.
+			result.Status = ResultStatusPartial
+			result.Coverage.Complete = false
+			return result, nil
+		}
+		return result, allSelectedManifestsFailedError(result.PlatformResults, platformErrors)
 	}
 	emitProgress(request, ProgressUpdate{
 		Phase:                 ProgressPhaseCompleted,
@@ -385,6 +483,18 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 		platform.Variant = imageConfig.Variant
 	}
 	platformResult.Platform = platform
+	if preloaded != nil && strings.TrimSpace(request.Platform) != "" {
+		// The root document was a single image manifest, so no index entry was
+		// matched against the selector. Enforce it against the image config
+		// before any detection runs for a platform the caller did not ask for.
+		selector, err := manifest.ParsePlatformSelector(request.Platform)
+		if err != nil {
+			return platformResult, nil, nil, err
+		}
+		if !platform.Matches(selector) {
+			return platformResult, nil, nil, &PlatformNotFoundError{Selector: strings.TrimSpace(request.Platform), Actual: platform}
+		}
+	}
 
 	budgetStart := budget.snapshot()
 	metadataFindings := scanMetadataWithBudget(budget, request.Detectors, descriptor.Digest, platform, imageConfig)
@@ -394,14 +504,25 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 		budget.markExceeded(descriptor.Digest)
 	}
 	if !budget.stopped() && err == nil {
-		layerResult, err = layers.Replay(ctx, imageManifest.Layers, layers.ReplayOptions{
+		replayOptions := layers.ReplayOptions{
 			MaxFileBytes:     request.MaxFileBytes,
 			MaxLayerBytes:    request.MaxLayerBytes,
 			MaxLayerEntries:  request.MaxLayerEntries,
 			MaxTotalBytes:    request.MaxImageLayerBytes,
 			MaxTotalEntries:  request.MaxImageArtifacts,
 			MaxRetainedBytes: request.MaxRetainedBytes,
-		}, layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
+
+			MaxNestedArchiveBytes:   request.MaxNestedArchiveBytes,
+			MaxNestedArchiveEntries: request.MaxNestedArchiveEntries,
+			// A nested entry that cannot be scanned by content is kept only when
+			// its path alone would be reported (LAY-12), so a jar full of class
+			// files costs no retained metadata.
+			NestedKeepPath: func(path string) bool {
+				return len(request.Detectors.ScanPath(path)) > 0
+			},
+			Cache: request.LayerCache,
+		}
+		opener := layers.OpenFunc(func(ctx context.Context, layerDescriptor manifest.Descriptor) (io.ReadCloser, error) {
 			blobCtx := ctx
 			cancel := func() {}
 			if request.BlobTimeout > 0 {
@@ -424,7 +545,18 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 				return nil, err
 			}
 			return &verifiedReadCloser{VerifyingReader: verifier, closer: response.Body, cancel: cancel}, nil
-		}))
+		})
+		layerResult, err = layers.Replay(ctx, imageManifest.Layers, replayOptions, opener)
+		if errors.Is(err, layers.ErrCacheUnusable) {
+			// A later layer hardlinks into a cached layer's text, which the
+			// cache does not hold: replay this manifest from the registry.
+			// Layers scanned on the way are still recorded for the cache.
+			replayOptions.SkipCacheLookup = true
+			layerResult, err = layers.Replay(ctx, imageManifest.Layers, replayOptions, opener)
+		}
+		if layers.IsUnsupportedLayer(err) {
+			err = &UnsupportedManifestError{Digest: descriptor.Digest, Platform: platform, Cause: err}
+		}
 	}
 
 	fileFindings := scanArtifactsWithBudget(budget, request.Detectors, descriptor.Digest, platform, findings.SourceTypeFileFinal, true, layerResult.FinalFiles)
@@ -434,6 +566,12 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 	}
 
 	allFindings := append(metadataFindings, fileFindings...)
+	if request.LayerCache != nil && err == nil && !budget.stopped() && ctx.Err() == nil {
+		// Every regular file of a completed layer was scanned (as final or as
+		// deleted content); a layer none of whose files produced a finding is
+		// safe to replay from metadata for the rest of the sweep.
+		storeCleanLayers(request.LayerCache, layerResult.LayerRecords, allFindings)
+	}
 	actionableFindings, suppressedFindings := splitDetailedFindings(allFindings)
 	platformResult.FindingsCount = len(actionableFindings)
 	platformResult.Coverage = coverageFromLayerResult(layerResult.Coverage, budget.delta(budgetStart))
@@ -456,6 +594,7 @@ func scanManifestWithBudget(ctx context.Context, request Request, descriptor man
 			Observed: int64(layerResult.Coverage.EntriesSkippedUnsafe),
 		})
 	}
+	platformResult.Diagnostics = append(platformResult.Diagnostics, nestedSkipDiagnostics(request.Detectors, descriptor.Digest, layerResult)...)
 	if budget.stopped() && budget.diagnosticManifest == descriptor.Digest {
 		platformResult.Diagnostics = append(platformResult.Diagnostics, budget.diagnostic())
 	}
@@ -516,20 +655,27 @@ type detectionCoverage struct {
 	detectorInputBytesScanned int64
 }
 
+// detectionBudget tracks the two per-scan budgets. The findings budget stops
+// detection when it is spent because nothing further could be reported. The
+// raw-retention budget only stops raw values from being kept: detection keeps
+// running with retention disabled and the truncation is surfaced as a
+// diagnostic, so an operator convenience never costs detection coverage.
 type detectionBudget struct {
-	ctx                context.Context
-	maxFindings        int
-	retained           int
-	exceeded           bool
-	observed           int
-	diagnosticManifest string
-	err                error
-	retainRaw          bool
-	maxRawBytes        int64
-	rawBytes           int64
-	rawExceeded        bool
-	rawObserved        int64
-	coverage           detectionCoverage
+	ctx                  context.Context
+	maxFindings          int
+	retained             int
+	exceeded             bool
+	observed             int
+	diagnosticManifest   string
+	err                  error
+	retainRaw            bool
+	maxRawBytes          int64
+	rawBytes             int64
+	rawTruncated         bool
+	rawTruncatedFindings int
+	rawObserved          int64
+	rawManifest          string
+	coverage             detectionCoverage
 }
 
 func newDetectionBudget(ctx context.Context, request Request) *detectionBudget {
@@ -579,7 +725,7 @@ func (b *detectionBudget) scan(detectorSet detectors.Set, input findings.Input, 
 	normalizer, err := findings.NewDetailedNormalizerWithProvenance(
 		input,
 		matches,
-		scanProvenance(detectorSet, input.FilePath, maxArchivePathBytes),
+		scanProvenance(detectorSet, input.FilePath, maxProvenancePathBytes),
 		scanProvenance(detectorSet, input.Key, findings.MaxPublicProvenanceBytes),
 	)
 	if err != nil {
@@ -593,16 +739,18 @@ func (b *detectionBudget) scan(detectorSet detectors.Set, input findings.Input, 
 			b.diagnosticManifest = input.ManifestDigest
 			break
 		}
-		retainRaw := b.retainRaw
+		retainRaw := b.retainRaw && !b.rawTruncated
 		if retainRaw && b.maxRawBytes > 0 {
 			rawSize, rawSizeErr := normalizer.RawByteSize(match)
 			if rawSizeErr != nil {
 				continue
 			}
 			if b.rawBytes > b.maxRawBytes || rawSize > b.maxRawBytes-b.rawBytes {
-				b.rawExceeded = true
+				// Once the budget is spent raw retention stays off for the rest of
+				// the scan; detection continues with redacted findings only.
+				b.rawTruncated = true
 				b.rawObserved = b.rawBytes + rawSize
-				b.diagnosticManifest = input.ManifestDigest
+				b.rawManifest = input.ManifestDigest
 				retainRaw = false
 			}
 		}
@@ -612,11 +760,11 @@ func (b *detectionBudget) scan(detectorSet detectors.Set, input findings.Input, 
 		}
 		result = append(result, finding)
 		b.retained++
-		if retainRaw {
+		switch {
+		case retainRaw:
 			b.rawBytes += int64(len(finding.Value)) + int64(len(finding.RawSnippet))
-		}
-		if b.rawExceeded {
-			break
+		case b.retainRaw && b.rawTruncated:
+			b.rawTruncatedFindings++
 		}
 	}
 	return result
@@ -626,8 +774,10 @@ func (b *detectionBudget) exhausted() bool {
 	return b != nil && b.maxFindings > 0 && b.retained >= b.maxFindings
 }
 
+// stopped reports whether detection must halt. Only the findings budget stops
+// detection; raw-retention truncation is reported, not enforced as a stop.
 func (b *detectionBudget) stopped() bool {
-	return b != nil && (b.exceeded || b.rawExceeded)
+	return b != nil && b.exceeded
 }
 
 func (b *detectionBudget) markExceeded(manifestDigest string) {
@@ -657,17 +807,20 @@ func (b *detectionBudget) delta(before detectionCoverage) detectionCoverage {
 	}
 }
 
-func (b *detectionBudget) diagnostic() Diagnostic {
-	if b.rawExceeded {
-		return Diagnostic{
-			Code:     "max_raw_finding_bytes_exceeded",
-			Scope:    "scan",
-			Subject:  b.diagnosticManifest,
-			Message:  fmt.Sprintf("scan reached raw finding byte limit of %d before coverage completed", b.maxRawBytes),
-			Limit:    b.maxRawBytes,
-			Observed: b.rawObserved,
-		}
+// rawDiagnostic describes raw-retention truncation. It is scan-scoped and is
+// attached once, when the result is finalised, so the finding count is final.
+func (b *detectionBudget) rawDiagnostic() Diagnostic {
+	return Diagnostic{
+		Code:     "raw_retention_truncated",
+		Scope:    "scan",
+		Subject:  b.rawManifest,
+		Message:  fmt.Sprintf("raw secret retention stopped at the %d byte limit; %d finding(s) were recorded without raw values and detection continued", b.maxRawBytes, b.rawTruncatedFindings),
+		Limit:    b.maxRawBytes,
+		Observed: b.rawObserved,
 	}
+}
+
+func (b *detectionBudget) diagnostic() Diagnostic {
 	return Diagnostic{
 		Code:     "max_findings_exceeded",
 		Scope:    "scan",
@@ -765,27 +918,321 @@ func scanMetadataWithBudget(budget *detectionBudget, detectorSet detectors.Set, 
 func scanArtifactsWithBudget(budget *detectionBudget, detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifacts []layers.Artifact) []findings.DetailedFinding {
 	result := make([]findings.DetailedFinding, 0)
 	for _, artifact := range artifacts {
-		if budget != nil && (budget.stopped() || budget.err != nil || (budget.ctx != nil && budget.ctx.Err() != nil)) {
+		if budget.halted() {
 			break
 		}
-		if !artifact.Scannable || len(artifact.Content) == 0 {
+		if artifact.Type != "" && artifact.Type != layers.ArtifactTypeRegularFile && artifact.Type != layers.ArtifactTypeHardlink {
 			continue
 		}
-		content := string(artifact.Content)
-		result = append(result, budget.scan(detectorSet, findings.Input{
-			ManifestDigest:      manifestDigest,
-			Platform:            platform,
-			SourceType:          sourceType,
-			FilePath:            artifact.Path,
-			LayerDigest:         artifact.LayerDigest,
-			Content:             content,
-			PresentInFinalImage: presentInFinalImage,
-		}, detectors.ScanInput{
-			Content: content,
-			Path:    artifact.Path,
-		})...)
+		result = append(result, scanArtifactWithBudget(budget, detectorSet, manifestDigest, platform, sourceType, presentInFinalImage, artifact)...)
+		// Entries expanded out of an archive are scanned in archive order under
+		// their `outer!inner` provenance path. A hardlink to an archive carries
+		// its target's entries under the hardlink's own path.
+		for _, nested := range artifact.Nested {
+			if budget.halted() {
+				break
+			}
+			if artifact.Type == layers.ArtifactTypeHardlink {
+				prefix := artifact.Linkname + layers.NestedPathSeparator
+				if strings.HasPrefix(nested.Path, prefix) {
+					nested.Path = artifact.Path + layers.NestedPathSeparator + strings.TrimPrefix(nested.Path, prefix)
+					nested.LayerDigest = artifact.LayerDigest
+				}
+			}
+			result = append(result, scanArtifactWithBudget(budget, detectorSet, manifestDigest, platform, sourceType, presentInFinalImage, nested)...)
+		}
 	}
 	return result
+}
+
+// halted reports whether detection must stop iterating artifacts: the findings
+// budget is spent, a detection error was recorded or the context ended.
+func (b *detectionBudget) halted() bool {
+	return b != nil && (b.stopped() || b.err != nil || (b.ctx != nil && b.ctx.Err() != nil))
+}
+
+func scanArtifactWithBudget(budget *detectionBudget, detectorSet detectors.Set, manifestDigest string, platform manifest.Platform, sourceType findings.SourceType, presentInFinalImage bool, artifact layers.Artifact) []findings.DetailedFinding {
+	input := findings.Input{
+		ManifestDigest:      manifestDigest,
+		Platform:            platform,
+		SourceType:          sourceType,
+		FilePath:            artifact.Path,
+		LayerDigest:         artifact.LayerDigest,
+		PresentInFinalImage: presentInFinalImage,
+	}
+	if artifact.Scannable {
+		if artifact.ContentLength == 0 && len(artifact.Content) == 0 {
+			// An empty text file holds nothing, whatever its name.
+			return nil
+		}
+		if artifact.KnownClean && artifact.Content == nil {
+			// Replayed from the sweep cache: an earlier scan of this layer
+			// found nothing in this file. Account for it exactly as a scan
+			// would, without the content.
+			budget.scanKnownClean(input, artifact.ContentLength)
+			return nil
+		}
+		input.Content = string(artifact.Content)
+		return budget.scan(detectorSet, input, detectors.ScanInput{
+			Content: input.Content,
+			Path:    artifact.Path,
+		})
+	}
+	// Binary or oversize content the detectors never see: report the
+	// artifact by its path when the name alone says it is sensitive
+	// (LAY-12). A readable file is judged by its content only.
+	return budget.scanPath(detectorSet, input)
+}
+
+// scanKnownClean applies the gates and accounting of scan for a file whose
+// detector result (no matches) is already known, so coverage counters are
+// identical to a scan that ran the detectors.
+func (b *detectionBudget) scanKnownClean(input findings.Input, contentLength int64) {
+	if b == nil || b.stopped() || b.err != nil {
+		return
+	}
+	if b.exhausted() {
+		b.markExceeded(input.ManifestDigest)
+		return
+	}
+	if b.ctx != nil {
+		if err := b.ctx.Err(); err != nil {
+			b.err = err
+			return
+		}
+	}
+	b.coverage.detectorInputBytesScanned += contentLength
+	b.coverage.filesScanned++
+}
+
+// storeCleanLayers caches the records of layers none of whose files (or
+// nested entries) produced a finding, actionable or suppressed. A finding on a
+// hardlink is attributed to the hardlink's layer, which is what keeps that
+// layer out of the cache.
+func storeCleanLayers(cache *layers.LayerCache, records []*layers.LayerRecord, allFindings []findings.DetailedFinding) {
+	if cache == nil || len(records) == 0 {
+		return
+	}
+	dirty := make(map[string]struct{})
+	for _, finding := range allFindings {
+		if finding.LayerDigest != "" {
+			dirty[finding.LayerDigest] = struct{}{}
+		}
+	}
+	for _, record := range records {
+		if _, ok := dirty[record.Digest]; ok {
+			continue
+		}
+		cache.Store(record)
+	}
+}
+
+// nestedSkipDiagnostics reports every bounded skip of a nested archive as a
+// nested_archive_skipped diagnostic. The skip is informational: nested content
+// is scanned best-effort within its bounds and never changes coverage.complete.
+// Paths quoted in messages are redacted and bounded like finding provenance.
+func nestedSkipDiagnostics(detectorSet detectors.Set, manifestDigest string, result layers.ReplayResult) []Diagnostic {
+	items := make([]Diagnostic, 0, len(result.NestedSkips))
+	dropped := result.Coverage.NestedSkipsDropped
+	for index, skip := range result.NestedSkips {
+		if index >= maxNestedSkipDiagnostics {
+			dropped += len(result.NestedSkips) - index
+			break
+		}
+		items = append(items, Diagnostic{
+			Code:     "nested_archive_skipped",
+			Scope:    "platform",
+			Subject:  manifestDigest,
+			Message:  nestedSkipMessage(detectorSet, skip),
+			Limit:    skip.Limit,
+			Observed: skip.Observed,
+		})
+	}
+	if dropped > 0 {
+		items = append(items, Diagnostic{
+			Code:     "nested_archive_skipped",
+			Scope:    "platform",
+			Subject:  manifestDigest,
+			Message:  fmt.Sprintf("%d further nested archive skip(s) were not listed", dropped),
+			Observed: int64(dropped),
+		})
+	}
+	return items
+}
+
+func nestedSkipMessage(detectorSet detectors.Set, skip layers.NestedSkip) string {
+	prefix := fmt.Sprintf("nested archive %s in layer %s: ", redactedDiagnosticPath(detectorSet, skip.Path), strings.TrimSpace(skip.LayerDigest))
+	if detail, ok := nestedSkipLimitDetail(skip); ok {
+		return prefix + detail
+	}
+	if detail, ok := nestedSkipEntryDetail(skip); ok {
+		return prefix + detail
+	}
+	return prefix + string(skip.Reason)
+}
+
+// nestedSkipLimitDetail words the skips that a size, entry, budget or
+// retention limit caused; ok is false for any other reason.
+func nestedSkipLimitDetail(skip layers.NestedSkip) (string, bool) {
+	switch skip.Reason {
+	case layers.NestedSkipOversize:
+		return fmt.Sprintf("not expanded, its %d bytes exceed the %d byte nested archive limit", skip.Observed, skip.Limit), true
+	case layers.NestedSkipBytesLimit:
+		return fmt.Sprintf("expansion stopped at the %d byte nested archive limit after %d entries", skip.Limit, skip.Observed), true
+	case layers.NestedSkipEntriesLimit:
+		return fmt.Sprintf("expansion stopped at the %d entry nested archive limit", skip.Limit), true
+	case layers.NestedSkipLayerBudget:
+		return fmt.Sprintf("expansion stopped after %d entries when the remaining layer or image budget (%d) was spent", skip.Observed, skip.Limit), true
+	case layers.NestedSkipRetainedBytes:
+		return fmt.Sprintf("%d expanded entries were dropped to stay within the %d retained bytes limit", skip.Observed, skip.Limit), true
+	case layers.NestedSkipOversizeEntries:
+		return fmt.Sprintf("%d entries exceeded the %d byte per-file limit", skip.Observed, skip.Limit), true
+	default:
+		return "", false
+	}
+}
+
+// nestedSkipEntryDetail words the skips of entries that could not be read or
+// stay closed; ok is false for any other reason.
+func nestedSkipEntryDetail(skip layers.NestedSkip) (string, bool) {
+	switch skip.Reason {
+	case layers.NestedSkipMalformed:
+		return fmt.Sprintf("%d entries (or the archive structure) could not be decoded", skip.Observed), true
+	case layers.NestedSkipEncrypted:
+		return fmt.Sprintf("%d encrypted entries were skipped", skip.Observed), true
+	case layers.NestedSkipUnsupportedMethod:
+		return fmt.Sprintf("%d entries use an unsupported compression method", skip.Observed), true
+	case layers.NestedSkipUnsafeEntries:
+		return fmt.Sprintf("%d entries with unsafe paths were skipped", skip.Observed), true
+	case layers.NestedSkipDepth:
+		return fmt.Sprintf("%d archives inside it were not opened (one nesting level)", skip.Observed), true
+	default:
+		return "", false
+	}
+}
+
+// redactedDiagnosticPath quotes a file path in a diagnostic: detector matches
+// inside the path are replaced, control characters are sanitised and the
+// result is bounded, so a secret embedded in a file name never appears in the
+// diagnostics any more than in a finding's provenance.
+func redactedDiagnosticPath(detectorSet detectors.Set, value string) string {
+	matches := scanProvenance(detectorSet, value, maxProvenancePathBytes)
+	type span struct{ start, end int }
+	spans := make([]span, 0, len(matches))
+	for _, match := range matches {
+		if match.Start < 0 || match.End > len(value) || match.Start >= match.End {
+			continue
+		}
+		spans = append(spans, span{start: match.Start, end: match.End})
+	}
+	slices.SortFunc(spans, func(left, right span) int { return left.start - right.start })
+	var builder strings.Builder
+	cursor := 0
+	for _, item := range spans {
+		if item.start < cursor {
+			if item.end > cursor {
+				cursor = item.end
+			}
+			continue
+		}
+		builder.WriteString(value[cursor:item.start])
+		builder.WriteString("[REDACTED]")
+		cursor = item.end
+	}
+	builder.WriteString(value[cursor:])
+	redacted := findings.SanitizeControlCharacters(strings.ToValidUTF8(builder.String(), "�"))
+	runes := []rune(redacted)
+	if len(runes) > maxDiagnosticPathRunes {
+		redacted = string(runes[:maxDiagnosticPathRunes]) + "…"
+	}
+	return redacted
+}
+
+// scanPath reports a path-only finding for an artifact whose content could
+// not be scanned (binary or oversize). The detector match covers the path, so
+// the normalizer runs with the path as its content (which redacts any secret
+// inside the path and classifies test and example locations as usual); the
+// value-derived fields are then dropped, because there is no secret value:
+// the redacted value and context snippet are empty and the fingerprint is
+// that of the layer digest and path rather than of a value.
+func (b *detectionBudget) scanPath(detectorSet detectors.Set, input findings.Input) []findings.DetailedFinding {
+	if !b.admitPathScan(input.ManifestDigest) {
+		return nil
+	}
+	matches := detectorSet.ScanPath(input.FilePath)
+	if len(matches) == 0 {
+		return nil
+	}
+	input.Content = input.FilePath
+	normalizer, err := findings.NewDetailedNormalizerWithProvenance(input, nil, scanProvenance(detectorSet, input.FilePath, maxProvenancePathBytes), nil)
+	if err != nil {
+		return nil
+	}
+	fingerprint := findings.Fingerprint(input.LayerDigest + "\n" + input.FilePath)
+	result := make([]findings.DetailedFinding, 0, len(matches))
+	for _, match := range matches {
+		if b.pathFindingsFull(input.ManifestDigest) {
+			break
+		}
+		finding, err := normalizer.NormalizeWithRaw(match, false)
+		if err != nil {
+			continue
+		}
+		result = append(result, pathOnlyFinding(finding, fingerprint))
+		if b != nil {
+			b.retained++
+		}
+	}
+	return result
+}
+
+// admitPathScan reports whether a path-only scan may run: a nil budget
+// admits every scan; a stopped, failed, exhausted or cancelled one does not,
+// and records why.
+func (b *detectionBudget) admitPathScan(manifestDigest string) bool {
+	if b == nil {
+		return true
+	}
+	if b.stopped() || b.err != nil {
+		return false
+	}
+	if b.exhausted() {
+		b.markExceeded(manifestDigest)
+		return false
+	}
+	if b.ctx != nil {
+		if err := b.ctx.Err(); err != nil {
+			b.err = err
+			return false
+		}
+	}
+	return true
+}
+
+// pathFindingsFull reports whether the budget's finding limit is reached
+// before another path-only finding is kept, and records the overflow.
+func (b *detectionBudget) pathFindingsFull(manifestDigest string) bool {
+	if b != nil && b.maxFindings > 0 && b.retained >= b.maxFindings {
+		b.exceeded = true
+		b.observed = b.retained + 1
+		b.diagnosticManifest = manifestDigest
+		return true
+	}
+	return false
+}
+
+// pathOnlyFinding drops a path-only finding's value-derived fields: there is
+// no secret value, so the redacted value and context snippet are empty and
+// the fingerprint is that of the layer digest and path.
+func pathOnlyFinding(finding findings.DetailedFinding, fingerprint string) findings.DetailedFinding {
+	finding.RedactedValue = ""
+	finding.ContextSnippet = ""
+	finding.LineNumber = 0
+	finding.Fingerprint = fingerprint
+	finding.Finding.MatchStart, finding.Finding.MatchEnd = 0, 0
+	finding.MatchStart, finding.MatchEnd = 0, 0
+	finding.Value, finding.RawSnippet = "", ""
+	return finding
 }
 
 func scanString(detectorSet detectors.Set, input findings.Input, scanInput detectors.ScanInput) []findings.DetailedFinding {
@@ -797,7 +1244,7 @@ func normalizeMatches(detectorSet detectors.Set, input findings.Input, matches [
 	normalizer, err := findings.NewDetailedNormalizerWithProvenance(
 		input,
 		matches,
-		scanProvenance(detectorSet, input.FilePath, maxArchivePathBytes),
+		scanProvenance(detectorSet, input.FilePath, maxProvenancePathBytes),
 		scanProvenance(detectorSet, input.Key, findings.MaxPublicProvenanceBytes),
 	)
 	if err != nil {
@@ -848,14 +1295,42 @@ func sortPlatformResults(items []PlatformResult) {
 	})
 }
 
-func allSelectedManifestsFailedError(items []PlatformResult) error {
-	errors := collectErrorMessages(len(items), func(index int) string {
+// allSelectedManifestsFailedError summarises why no manifest completed. Only
+// the typed platform outcomes (unsupported manifests and selector mismatches)
+// are exposed through Unwrap so callers can classify them without inheriting
+// transport or registry failures from other platforms.
+func allSelectedManifestsFailedError(items []PlatformResult, causes []error) error {
+	typed := make([]error, 0, len(causes))
+	for _, cause := range causes {
+		if IsUnsupportedManifest(cause) || IsPlatformNotFound(cause) {
+			typed = append(typed, cause)
+		}
+	}
+	if len(causes) == 1 && len(typed) == 1 && IsPlatformNotFound(typed[0]) {
+		return typed[0]
+	}
+
+	messages := collectErrorMessages(len(items), func(index int) string {
 		return items[index].Error
 	})
-	if len(errors) == 0 {
-		return fmt.Errorf("all selected manifests failed")
+	message := "all selected manifests failed"
+	if len(messages) > 0 {
+		message += ": " + strings.Join(messages, "; ")
 	}
-	return fmt.Errorf("all selected manifests failed: %s", strings.Join(errors, "; "))
+	return &selectedManifestsFailedError{message: message, causes: typed}
+}
+
+type selectedManifestsFailedError struct {
+	message string
+	causes  []error
+}
+
+func (e *selectedManifestsFailedError) Error() string {
+	return e.message
+}
+
+func (e *selectedManifestsFailedError) Unwrap() []error {
+	return e.causes
 }
 
 func collectErrorMessages(limit int, message func(index int) string) []string {
@@ -898,6 +1373,15 @@ func emitProgress(request Request, update ProgressUpdate) {
 		update.Repository = request.Reference.Repository
 	}
 	request.Progress(update)
+}
+
+// finalizeScan attaches the scan-scoped budget diagnostics and finalises the
+// result. Every exit from Scan after the budget exists goes through it.
+func finalizeScan(result *Result, budget *detectionBudget, actionable, suppressed []findings.DetailedFinding) {
+	if budget != nil && budget.rawTruncated {
+		result.Diagnostics = appendDiagnostic(result.Diagnostics, budget.rawDiagnostic())
+	}
+	finalizeResult(result, actionable, suppressed)
 }
 
 func finalizeResult(result *Result, actionable, suppressed []findings.DetailedFinding) {
@@ -1000,7 +1484,39 @@ func manifestStatusMessage(prefix string, descriptor manifest.Descriptor) string
 	return prefix + " " + target
 }
 
+// verifyRootDocument checks the root manifest body against the digest the
+// caller expects (the reference digest, or the registry's Docker-Content-Digest
+// for tag references) before a single byte of untrusted JSON is decoded. Only
+// then is the document parsed, validated and checked for media-type
+// consistency with the response.
 func verifyRootDocument(reference manifest.Reference, response registry.ManifestResponse) (manifest.Document, string, error) {
+	requestedDigest := strings.TrimSpace(reference.Digest)
+	responseDigest := strings.TrimSpace(response.Digest)
+	if requestedDigest != "" && responseDigest != "" && requestedDigest != responseDigest {
+		return manifest.Document{}, "", &manifest.IntegrityError{
+			Kind:     manifest.IntegrityDigestMismatch,
+			Subject:  reference.Original,
+			Expected: requestedDigest,
+			Actual:   responseDigest,
+		}
+	}
+	expectedDigest := requestedDigest
+	if expectedDigest == "" {
+		expectedDigest = responseDigest
+	}
+	if expectedDigest == "" {
+		// Neither the reference nor the registry named a digest; the body can
+		// only be identified by its own hash.
+		computed, err := manifest.DigestBytes("sha256", response.Body)
+		if err != nil {
+			return manifest.Document{}, "", err
+		}
+		expectedDigest = computed
+	}
+	if err := verifyRootBytes(reference.Original, expectedDigest, response.Body); err != nil {
+		return manifest.Document{}, "", fmt.Errorf("verify root manifest: %w", err)
+	}
+
 	document, err := manifest.ParseDocument(response.MediaType, response.Body)
 	if err != nil {
 		return manifest.Document{}, "", &manifest.IntegrityError{
@@ -1023,42 +1539,29 @@ func verifyRootDocument(reference manifest.Reference, response registry.Manifest
 		return manifest.Document{}, "", err
 	}
 
-	requestedDigest := strings.TrimSpace(reference.Digest)
-	responseDigest := strings.TrimSpace(response.Digest)
-	if requestedDigest != "" && responseDigest != "" && requestedDigest != responseDigest {
-		return manifest.Document{}, "", &manifest.IntegrityError{
-			Kind:     manifest.IntegrityDigestMismatch,
-			Subject:  reference.Original,
-			Expected: requestedDigest,
-			Actual:   responseDigest,
-		}
-	}
-	if requestedDigest == "" {
-		requestedDigest = responseDigest
-	}
-	if requestedDigest == "" {
-		requestedDigest, err = manifest.DigestBytes("sha256", response.Body)
-		if err != nil {
-			return manifest.Document{}, "", err
-		}
-	}
-	rootDescriptor := manifest.Descriptor{
-		MediaType: expectedMediaType,
-		Digest:    requestedDigest,
-		Size:      int64(len(response.Body)),
-	}
-	if err := manifest.VerifyDescriptorBytes(rootDescriptor, response.Body, response.MediaType, false); err != nil {
-		return manifest.Document{}, "", fmt.Errorf("verify root manifest: %w", err)
-	}
-	if responseDigest != "" && responseDigest != requestedDigest {
-		responseDescriptor := rootDescriptor
-		responseDescriptor.Digest = responseDigest
-		if err := manifest.VerifyDescriptorBytes(responseDescriptor, response.Body, response.MediaType, false); err != nil {
-			return manifest.Document{}, "", fmt.Errorf("verify registry manifest digest: %w", err)
-		}
-	}
+	return document, expectedDigest, nil
+}
 
-	return document, requestedDigest, nil
+// verifyRootBytes compares body with expectedDigest without consulting any
+// media type, so it can run before the document is parsed.
+func verifyRootBytes(subject, expectedDigest string, body []byte) error {
+	if err := manifest.ValidateDigest(expectedDigest); err != nil {
+		return err
+	}
+	algorithm, _, _ := strings.Cut(expectedDigest, ":")
+	actual, err := manifest.DigestBytes(algorithm, body)
+	if err != nil {
+		return err
+	}
+	if actual != expectedDigest {
+		return &manifest.IntegrityError{
+			Kind:     manifest.IntegrityDigestMismatch,
+			Subject:  subject,
+			Expected: expectedDigest,
+			Actual:   actual,
+		}
+	}
+	return nil
 }
 
 func verifyManifestResponseDescriptor(descriptor manifest.Descriptor, response registry.ManifestResponse) error {
@@ -1165,6 +1668,9 @@ func coverageFromLayerResult(layerCoverage layers.Coverage, detection detectionC
 		ExpandedLayerBytes:        layerCoverage.ExpandedBytes,
 		RetainedBytes:             layerCoverage.RetainedBytes,
 		DetectorInputBytesScanned: detection.detectorInputBytesScanned,
+		FilesTranscodedUTF16:      layerCoverage.FilesTranscodedUTF16,
+		NestedArchivesExpanded:    layerCoverage.NestedArchivesExpanded,
+		NestedEntriesScanned:      layerCoverage.NestedEntriesScanned,
 	}
 }
 
@@ -1185,11 +1691,26 @@ func mergeCoverage(left, right Coverage, initialized bool) Coverage {
 		ExpandedLayerBytes:        left.ExpandedLayerBytes + right.ExpandedLayerBytes,
 		RetainedBytes:             left.RetainedBytes + right.RetainedBytes,
 		DetectorInputBytesScanned: left.DetectorInputBytesScanned + right.DetectorInputBytesScanned,
+		FilesTranscodedUTF16:      left.FilesTranscodedUTF16 + right.FilesTranscodedUTF16,
+		NestedArchivesExpanded:    left.NestedArchivesExpanded + right.NestedArchivesExpanded,
+		NestedEntriesScanned:      left.NestedEntriesScanned + right.NestedEntriesScanned,
 	}
 }
 
 func diagnosticForError(scope, subject string, err error) Diagnostic {
 	diagnostic := Diagnostic{Scope: scope, Subject: subject, Message: err.Error()}
+	if IsUnsupportedManifest(err) {
+		diagnostic.Code = "manifest_unsupported"
+		return diagnostic
+	}
+	if IsPlatformNotFound(err) {
+		diagnostic.Code = "platform_not_found"
+		return diagnostic
+	}
+	if layers.IsTrailingData(err) {
+		diagnostic.Code = "layer_trailing_data"
+		return diagnostic
+	}
 	if integrityErr, ok := manifest.AsIntegrityError(err); ok {
 		diagnostic.Code = string(integrityErr.Kind)
 		return diagnostic
@@ -1215,4 +1736,14 @@ func appendDiagnostic(items []Diagnostic, item Diagnostic) []Diagnostic {
 		}
 	}
 	return append(items, item)
+}
+
+// appendDiagnostics merges platform diagnostics into the scan result without
+// repeating scan-scoped entries (such as a budget diagnostic) that a platform
+// already carried.
+func appendDiagnostics(items []Diagnostic, additions []Diagnostic) []Diagnostic {
+	for _, item := range additions {
+		items = appendDiagnostic(items, item)
+	}
+	return items
 }

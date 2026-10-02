@@ -5,7 +5,7 @@
   "key": "GITHUB_TOKEN",
   "content": "GITHUB_TOKEN=ghp_EXAMPLEEXAMPLEEXAMPLEEXAMPLEABCDEFGH",
   "expected_outcome": "suppressed",
-  "expected_detectors": ["github_token", "keyword_entropy"],
+  "expected_detectors": ["github_token"],
   "expected_confidence_floor": "high",
   "expected_reason": "known_dummy_value"
 }

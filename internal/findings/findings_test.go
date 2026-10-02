@@ -5,8 +5,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/brumbelow/layerleak/internal/detectors"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 )
 
 func TestRedact(t *testing.T) {
@@ -185,8 +185,8 @@ func TestShouldSuppressFilePath(t *testing.T) {
 
 func TestDeduplicateDetailedPreservesDistinctSourceLocations(t *testing.T) {
 	items := []DetailedFinding{
-		testDetailedFinding("z.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
-		testDetailedFinding("a.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+		testDetailedFinding("z.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]"),
+		testDetailedFinding("a.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]"),
 	}
 
 	deduped := DeduplicateDetailed(items)
@@ -200,8 +200,8 @@ func TestDeduplicateDetailedPreservesDistinctSourceLocations(t *testing.T) {
 
 func TestDeduplicateDetailedPreservesDistinctDetectors(t *testing.T) {
 	items := []DetailedFinding{
-		testDetailedFinding("app.env", "z_detector", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
-		testDetailedFinding("app.env", "a_detector", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
+		testDetailedFinding("app.env", "z_detector", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]"),
+		testDetailedFinding("app.env", "a_detector", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]"),
 	}
 
 	deduped := DeduplicateDetailed(items)
@@ -211,7 +211,7 @@ func TestDeduplicateDetailedPreservesDistinctDetectors(t *testing.T) {
 }
 
 func TestDeduplicateDetailedPreservesDistinctPlatformAndLayerProvenance(t *testing.T) {
-	base := testDetailedFinding("app.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56")
+	base := testDetailedFinding("app.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]")
 	base.LayerDigest = "sha256:layer-one"
 	differentLayer := base
 	differentLayer.LayerDigest = "sha256:layer-two"
@@ -229,7 +229,7 @@ func TestDeduplicateDetailedPreservesDistinctPlatformAndLayerProvenance(t *testi
 }
 
 func TestDeduplicateKeysDoNotCollideOnDelimiterBearingProvenance(t *testing.T) {
-	first := testDetailedFinding("x|y", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56")
+	first := testDetailedFinding("x|y", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]")
 	first.LayerDigest = "z"
 	first.SourceLocation = "file:x|y"
 	second := first
@@ -292,7 +292,13 @@ func TestNormalizeDetailedRedactsSecretsFromFilePathAndSourceLocation(t *testing
 }
 
 func TestDetailedNormalizerBoundsLargeMetadataProvenanceWithManyMatches(t *testing.T) {
-	input, matches := manyMatchNormalizationFixture(4000)
+	count := 4000
+	if testing.Short() {
+		// The full count dominates the short suite (about 70% of its wall time);
+		// CI runs the unabridged variant in the non-short PostgreSQL job.
+		count = 400
+	}
+	input, matches := manyMatchNormalizationFixture(count)
 	input.Key = strings.Repeat("metadata-世界/", 5000)
 
 	normalizer, err := NewDetailedNormalizer(input, matches)
@@ -510,8 +516,8 @@ func manyMatchNormalizationFixture(count int) (Input, []detectors.Match) {
 
 func TestDeduplicateDetailedIgnoresRawSnippetRendering(t *testing.T) {
 	items := []DetailedFinding{
-		testDetailedFinding("app.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=ghp********************************56"),
-		testDetailedFinding("app.env", "github_token", "GH_TOKEN=ghp_123456789012345678901234567890123456", "GH_TOKEN=ghp********************************56"),
+		testDetailedFinding("app.env", "github_token", "TOKEN=ghp_123456789012345678901234567890123456", "TOKEN=[REDACTED]"),
+		testDetailedFinding("app.env", "github_token", "GH_TOKEN=ghp_123456789012345678901234567890123456", "GH_TOKEN=[REDACTED]"),
 	}
 
 	deduped := DeduplicateDetailed(items)
@@ -527,7 +533,7 @@ func TestNormalizeDetailedWithMatchesRedactsAdjacentSecrets(t *testing.T) {
 	firstStart := strings.Index(content, firstValue)
 	secondStart := strings.Index(content, secondValue)
 	first := detectors.Match{Detector: "github_token", Value: firstValue, Start: firstStart, End: firstStart + len(firstValue), Confidence: detectors.ConfidenceHigh}
-	second := detectors.Match{Detector: "gitlab_token", Value: secondValue, Start: secondStart, End: secondStart + len(secondValue), Confidence: detectors.ConfidenceHigh}
+	second := detectors.Match{Detector: "gitlab_personal_access_token", Value: secondValue, Start: secondStart, End: secondStart + len(secondValue), Confidence: detectors.ConfidenceHigh}
 
 	finding, err := NormalizeDetailedWithMatches(Input{
 		ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -579,7 +585,7 @@ func TestDeduplicatePreservesDistinctPublicSourceLocations(t *testing.T) {
 			ManifestDigest: "sha256:a",
 			FilePath:       "z.env",
 			Fingerprint:    "one",
-			ContextSnippet: "TOKEN=ghp********************************56",
+			ContextSnippet: "TOKEN=[REDACTED]",
 		},
 		{
 			DetectorName:   "github_token",
@@ -587,7 +593,7 @@ func TestDeduplicatePreservesDistinctPublicSourceLocations(t *testing.T) {
 			ManifestDigest: "sha256:a",
 			FilePath:       "a.env",
 			Fingerprint:    "one",
-			ContextSnippet: "TOKEN=ghp********************************56",
+			ContextSnippet: "TOKEN=[REDACTED]",
 		},
 	}
 
@@ -607,14 +613,14 @@ func TestDeduplicatePreservesDistinctContextSnippets(t *testing.T) {
 			SourceType:     SourceTypeEnv,
 			ManifestDigest: "sha256:a",
 			Fingerprint:    "one",
-			ContextSnippet: "TOKEN=ghp********************************56",
+			ContextSnippet: "TOKEN=[REDACTED]",
 		},
 		{
 			DetectorName:   "github_token",
 			SourceType:     SourceTypeLabel,
 			ManifestDigest: "sha256:a",
 			Fingerprint:    "one",
-			ContextSnippet: "token=ghp********************************56",
+			ContextSnippet: "token=[REDACTED]",
 		},
 	}
 

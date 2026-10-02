@@ -6,17 +6,18 @@
     <title>layerleak Browser Demo</title>
     <meta
       name="description"
-      content="Simulated browser demo of a single layerleak scan and local Postgres-style result snapshot."
+      content="Browser replay of a real layerleak scan of a synthetic OCI image layout, with the Postgres rows that scan would store."
     />
     <link rel="stylesheet" href="../../assets/styles.css" />
     <script defer src="../../assets/site.js"></script>
     <script defer src="../../assets/demo.js"></script>
   </head>
   <body data-page="demo">
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <div class="site-shell">
       <header class="site-header">
         <a class="brand-lockup" href="../">
-          <span class="brand-badge">://</span>
+          <span class="brand-badge" aria-hidden="true">://</span>
           <span class="brand-copy">
             <strong>layerleak</strong>
             <span>Multi-registry OCI image secret scanner</span>
@@ -29,18 +30,21 @@
         </nav>
       </header>
 
-      <main class="demo-layout">
-        <section class="demo-panel" data-reveal>
+      <main class="demo-layout" id="main-content">
+        <section class="demo-panel">
           <div class="section-heading">
             <span>Browser replay</span>
-            <h2>One fixed scan, one synthetic local machine snapshot.</h2>
+            <h1>One recorded scan of a synthetic image.</h1>
           </div>
           <div class="simulation-banner">
             <span class="sim-label">Simulated demo</span>
             <p>
-              This page does not run a live backend scan. It replays a curated transcript and loads
-              a fake Postgres-style dataset stored in the repository. Raw storage is disabled in
-              the fixture, so raw-value columns remain empty.
+              Nothing is scanned in your browser. The transcript is the real output of
+              <code>layerleak scan</code> run against a local OCI image layout whose secrets are
+              fabricated at test time, and the tables are the rows PostgreSQL would hold for that
+              result, derived with the same record builder the CLI and API use. Only the clock,
+              the record name's random suffix and the working directory are pinned. Raw storage is
+              off, so the raw-value columns are empty, as they are by default.
             </p>
           </div>
           <div class="command-strip">
@@ -54,51 +58,55 @@
             </div>
           </div>
           <p class="demo-subtitle">
-            Fixed target, fixed platform, fixed transcript: <code>latest</code> only and
-            <code>linux/amd64</code> only.
+            The layout holds one multi-platform index tagged <code>1.4.2</code>. Without
+            <code>--platform</code> only its <code>linux/amd64</code> image is scanned; the
+            <code>windows/amd64</code> image and the attestation manifest are reported as
+            <code>platform_skipped</code> and <code>manifest_skipped</code> diagnostics. The scan
+            exits <code>2</code> because it found actionable findings.
           </p>
         </section>
 
-        <section class="terminal-shell" data-reveal>
+        <section class="terminal-shell">
           <div class="terminal-topbar">
             <div class="terminal-dots" aria-hidden="true">
               <span></span><span></span><span></span>
             </div>
-            <div class="terminal-status" id="demo-status"><strong>Status:</strong> waiting to replay</div>
+            <div class="terminal-status" id="demo-status" role="status" aria-live="polite" aria-atomic="true"><strong>Status:</strong> waiting to replay</div>
           </div>
-          <pre class="terminal-screen" id="demo-terminal"></pre>
+          <pre class="terminal-screen" id="demo-terminal" aria-label="Replayed scan transcript" aria-live="off" tabindex="0"></pre>
         </section>
 
-        <section class="demo-panel" data-reveal>
+        <section class="demo-panel">
           <div class="section-heading">
             <span>Local snapshot</span>
-            <h2>Fake Postgres rows that emulate the local machine setup.</h2>
+            <h2>Result, coverage and the scan record the CLI wrote.</h2>
           </div>
           <div class="stat-grid" id="demo-stats">
             <article class="stat-card"><h3>Status</h3><p>Awaiting replay</p></article>
             <article class="stat-card"><h3>Coverage</h3><p>Awaiting replay</p></article>
             <article class="stat-card"><h3>Actionable findings</h3><p>Awaiting replay</p></article>
-            <article class="stat-card"><h3>Saved artifacts</h3><p>Awaiting replay</p></article>
+            <article class="stat-card"><h3>Diagnostics</h3><p>Awaiting replay</p></article>
+            <article class="stat-card"><h3>Scan record</h3><p>Awaiting replay</p></article>
           </div>
         </section>
 
-        <section class="table-shell" data-reveal>
+        <section class="table-shell">
           <div class="table-topbar">
             <div>
-              <div class="metric-label">Simulated local database</div>
+              <div class="metric-label">Postgres-style rows derived from the result</div>
               <h2 style="margin: 0.25rem 0 0">layerleak tables after the replayed run</h2>
             </div>
-            <div class="metric-label" id="table-meta">Run the replay to load rows</div>
+            <div class="metric-label" id="table-meta" aria-live="polite">Run the replay to load rows</div>
           </div>
           <div class="tab-row" id="demo-tabs" role="tablist" aria-label="Database tables"></div>
-          <div class="table-wrap" id="demo-table-wrap">
-            <div class="table-empty">Run the simulated scan to load the fake Postgres snapshot.</div>
+          <div class="table-wrap" id="demo-table-wrap" role="tabpanel" aria-label="Selected table">
+            <div class="table-empty">Run the replay to load the Postgres-style rows.</div>
           </div>
         </section>
       </main>
 
       <footer class="site-footer">
-        <span>The transcript and table rows are synthetic and non-reusable by design.</span>
+        <span>The image, its secrets and every value shown here are synthetic; only redacted values appear.</span>
         <span>GitHub Pages demo · <span data-current-year></span></span>
       </footer>
     </div>

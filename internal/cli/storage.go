@@ -3,8 +3,8 @@ package cli
 import (
 	"strings"
 
-	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 func newStore(cfg config.Config) (storage.Store, error) {

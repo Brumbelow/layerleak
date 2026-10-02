@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
 
 func summaryTestResult() jobs.Result {
@@ -52,6 +54,7 @@ Files Skipped Oversize:       7
 Total Findings:               8
 Unique Fingerprints:          5
 Suppressed Example Findings:  3
+Baselined Findings:           0
 
 Reference                 Tags  Findings  Status
 library/app@sha256:first  2     5         ok
@@ -89,6 +92,7 @@ Files Skipped Oversize:       7
 Total Findings:               8
 Unique Fingerprints:          5
 Suppressed Example Findings:  3
+Baselined Findings:           0
 
 Platform     Manifest Digest  Findings  Status
 linux/amd64  sha256:first     5         ok
@@ -131,6 +135,68 @@ func TestRenderSummaryConditionalRows(t *testing.T) {
 				t.Errorf("wrong table in %q", output.String())
 			}
 		})
+	}
+}
+
+func TestRenderSummaryListsFindingsExactOutput(t *testing.T) {
+	result := summaryTestResult()
+	result.Mode = "reference"
+	result.Targets = []jobs.TargetResult{{PlatformResults: []scanner.PlatformResult{
+		{Platform: manifest.Platform{OS: "linux", Architecture: "amd64"}, ManifestDigest: "sha256:first", FindingsCount: 3},
+	}}}
+	result.Findings = []findings.Finding{
+		{DetectorName: "github_token", Confidence: "high", SourceType: findings.SourceTypeEnv, Key: "GH_TOKEN", RedactedValue: "ghp********", Platform: manifest.Platform{OS: "linux", Architecture: "amd64"}},
+		{DetectorName: "aws_secret_access_key", Confidence: "medium", SourceType: findings.SourceTypeFileFinal, FilePath: "app/.env", LineNumber: 12, RedactedValue: "wJa********", Platform: manifest.Platform{OS: "linux", Architecture: "amd64"}},
+		{DetectorName: "keyword_entropy", Confidence: "low", SourceType: findings.SourceTypeFileDeletedLayer, FilePath: "tmp/bad\tname\x1b[2J", RedactedValue: "***********", Platform: manifest.Platform{OS: "linux", Architecture: "arm64", Variant: "v8"}},
+	}
+	const want = `Requested Reference:          library/app:latest
+Repository:                   library/app
+Status:                       partial
+Targets Selected:             4
+Targets Completed:            1
+Targets Partial:              2
+Targets Failed:               1
+Manifests Selected:           6
+Manifests Completed:          5
+Manifests Failed:             1
+Coverage Complete:            false
+Files Scanned:                12
+Files Skipped Oversize:       7
+Total Findings:               8
+Unique Fingerprints:          5
+Suppressed Example Findings:  3
+Baselined Findings:           0
+
+Platform     Manifest Digest  Findings  Status
+linux/amd64  sha256:first     3         ok
+
+Detector               Confidence  Location          Redacted Value  Platform
+github_token           high        env:GH_TOKEN      ghp********     linux/amd64
+aws_secret_access_key  medium      app/.env:12       wJa********     linux/amd64
+keyword_entropy        low         tmp/bad name [2J  ***********     linux/arm64/v8
+`
+	var output bytes.Buffer
+	if err := renderSummary(&output, result); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != want {
+		t.Fatalf("summary output mismatch\ngot:\n%s\nwant:\n%s", output.String(), want)
+	}
+}
+
+func TestRenderSummaryCapsFindingsTable(t *testing.T) {
+	result := summaryTestResult()
+	result.Mode = "reference"
+	result.Targets = []jobs.TargetResult{{}}
+	for i := 0; i < summaryFindingsCap+7; i++ {
+		result.Findings = append(result.Findings, findings.Finding{DetectorName: "keyword_entropy", Confidence: "low", SourceType: findings.SourceTypeFileFinal, FilePath: fmt.Sprintf("file-%02d", i), RedactedValue: "***********"})
+	}
+	var output bytes.Buffer
+	if err := renderSummary(&output, result); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(output.String(), "keyword_entropy") != summaryFindingsCap || !strings.HasSuffix(output.String(), "and 7 more\n") {
+		t.Fatalf("findings table not capped at %d: %s", summaryFindingsCap, output.String())
 	}
 }
 

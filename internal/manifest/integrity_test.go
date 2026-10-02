@@ -140,3 +140,78 @@ func FuzzVerifyingReader(f *testing.F) {
 		}
 	})
 }
+
+func TestValidateImageManifestAcceptsForeignAndNonDistributableLayers(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, mediaType := range []string{
+		MediaTypeDockerSchema2ForeignLayer,
+		MediaTypeDockerSchema2ForeignLayerGzip,
+		MediaTypeOCIImageLayerNonDistributable,
+		MediaTypeOCIImageLayerNonDistributableGzip,
+		MediaTypeOCIImageLayerNonDistributableZstd,
+	} {
+		t.Run(mediaType, func(t *testing.T) {
+			value := ImageManifest{
+				SchemaVersion: 2,
+				MediaType:     MediaTypeOCIImageManifest,
+				Config:        Descriptor{MediaType: MediaTypeOCIImageConfig, Digest: digest, Size: 1},
+				Layers:        []Descriptor{{MediaType: mediaType, Digest: digest, Size: 1, URLs: []string{"https://example.invalid/layer"}}},
+			}
+			if err := ValidateImageManifest(value); err != nil {
+				t.Fatalf("ValidateImageManifest() error = %v", err)
+			}
+			if !IsForeignLayerMediaType(mediaType) || IsLayerMediaType(mediaType) {
+				t.Fatalf("media type classification: foreign=%t layer=%t", IsForeignLayerMediaType(mediaType), IsLayerMediaType(mediaType))
+			}
+		})
+	}
+
+	value := ImageManifest{
+		SchemaVersion: 2,
+		MediaType:     MediaTypeOCIImageManifest,
+		Config:        Descriptor{MediaType: MediaTypeOCIImageConfig, Digest: digest, Size: 1},
+		Layers:        []Descriptor{{MediaType: "application/octet-stream", Digest: digest, Size: 1}},
+	}
+	integrityErr, ok := AsIntegrityError(ValidateImageManifest(value))
+	if !ok || integrityErr.Kind != IntegrityMediaTypeMismatch {
+		t.Fatalf("ValidateImageManifest(unknown layer) error = %v", integrityErr)
+	}
+}
+
+func TestValidateImageIndexAcceptsNonImageEntries(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	image := Descriptor{MediaType: MediaTypeOCIImageManifest, Digest: digest, Size: 1, Platform: Platform{OS: "linux", Architecture: "amd64"}}
+	for _, entry := range []Descriptor{
+		{MediaType: MediaTypeInTotoJSON, Digest: digest, Size: 1},
+		{MediaType: MediaTypeOCIImageIndex, Digest: digest, Size: 1},
+		{MediaType: MediaTypeDockerSchema2ManifestList, Digest: digest, Size: 1},
+		{MediaType: "application/vnd.cncf.helm.config.v1+json", Digest: digest, Size: 1},
+		{MediaType: MediaTypeOCIEmptyJSON, Digest: digest, Size: 2},
+		{Digest: digest, Size: 1},
+	} {
+		t.Run(entry.MediaType, func(t *testing.T) {
+			index := ImageIndex{SchemaVersion: 2, MediaType: MediaTypeOCIImageIndex, Manifests: []Descriptor{image, entry}}
+			if err := ValidateImageIndex(index); err != nil {
+				t.Fatalf("ValidateImageIndex() error = %v", err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		entry Descriptor
+		kind  IntegrityErrorKind
+	}{
+		{name: "digest", entry: Descriptor{MediaType: MediaTypeInTotoJSON, Digest: "sha256:not-hex", Size: 1}, kind: IntegrityInvalidDigest},
+		{name: "size", entry: Descriptor{MediaType: MediaTypeInTotoJSON, Digest: digest, Size: -1}, kind: IntegritySizeMismatch},
+		{name: "platform", entry: Descriptor{MediaType: MediaTypeInTotoJSON, Digest: digest, Size: 1, Platform: Platform{OS: "linux\n"}}, kind: IntegrityInvalidDocument},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index := ImageIndex{SchemaVersion: 2, MediaType: MediaTypeOCIImageIndex, Manifests: []Descriptor{image, test.entry}}
+			integrityErr, ok := AsIntegrityError(ValidateImageIndex(index))
+			if !ok || integrityErr.Kind != test.kind {
+				t.Fatalf("ValidateImageIndex() error = %v", integrityErr)
+			}
+		})
+	}
+}

@@ -1,0 +1,13 @@
+{
+  "name": "file_rails_master_key_actionable",
+  "source_type": "file_final",
+  "path": "app/config/master.key",
+  "key": "",
+  "content": "0123456789abcdef0123456789abcdef\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "rails_master_key"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

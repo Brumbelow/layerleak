@@ -5,12 +5,13 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanner"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 func BuildScanRecord(reference manifest.Reference, result jobs.Result, scannedAt time.Time, scanErr error) (storage.ScanRecord, error) {
@@ -166,7 +167,7 @@ func buildTagRecords(tagResults []jobs.TagResult, targets []storage.TargetRecord
 	}
 
 	for _, item := range tagResults {
-		if item.Status != "failed" {
+		if item.Status != jobs.TagStatusFailed {
 			continue
 		}
 		appendTag(storage.TagRecord{
@@ -212,7 +213,7 @@ func storedScanStatus(value, errorMessage string) string {
 }
 
 func digestFromTargetReference(value string) string {
-	reference, err := manifest.ParseReference(value)
+	reference, err := manifest.ParseImageReference(value)
 	if err != nil {
 		return ""
 	}
@@ -231,7 +232,7 @@ func firstNonEmpty(values ...string) string {
 func normalizedPublicResult(reference manifest.Reference, result jobs.Result) jobs.Result {
 	publicResult := result
 	if publicResult.ResultSchemaVersion <= 0 {
-		publicResult.ResultSchemaVersion = 1
+		publicResult.ResultSchemaVersion = jobs.ResultSchemaVersion
 	}
 	if strings.TrimSpace(publicResult.RequestedReference) == "" {
 		publicResult.RequestedReference = reference.Original
@@ -253,11 +254,116 @@ func normalizedPublicResult(reference manifest.Reference, result jobs.Result) jo
 }
 
 // RedactedResult applies the scan-history error policy and omits raw details.
+// It is the shape stored in scan_runs and returned by the HTTP API: every
+// error and diagnostic message is replaced by neutral text.
 func RedactedResult(result jobs.Result) jobs.Result {
 	result = sanitizeStoredResult(result)
 	result.DetailedFindings = nil
 	result.SuppressedDetailedFindings = nil
 	return result
+}
+
+// PublicResult is the shape the operator who ran the scan sees on stdout and
+// in the local scan record. Raw finding material is dropped as in
+// RedactedResult, but the real error and diagnostic messages are kept so a
+// failed tag, target or manifest can be diagnosed locally. Each message is
+// passed through the finding-value redactor (a registry URL or header
+// fragment can embed a value a detector matched) and stripped of control
+// characters and whitespace runs, so it is safe to print and to store.
+func PublicResult(result jobs.Result) jobs.Result {
+	sanitize := publicMessageSanitizer(result)
+	result.TagResults = slices.Clone(result.TagResults)
+	for index := range result.TagResults {
+		result.TagResults[index].Error = sanitize(result.TagResults[index].Error)
+	}
+	result.Targets = slices.Clone(result.Targets)
+	for targetIndex := range result.Targets {
+		target := &result.Targets[targetIndex]
+		target.Tags = slices.Clone(target.Tags)
+		target.Error = sanitize(target.Error)
+		target.PlatformResults = slices.Clone(target.PlatformResults)
+		for platformIndex := range target.PlatformResults {
+			platformResult := &target.PlatformResults[platformIndex]
+			platformResult.Error = sanitize(platformResult.Error)
+			platformResult.Diagnostics = publicDiagnostics(platformResult.Diagnostics, sanitize)
+		}
+	}
+	result.Diagnostics = publicDiagnostics(result.Diagnostics, sanitize)
+	result.DetailedFindings = nil
+	result.SuppressedDetailedFindings = nil
+	return result
+}
+
+func publicDiagnostics(items []scanner.Diagnostic, sanitize func(string) string) []scanner.Diagnostic {
+	items = slices.Clone(items)
+	for index := range items {
+		items[index].Message = sanitize(items[index].Message)
+		items[index].Subject = sanitize(items[index].Subject)
+	}
+	return items
+}
+
+// publicMessageSanitizer returns a function that replaces every raw finding
+// value retained in the result by its redacted form and then collapses
+// control characters and whitespace runs to single spaces.
+func publicMessageSanitizer(result jobs.Result) func(string) string {
+	type replacement struct{ raw, redacted string }
+	replacements := make([]replacement, 0)
+	seen := make(map[string]struct{})
+	for _, item := range slices.Concat(result.DetailedFindings, result.SuppressedDetailedFindings) {
+		if item.Value == "" {
+			continue
+		}
+		if _, ok := seen[item.Value]; ok {
+			continue
+		}
+		seen[item.Value] = struct{}{}
+		redacted := item.RedactedValue
+		if redacted == "" {
+			redacted = findings.Redact(item.Value)
+		}
+		replacements = append(replacements, replacement{raw: item.Value, redacted: redacted})
+	}
+	// Longer values first so a value that contains another is redacted whole.
+	slices.SortFunc(replacements, func(left, right replacement) int {
+		return len(right.raw) - len(left.raw)
+	})
+	return func(value string) string {
+		for _, item := range replacements {
+			value = strings.ReplaceAll(value, item.raw, item.redacted)
+		}
+		return SanitizeMessageText(value)
+	}
+}
+
+// SanitizeMessageText makes untrusted registry and image text safe to print
+// on a terminal and to store. Every run of whitespace and control characters
+// becomes one space (leading and trailing runs are dropped), and Unicode
+// format characters (unicode.Cf: bidi overrides and isolates, zero-width
+// joiners and spaces, soft hyphens, the byte order mark) and other
+// non-printable runes (private use, unassigned) are removed without a
+// separator, so they can neither reorder nor hide text. The CLI uses it for
+// every progress, summary and error line, so stdout JSON, the record and the
+// summary agree.
+func SanitizeMessageText(value string) string {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	pendingSpace := false
+	for _, r := range value {
+		switch {
+		case unicode.IsSpace(r) || unicode.IsControl(r):
+			pendingSpace = builder.Len() > 0
+		case !unicode.IsPrint(r):
+			// unicode.Cf and other non-printable runes are dropped.
+		default:
+			if pendingSpace {
+				builder.WriteByte(' ')
+				pendingSpace = false
+			}
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func sanitizeStoredResult(result jobs.Result) jobs.Result {

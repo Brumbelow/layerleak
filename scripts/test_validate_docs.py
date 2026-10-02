@@ -1,9 +1,12 @@
 import importlib.util
 import json
+import os
+import re
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = REPOSITORY_ROOT / "scripts" / "validate_docs.py"
@@ -17,6 +20,8 @@ class DocumentationValidationTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
         shutil.copytree(REPOSITORY_ROOT / "web", self.root / "web")
+        shutil.copy(REPOSITORY_ROOT / "CHANGELOG.md", self.root / "CHANGELOG.md")
+        shutil.copy(REPOSITORY_ROOT / "README.md", self.root / "README.md")
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -33,6 +38,46 @@ class DocumentationValidationTests(unittest.TestCase):
         fixture.write_text(json.dumps(response))
 
         self.assert_invalid("scan-completed.json")
+
+    def test_accepts_stored_version_1_result_without_v2_only_fields(self):
+        # GET /api/v1/scans/{id} returns result_json as it was stored, so a
+        # scan persisted by 2.x (result_schema_version 1, no scanned_at or
+        # scanner, zero counters omitted) must still satisfy ScanResult.
+        spec = validate_docs.load_yaml(self.root / "web" / "docs" / "openapi.yaml")
+        schema = validate_docs._response_schema(
+            spec, "/api/v1/scans/{id}", "get", "200", "application/json"
+        )
+        detail = json.loads(
+            (self.root / "web" / "testdata" / "api" / "scan-detail.json").read_text()
+        )
+        result = detail["scan"]["result"]
+        result["result_schema_version"] = 1
+        for field in (
+            "scanned_at",
+            "scanner",
+            "tags_enumerated",
+            "tags_resolved",
+            "tags_failed",
+            "suppressed_findings_count",
+            "suppressed_unique_fingerprints",
+        ):
+            result.pop(field, None)
+
+        validate_docs._validate_instance(spec, schema, detail, "stored v1 result")
+
+    def test_rejects_openapi_version_that_differs_from_changelog_release(self):
+        spec_path = self.root / "web" / "docs" / "openapi.yaml"
+        spec = validate_docs.load_yaml(spec_path)
+        spec["info"]["version"] = "9.9.9"
+        spec_path.write_text(validate_docs.dump_yaml(spec))
+
+        self.assert_invalid("info.version 9.9.9 differs")
+
+    def test_rejects_release_tag_that_differs_from_documented_version(self):
+        with patch.dict(os.environ, {"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v9.9.9-rc.1"}):
+            self.assert_invalid("release tag v9.9.9-rc.1")
+        with patch.dict(os.environ, {"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v3.0.0-rc.1"}):
+            validate_docs.validate_repository(self.root)
 
     def test_rejects_broken_local_documentation_link(self):
         index = self.root / "web" / "index.html"
@@ -129,7 +174,79 @@ class DocumentationValidationTests(unittest.TestCase):
                 demo["tables"][table]["rows"][0][field] = "raw example"
                 fixture.write_text(json.dumps(demo))
 
-                self.assert_invalid(f"{field} must be null")
+                self.assert_invalid(f"{field} must be empty")
+
+    def test_rejects_demo_with_legacy_two_file_artifacts(self):
+        fixture = self.root / "web" / "assets" / "demo-data.json"
+        original_demo = fixture.read_text()
+        record = json.loads(original_demo)["run_result"]["artifacts"]["scan_record"]
+        name = record.rsplit("/", 1)[-1]
+        for artifacts, message in (
+            (
+                {"findings": "findings/" + name, "scan_record": "findings/scans/" + name},
+                "exactly one scan_record artifact",
+            ),
+            ({"scan_record": "findings/scans/" + name}, "<utc-timestamp>"),
+            ({"scan_record": "findings/20260328T182355Z-app-demo.json"}, "<utc-timestamp>"),
+        ):
+            with self.subTest(artifacts=artifacts):
+                demo = json.loads(original_demo)
+                demo["run_result"]["artifacts"] = artifacts
+                fixture.write_text(json.dumps(demo))
+
+                self.assert_invalid(message)
+
+    def test_rejects_demo_with_unknown_exit_code_or_schema_version(self):
+        fixture = self.root / "web" / "assets" / "demo-data.json"
+        original_demo = fixture.read_text()
+        for field, value, message in (
+            ("exit_code", 4, "exit_code"),
+            ("result_schema_version", 1, "result_schema_version must be 2"),
+            ("record_schema_version", 1, "record_schema_version must be 2"),
+        ):
+            with self.subTest(field=field):
+                demo = json.loads(original_demo)
+                demo["run_result"][field] = value
+                fixture.write_text(json.dumps(demo))
+
+                self.assert_invalid(message)
+
+    def test_rejects_web_variable_without_readme_row(self):
+        index = self.root / "web" / "docs" / "index.html"
+        index.write_text(
+            index.read_text().replace(
+                "<code>LAYERLEAK_LOG_LEVEL</code>", "<code>LAYERLEAK_NOT_A_REAL_SETTING</code>", 1
+            )
+        )
+
+        self.assert_invalid("LAYERLEAK_NOT_A_REAL_SETTING")
+
+    def test_rejects_readme_variable_missing_from_site_table(self):
+        index = self.root / "web" / "docs" / "index.html"
+        text = index.read_text()
+        row = re.search(r"\s*<tr><td><code>LAYERLEAK_LOG_LEVEL</code></td>.*?</tr>", text)
+        self.assertIsNotNone(row)
+        index.write_text(text.replace(row.group(0), "", 1).replace("LAYERLEAK_LOG_LEVEL", "the log level"))
+
+        self.assert_invalid("README variables without a web/docs/index.html table row: LAYERLEAK_LOG_LEVEL")
+
+    def test_rejects_site_default_that_differs_from_readme(self):
+        index = self.root / "web" / "docs" / "index.html"
+        index.write_text(
+            index.read_text().replace(
+                "<tr><td><code>LAYERLEAK_LOG_LEVEL</code></td><td><code>info</code></td>",
+                "<tr><td><code>LAYERLEAK_LOG_LEVEL</code></td><td><code>debug</code></td>",
+                1,
+            )
+        )
+
+        self.assert_invalid("LAYERLEAK_LOG_LEVEL default 'debug' on the site differs from README 'info'")
+
+    def test_rejects_damaged_readme_variable_tables(self):
+        readme = self.root / "README.md"
+        readme.write_text(readme.read_text().replace("| `LAYERLEAK_", "| LAYERLEAK_"))
+
+        self.assert_invalid("tables look damaged")
 
 
 if __name__ == "__main__":

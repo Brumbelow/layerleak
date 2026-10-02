@@ -42,7 +42,7 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), healthcheckTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/readyz", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/readyz", nil) //nolint:gosec // probes the local API address from LAYERLEAK_API_ADDR by design
 	if err != nil {
 		return fmt.Errorf("build readiness request: %w", err)
 	}
@@ -52,11 +52,11 @@ func run() error {
 			return http.ErrUseLastResponse
 		},
 	}
-	response, err := client.Do(request)
+	response, err := client.Do(request) //nolint:gosec // see above: local readiness probe
 	if err != nil {
 		return fmt.Errorf("readiness probe failed: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("readiness probe returned %s", response.Status)

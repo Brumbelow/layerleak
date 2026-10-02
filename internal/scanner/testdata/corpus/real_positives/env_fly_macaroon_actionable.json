@@ -1,0 +1,13 @@
+{
+  "name": "env_fly_macaroon_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "FLY_API_TOKEN",
+  "content_base64": "RkxZX0FQSV9UT0tFTj1GbHlWMSBmbTJfbEpQRUNBQUFBQUFBQUFGdnhCQkFiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ0FiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ0FiMWNEMmVGM2dBYjFjRDJlRjNnQWIxY0QyZUYzZ0FiMWNEMmVGM2c9",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "fly_api_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

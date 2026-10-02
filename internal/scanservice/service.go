@@ -3,27 +3,41 @@ package scanservice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
-	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/detectors"
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/registry"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/source"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 type BeforeSaveFunc func(result jobs.Result) error
 
 type Request struct {
-	Reference  manifest.Reference
-	Platform   string
-	AllTags    bool
-	Logger     *slog.Logger
-	Progress   jobs.ProgressFunc
-	BeforeSave BeforeSaveFunc
+	Reference manifest.Reference
+	Platform  string
+	AllTags   bool
+	// Credential is a username and password the caller vouches for: it belongs
+	// to the registry of this scan and is bound to the host the client will
+	// contact (the reference's registry, or the LAYERLEAK_REGISTRY_BASE_URL
+	// override). The CLI sets it from its flags or from
+	// ConfiguredCredential; the API never sets it, so a caller-named registry
+	// can never obtain the operator's credential. Zero means none.
+	Credential registry.Credential
+	// ScannerVersion is reported in the result's scanner block; empty means
+	// the build version of this binary.
+	ScannerVersion string
+	Logger         *slog.Logger
+	Progress       jobs.ProgressFunc
+	BeforeSave     BeforeSaveFunc
 }
 
 type ErrorPhase string
@@ -69,7 +83,7 @@ type Service struct {
 	store             storage.Store
 	now               func() time.Time
 	detectors         detectors.Set
-	newRegistryClient func(registry.Options) *registry.Client
+	newRegistryClient func(registry.Options) (*registry.Client, error)
 }
 
 func New(cfg config.Config, store storage.Store) *Service {
@@ -86,21 +100,36 @@ func New(cfg config.Config, store storage.Store) *Service {
 }
 
 func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	blobSource, closeSource, err := s.blobSource(request)
+	if err != nil {
+		return Outcome{ScanError: err}, wrapScanError(err)
+	}
+	defer closeSource()
 	result, scanErr := jobs.Scan(ctx, jobs.Request{
-		Reference:            request.Reference,
-		Platform:             request.Platform,
-		Registry:             s.registryClient(request.Reference),
-		Detectors:            s.detectors,
-		Logger:               request.Logger,
-		MaxFileBytes:         s.config.MaxFileBytes,
-		MaxLayerBytes:        s.config.MaxLayerBytes,
-		MaxLayerEntries:      s.config.MaxLayerEntries,
-		MaxConfigBytes:       s.config.MaxConfigBytes,
-		MaxImageLayers:       s.config.MaxImageLayers,
-		MaxImageManifests:    s.config.MaxImageManifests,
-		MaxImageLayerBytes:   s.config.MaxImageLayerBytes,
-		MaxImageArtifacts:    s.config.MaxImageArtifacts,
-		MaxRetainedBytes:     s.config.MaxRetainedBytes,
+		Reference:          request.Reference,
+		Platform:           request.Platform,
+		Registry:           blobSource,
+		Detectors:          s.detectors,
+		Logger:             request.Logger,
+		ScannerVersion:     request.ScannerVersion,
+		Now:                s.now,
+		MaxFileBytes:       s.config.MaxFileBytes,
+		MaxLayerBytes:      s.config.MaxLayerBytes,
+		MaxLayerEntries:    s.config.MaxLayerEntries,
+		MaxConfigBytes:     s.config.MaxConfigBytes,
+		MaxImageLayers:     s.config.MaxImageLayers,
+		MaxImageManifests:  s.config.MaxImageManifests,
+		MaxImageLayerBytes: s.config.MaxImageLayerBytes,
+		MaxImageArtifacts:  s.config.MaxImageArtifacts,
+		MaxRetainedBytes:   s.config.MaxRetainedBytes,
+
+		MaxNestedArchiveBytes:   s.config.MaxNestedArchiveBytes,
+		MaxNestedArchiveEntries: s.config.MaxNestedArchiveEntries,
+		MaxLayerCacheBytes:      s.config.MaxLayerCacheBytes,
+
 		MaxFindings:          s.config.MaxFindingsPerScan,
 		RetainRawSecrets:     s.config.PersistRawSecrets,
 		MaxRawFindingBytes:   s.config.MaxRawFindingBytes,
@@ -121,12 +150,13 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	if s.store == nil || s.store.Name() == "noop" {
 		return outcome, wrapScanError(scanErr)
 	}
-	if ctx != nil && ctx.Err() != nil {
-		if scanErr != nil {
-			return outcome, wrapScanError(scanErr)
-		}
-		outcome.ScanError = ctx.Err()
-		return outcome, wrapScanError(ctx.Err())
+	// A scan that did not finish while its context ended was interrupted by
+	// that cancellation and is not persisted. A scan that completed is
+	// persisted even when the caller has since gone away (client disconnect or
+	// scan deadline between completion and the write), so the work is not
+	// silently discarded.
+	if scanErr != nil && ctx.Err() != nil {
+		return outcome, wrapScanError(scanErr)
 	}
 
 	if request.BeforeSave != nil {
@@ -135,18 +165,15 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 		}
 	}
 
-	if ctx != nil && ctx.Err() != nil {
-		outcome.ScanError = errors.Join(scanErr, ctx.Err())
-		return outcome, wrapScanError(outcome.ScanError)
-	}
-
 	scannedAt := s.now().UTC()
 	record, recordErr := BuildScanRecord(request.Reference, result, scannedAt, scanErr)
 	if recordErr != nil {
 		outcome.SaveError = recordErr
 		return outcome, errors.Join(&Error{Phase: ErrorPhaseSave, Err: recordErr}, wrapScanError(scanErr))
 	}
-	scanRunID, storeErr := s.store.SaveScan(ctx, record)
+	saveCtx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), s.saveTimeout())
+	defer cancelSave()
+	scanRunID, storeErr := s.store.SaveScan(saveCtx, record)
 	if storeErr != nil {
 		outcome.SaveError = storeErr
 		return outcome, errors.Join(&Error{Phase: ErrorPhaseSave, Err: storeErr}, wrapScanError(scanErr))
@@ -156,7 +183,41 @@ func (s *Service) ScanAndSave(ctx context.Context, request Request) (Outcome, er
 	return outcome, wrapScanError(scanErr)
 }
 
-func (s *Service) registryClient(ref manifest.Reference) *registry.Client {
+// saveTimeout bounds the persistence phase, which runs detached from the
+// caller's context so a disconnect after the scan finished cannot discard it.
+func (s *Service) saveTimeout() time.Duration {
+	if s.config.DatabaseWriteTimeout > 0 {
+		return s.config.DatabaseWriteTimeout
+	}
+	return storage.DefaultWriteTimeout
+}
+
+// ErrCredentialForLocalSource is returned when a registry credential is given
+// for a local image source, where it could never be used.
+var ErrCredentialForLocalSource = errors.New("registry credentials do not apply to a local image source (oci:, oci-archive:, docker-archive:)")
+
+// blobSource opens what the scan reads from: a local layout or archive for a
+// local reference, otherwise a registry client for the reference's registry.
+// The returned function releases the source after the scan.
+func (s *Service) blobSource(request Request) (scanner.BlobSource, func(), error) {
+	if request.Reference.IsLocal() {
+		if !request.Credential.IsZero() {
+			return nil, nil, ErrCredentialForLocalSource
+		}
+		local, err := source.Open(request.Reference, source.Options{MaxManifestBytes: s.config.MaxManifestBytes, MaxImageLayers: s.config.MaxImageLayers})
+		if err != nil {
+			return nil, nil, fmt.Errorf("open local image source: %w", err)
+		}
+		return local, func() { _ = local.Close() }, nil
+	}
+	registryClient, err := s.registryClient(request.Reference, request)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure registry client: %w", err)
+	}
+	return registryClient, func() {}, nil
+}
+
+func (s *Service) registryClient(ref manifest.Reference, request Request) (*registry.Client, error) {
 	baseURL := s.config.RegistryBaseURL
 	if baseURL == "" {
 		baseURL = registry.BaseURLForRegistry(ref.Registry)
@@ -173,11 +234,59 @@ func (s *Service) registryClient(ref manifest.Reference) *registry.Client {
 		AllowedPrivateAuthHosts:     s.config.AllowedPrivateAuthHosts,
 		RequestAttempts:             s.config.RegistryRequestAttempts,
 		MaxManifestBytes:            s.config.MaxManifestBytes,
+		Credentials:                 s.credentialSource(baseURL, request.Credential),
 	}
 	if s.newRegistryClient != nil {
 		return s.newRegistryClient(options)
 	}
 	return registry.NewClient(options)
+}
+
+// ConfiguredCredential returns the LAYERLEAK_REGISTRY_USERNAME/PASSWORD pair
+// as a credential for Request.Credential, or the zero Credential when the
+// pair is not set. The CLI uses it to apply the configured pair to the
+// registry of the reference it was given on the command line.
+func ConfiguredCredential(cfg config.Config) registry.Credential {
+	if cfg.RegistryUsername == "" && cfg.RegistryPassword == "" {
+		return registry.Credential{}
+	}
+	return registry.Credential{Username: cfg.RegistryUsername, Password: string(cfg.RegistryPassword)}
+}
+
+// credentialSource builds the credential chain for one scan: a static
+// credential bound to the registry host the client will contact, then the
+// Docker config.json when one is configured. It returns nil, and the client
+// stays anonymous, when neither applies.
+//
+// The static credential is the caller's Request.Credential when set.
+// Otherwise the configured LAYERLEAK_REGISTRY_USERNAME/PASSWORD pair is used
+// only when LAYERLEAK_REGISTRY_BASE_URL pins the host: in that case every scan
+// of the process goes to the operator's registry, so the pair cannot leave it.
+// Without the pin the host is whatever reference the caller submitted, and in
+// server mode that caller is an unauthenticated API client whose registry can
+// advertise an arbitrary token realm; binding the pair there would hand the
+// operator's password to any host a caller names. Docker config entries are
+// keyed by host and stay available either way.
+func (s *Service) credentialSource(baseURL string, requested registry.Credential) registry.CredentialSource {
+	sources := make([]registry.CredentialSource, 0, 2)
+	credential := requested
+	if credential.IsZero() && s.config.RegistryBaseURL != "" {
+		credential = ConfiguredCredential(s.config)
+	}
+	if !credential.IsZero() {
+		host := baseURL
+		if parsed, err := url.Parse(baseURL); err == nil && parsed.Host != "" {
+			host = parsed.Host
+		}
+		sources = append(sources, registry.StaticCredentials(host, credential.Username, credential.Password))
+	}
+	if s.config.DockerConfigPath != "" {
+		sources = append(sources, registry.DockerConfigCredentials(s.config.DockerConfigPath))
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return registry.ChainCredentials(sources...)
 }
 
 func wrapScanError(err error) error {

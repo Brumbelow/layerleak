@@ -9,9 +9,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/brumbelow/layerleak/internal/detectionpolicy"
-	"github.com/brumbelow/layerleak/internal/detectors"
-	"github.com/brumbelow/layerleak/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/detectionpolicy"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
 )
 
 type SourceType string
@@ -38,6 +38,15 @@ const (
 	// to preserve schema compatibility with existing scan_runs and
 	// finding_occurrences rows.
 	DispositionExample Disposition = "example"
+	// DispositionBaselined marks an actionable finding the caller accepted
+	// through a baseline file (`layerleak scan --baseline`), keyed on its
+	// fingerprint. It is a per-caller view applied by the CLI after the scan:
+	// baselined findings are reported among the suppressed findings on
+	// stdout, in the scan record and in SARIF, and never drive exit code 2.
+	// The database and the HTTP API keep the scanner's disposition because
+	// migration 0004 constrains finding_occurrences.disposition to
+	// actionable and example.
+	DispositionBaselined Disposition = "baselined"
 
 	DispositionReasonNone              DispositionReason = ""
 	DispositionReasonTestPath          DispositionReason = "test_path"
@@ -45,6 +54,10 @@ const (
 	DispositionReasonPlaceholderMarker DispositionReason = "placeholder_marker"
 	DispositionReasonReservedHost      DispositionReason = "reserved_host"
 	DispositionReasonKnownDummyValue   DispositionReason = "known_dummy_value"
+	// DispositionReasonDefaultCredentials marks a connection or basic-auth URL
+	// carrying a well-known default pair such as admin:admin; it is suppressed
+	// rather than discarded so the default credential is still visible.
+	DispositionReasonDefaultCredentials DispositionReason = "default_credentials"
 )
 
 type Input struct {
@@ -85,7 +98,7 @@ type Finding struct {
 	DispositionReason   DispositionReason `json:"disposition_reason,omitempty"`
 	SourceType          SourceType        `json:"source_type"`
 	ManifestDigest      string            `json:"manifest_digest"`
-	Platform            manifest.Platform `json:"platform,omitempty"`
+	Platform            manifest.Platform `json:"platform,omitzero"`
 	FilePath            string            `json:"file_path,omitempty"`
 	LayerDigest         string            `json:"layer_digest,omitempty"`
 	Key                 string            `json:"key,omitempty"`
@@ -188,7 +201,7 @@ func NewDetailedNormalizerWithProvenance(input Input, matches, filePathMatches, 
 	metadataKey := sanitizedProvenance(input.Key, metadataKeyMatches, matches)
 	normalizer := &DetailedNormalizer{
 		input:       input,
-		spans:       mergeSensitiveSpans(input.Content, matches),
+		spans:       mergeContentSensitiveSpans(input.Content, matches),
 		lineBreaks:  lineBreaks,
 		filePath:    filePath,
 		metadataKey: metadataKey,
@@ -308,6 +321,23 @@ func DeduplicateDetailed(items []DetailedFinding) []DetailedFinding {
 	return deduped
 }
 
+const (
+	// redactPrefixRevealMinRunes is the shortest value whose leading runes may
+	// appear in a redacted value. Anything shorter is masked completely, so a
+	// 7-rune password no longer shows five of its characters.
+	redactPrefixRevealMinRunes = 12
+	// redactPrefixRunes is how many leading runes a long value reveals; it is
+	// enough to recognise a vendor prefix (ghp, AKI, sk-) and nothing more.
+	redactPrefixRunes = 3
+	// redactMask is the fixed asterisk run. Its length never varies with the
+	// input, so the redacted value does not disclose the secret's length.
+	redactMask = "********"
+)
+
+// Redact returns the public rendering of a matched value. Values shorter than
+// twelve runes are masked completely; longer values keep only their first
+// three runes. The mask has a fixed length and no suffix is ever shown, so the
+// output discloses neither the length nor the tail of the secret.
 func Redact(value string) string {
 	if value == "" {
 		return ""
@@ -318,11 +348,11 @@ func Redact(value string) string {
 	}
 
 	runes := []rune(value)
-	if len(runes) <= 6 {
-		return strings.Repeat("*", len(runes))
+	if len(runes) < redactPrefixRevealMinRunes {
+		return redactMask
 	}
 
-	return string(runes[:3]) + strings.Repeat("*", len(runes)-5) + string(runes[len(runes)-2:])
+	return SanitizeControlCharacters(string(runes[:redactPrefixRunes]) + redactMask)
 }
 
 func Fingerprint(value string) string {
@@ -348,6 +378,75 @@ func mergeSensitiveSpans(content string, matches []detectors.Match) []sensitiveS
 	}
 	slices.SortFunc(spans, compareSensitiveSpans)
 	return mergeSortedSensitiveSpans(spans)
+}
+
+// minRepeatRedactionBytes is the shortest matched value whose undetected
+// repeats are also redacted from context snippets. Shorter values (a
+// four-character netrc password, say) are blanked only where a detector
+// matched them, so "pass" never erases the inside of "password".
+const minRepeatRedactionBytes = 8
+
+// mergeContentSensitiveSpans returns the detector spans plus every other
+// textual occurrence of a matched value in the content, so a copy of a secret
+// that no detector matched (a repeat after a comment marker, a CSV column, the
+// next line) is still redacted when it falls inside a context window.
+func mergeContentSensitiveSpans(content string, matches []detectors.Match) []sensitiveSpan {
+	spans := mergeSensitiveSpans(content, matches)
+	repeats := repeatValueSpans(content, matches)
+	if len(repeats) == 0 {
+		return spans
+	}
+	spans = append(spans, repeats...)
+	slices.SortFunc(spans, compareSensitiveSpans)
+	return mergeSortedSensitiveSpans(spans)
+}
+
+// repeatValueSpans finds every occurrence of every distinct matched value of
+// at least minRepeatRedactionBytes in content. Values are indexed by their
+// first eight bytes and the content is walked once, so the cost is linear in
+// the content plus the occurrences, whatever the number of distinct values a
+// hostile input produces.
+func repeatValueSpans(content string, matches []detectors.Match) []sensitiveSpan {
+	var firstBytes [256]bool
+	index := make(map[string][]string)
+	seen := make(map[string]struct{})
+	for _, match := range matches {
+		if len(match.Value) < minRepeatRedactionBytes {
+			continue
+		}
+		if _, ok := seen[match.Value]; ok {
+			continue
+		}
+		seen[match.Value] = struct{}{}
+		key := match.Value[:minRepeatRedactionBytes]
+		index[key] = append(index[key], match.Value)
+		firstBytes[match.Value[0]] = true
+	}
+	if len(index) == 0 {
+		return nil
+	}
+
+	spans := make([]sensitiveSpan, 0)
+	for position := 0; position+minRepeatRedactionBytes <= len(content); position++ {
+		if !firstBytes[content[position]] {
+			continue
+		}
+		candidates, ok := index[content[position:position+minRepeatRedactionBytes]]
+		if !ok {
+			continue
+		}
+		for _, value := range candidates {
+			if !strings.HasPrefix(content[position:], value) {
+				continue
+			}
+			spans = append(spans, sensitiveSpan{
+				start:     position,
+				end:       position + len(value),
+				multiline: strings.Contains(value, "\n"),
+			})
+		}
+	}
+	return spans
 }
 
 func compareSensitiveSpans(left, right sensitiveSpan) int {
@@ -410,7 +509,7 @@ func (n *DetailedNormalizer) contextSnippet(match detectors.Match) string {
 		cursor = span.end
 	}
 	builder.WriteString(content[cursor:end])
-	return strings.TrimSpace(builder.String())
+	return SanitizeControlCharacters(strings.TrimSpace(builder.String()))
 }
 
 func (n *DetailedNormalizer) lineNumber(offset int) int {
@@ -499,6 +598,18 @@ func detailedFindingSnippetDedupKey(item DetailedFinding) snippetDedupKey {
 }
 
 func compareFindings(left, right Finding) int {
+	if value := compareFindingOrigin(left, right); value != 0 {
+		return value
+	}
+	if value := compareFindingPosition(left, right); value != 0 {
+		return value
+	}
+	return compareFindingContent(left, right)
+}
+
+// compareFindingOrigin orders by where a finding was reported: image,
+// platform, source, disposition, file, layer and detector.
+func compareFindingOrigin(left, right Finding) int {
 	if value := strings.Compare(left.ManifestDigest, right.ManifestDigest); value != 0 {
 		return value
 	}
@@ -517,16 +628,49 @@ func compareFindings(left, right Finding) int {
 	if value := strings.Compare(left.LayerDigest, right.LayerDigest); value != 0 {
 		return value
 	}
-	if value := strings.Compare(left.DetectorName, right.DetectorName); value != 0 {
-		return value
-	}
+	return strings.Compare(left.DetectorName, right.DetectorName)
+}
+
+// compareFindingPosition orders by line, fingerprint and match offsets.
+func compareFindingPosition(left, right Finding) int {
 	if left.LineNumber != right.LineNumber {
 		return left.LineNumber - right.LineNumber
 	}
 	if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
 		return value
 	}
-	return strings.Compare(left.Key, right.Key)
+	// Offsets and the remaining public fields make the order total, so
+	// Deduplicate yields the same sequence whatever the input order.
+	if left.MatchStart != right.MatchStart {
+		return left.MatchStart - right.MatchStart
+	}
+	return left.MatchEnd - right.MatchEnd
+}
+
+// compareFindingContent breaks the remaining ties on the reported content.
+func compareFindingContent(left, right Finding) int {
+	if value := strings.Compare(left.Key, right.Key); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.Confidence, right.Confidence); value != 0 {
+		return value
+	}
+	if value := strings.Compare(string(left.DispositionReason), string(right.DispositionReason)); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.RedactedValue, right.RedactedValue); value != 0 {
+		return value
+	}
+	if value := strings.Compare(left.ContextSnippet, right.ContextSnippet); value != 0 {
+		return value
+	}
+	if left.PresentInFinalImage != right.PresentInFinalImage {
+		if left.PresentInFinalImage {
+			return 1
+		}
+		return -1
+	}
+	return 0
 }
 
 func compareDetailedFindings(left, right DetailedFinding) int {
@@ -578,7 +722,7 @@ func sanitizedProvenance(value string, provenanceMatches, contentMatches []detec
 		cursor = span.end
 	}
 	builder.WriteString(value[cursor:])
-	redacted := strings.ToValidUTF8(builder.String(), "\uFFFD")
+	redacted := SanitizeControlCharacters(strings.ToValidUTF8(builder.String(), "\uFFFD"))
 	if len(redacted) <= MaxPublicProvenanceBytes {
 		return redacted
 	}
@@ -617,8 +761,35 @@ func exactValueSpans(value string, matches []detectors.Match) []sensitiveSpan {
 	return spans
 }
 
+// SanitizeControlCharacters replaces U+0000, the other C0 control characters
+// and DEL with U+FFFD, keeping horizontal tabs, line feeds and carriage returns.
+// It is the one policy shared by public provenance (keys, file paths, source
+// locations, context snippets, redacted values), the live API JSON and the
+// PostgreSQL rows, so all three agree: PostgreSQL TEXT rejects NUL and JSONB
+// rejects \u0000, and a hostile image config must not be able to abort
+// persistence of a whole scan by embedding one in an Env or Label key.
+func SanitizeControlCharacters(value string) string {
+	if !strings.ContainsFunc(value, isDisallowedControlCharacter) {
+		return value
+	}
+	return strings.Map(func(character rune) rune {
+		if isDisallowedControlCharacter(character) {
+			return '\uFFFD'
+		}
+		return character
+	}, value)
+}
+
+func isDisallowedControlCharacter(character rune) bool {
+	switch character {
+	case '\t', '\n', '\r':
+		return false
+	}
+	return character < 0x20 || character == 0x7F
+}
+
 func boundedSanitizedProvenance(value string) string {
-	value = strings.ToValidUTF8(value, "\uFFFD")
+	value = SanitizeControlCharacters(strings.ToValidUTF8(value, "\uFFFD"))
 	if len(value) <= MaxPublicProvenanceBytes {
 		return value
 	}

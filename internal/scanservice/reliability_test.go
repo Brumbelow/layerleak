@@ -10,17 +10,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/registry"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 )
 
 func TestScanAndSaveRetainsScanErrorWhenStorageFails(t *testing.T) {
 	saveErr := errors.New("synthetic database failure")
 	service := New(config.Config{RegistryBaseURL: "https://registry.test", MaxFileBytes: 1 << 20}, &failingStore{err: saveErr})
-	service.newRegistryClient = func(options registry.Options) *registry.Client {
+	service.newRegistryClient = func(options registry.Options) (*registry.Client, error) {
 		options.AllowPrivateHosts = true
 		options.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return testResponse(http.StatusNotFound, "text/plain", []byte("missing"), nil), nil
@@ -43,7 +43,7 @@ func TestScanAndSaveRetainsScanErrorWhenStorageFails(t *testing.T) {
 func TestBeforeSaveProgressFailureDoesNotVetoPersistence(t *testing.T) {
 	store := &recordingStore{}
 	service := New(config.Config{RegistryBaseURL: "https://registry.test", MaxFileBytes: 1 << 20}, store)
-	service.newRegistryClient = func(options registry.Options) *registry.Client {
+	service.newRegistryClient = func(options registry.Options) (*registry.Client, error) {
 		options.AllowPrivateHosts = true
 		options.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			return testResponse(http.StatusNotFound, "text/plain", nil, nil), nil
@@ -138,7 +138,7 @@ func outcomeTestService(t *testing.T, store storage.Store, status jobs.ResultSta
 		t.Fatal(err)
 	}
 	service := New(config.Config{RegistryBaseURL: "https://registry.test", MaxFileBytes: 1 << 20}, store)
-	service.newRegistryClient = func(options registry.Options) *registry.Client {
+	service.newRegistryClient = func(options registry.Options) (*registry.Client, error) {
 		options.AllowPrivateHosts = true
 		options.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			if status == jobs.ResultStatusFailed {

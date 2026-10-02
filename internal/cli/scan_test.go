@@ -12,9 +12,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
 
 func TestRenderSummarySanitizesUntrustedCells(t *testing.T) {
@@ -115,7 +116,7 @@ func TestScanCommandJSONOutputAndExitCode(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadDir() error = %v", readErr)
 	}
-	if len(entries) != 2 {
+	if len(entries) != 1 {
 		t.Fatalf("len(entries) = %d", len(entries))
 	}
 
@@ -257,10 +258,13 @@ func TestScanCommandWritesPartialResultsOnConfiguredLimitError(t *testing.T) {
 	if !ok {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if exit.ExitCode() != 1 {
+	// The limit error is acceptable partial coverage that was not accepted,
+	// and the scan found a secret: findings take precedence, so exit 2 with
+	// the coverage message and the --allow-partial hint on stderr.
+	if exit.ExitCode() != 2 {
 		t.Fatalf("exit.ExitCode() = %d", exit.ExitCode())
 	}
-	if !strings.Contains(err.Error(), "max config bytes limit") {
+	if !strings.Contains(err.Error(), "max config bytes limit") || !strings.Contains(err.Error(), "--allow-partial") {
 		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(stdout.String(), `"total_findings"`) {
@@ -271,7 +275,7 @@ func TestScanCommandWritesPartialResultsOnConfiguredLimitError(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("ReadDir() error = %v", readErr)
 	}
-	if len(entries) != 2 {
+	if len(entries) != 1 {
 		t.Fatalf("len(entries) = %d", len(entries))
 	}
 
@@ -337,6 +341,25 @@ func TestScanCommandRejectsInvalidScopeFlags(t *testing.T) {
 	}
 }
 
+func TestCanAcceptPartialAcceptsUnsupportedManifestsButNotIntegrityFailures(t *testing.T) {
+	result := jobs.Result{ResultSchemaVersion: 1, CompletedManifestCount: 1, FailedManifestCount: 1}
+	unsupported := &scanner.UnsupportedManifestError{
+		Digest:   "sha256:" + strings.Repeat("a", 64),
+		Platform: manifest.Platform{OS: "windows", Architecture: "amd64"},
+		Cause:    &layers.UnsupportedLayerError{Digest: "sha256:" + strings.Repeat("f", 64), MediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+	}
+	if !canAcceptPartial(context.Background(), result, unsupported) {
+		t.Fatal("canAcceptPartial(unsupported manifest) = false")
+	}
+	integrity := &manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch, Subject: "sha256:" + strings.Repeat("a", 64)}
+	if canAcceptPartial(context.Background(), result, integrity) {
+		t.Fatal("canAcceptPartial(integrity error) = true")
+	}
+	if canAcceptPartial(context.Background(), jobs.Result{ResultSchemaVersion: 1}, unsupported) {
+		t.Fatal("canAcceptPartial(no completed manifest) = true")
+	}
+}
+
 func TestScanCommandValidatesOutputAndScopeBeforeScanning(t *testing.T) {
 	cases := []struct {
 		name string
@@ -345,7 +368,7 @@ func TestScanCommandValidatesOutputAndScopeBeforeScanning(t *testing.T) {
 	}{
 		{name: "invalid format", args: []string{"scan", "library/app", "--format", "xml"}, want: "unsupported output format"},
 		{name: "invalid progress", args: []string{"scan", "library/app", "--progress", "sometimes"}, want: "unsupported progress mode"},
-		{name: "invalid platform", args: []string{"scan", "library/app", "--platform", "linux"}, want: "invalid --platform"},
+		{name: "invalid platform", args: []string{"scan", "library/app", "--platform", "linux/amd64/"}, want: "invalid --platform"},
 		{name: "all tags pinned", args: []string{"scan", "library/app:latest", "--all-tags"}, want: "requires a bare repository"},
 		{name: "scope limit without all tags", args: []string{"scan", "library/app", "--tag-page-size", "50"}, want: "requires --all-tags"},
 	}
@@ -638,7 +661,7 @@ func installCommandRegistry(t *testing.T, transport roundTripFunc) {
 			http.Error(writer, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		for key, values := range response.Header {
 			for _, value := range values {
 				if strings.EqualFold(key, "Www-Authenticate") {

@@ -2,9 +2,12 @@
   "name": "layerleak-web-tests",
   "private": true,
   "scripts": {
-    "test": "node --test test_demo.cjs"
+    "test": "node --test test_demo.cjs",
+    "lint:css": "stylelint \"../../web/**/*.css\""
   },
   "devDependencies": {
-    "playwright": "1.62.1"
+    "playwright": "1.62.1",
+    "stylelint": "17.16.0",
+    "stylelint-config-standard": "40.0.0"
   }
 }

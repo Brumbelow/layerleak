@@ -1,0 +1,13 @@
+{
+  "name": "env_supabase_service_role_key_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "SUPABASE_SERVICE_ROLE_KEY",
+  "content": "SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFiY2RlZmdoaWoiLCJyb2xlIjoic2VydmljZV9yb2xlIiwiaWF0IjoxLCJleHAiOjJ9.Xk9fL2mQ8vR4tY7wZ1aB3cD5eF6gH8jK0lM2",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "supabase_service_role_key"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

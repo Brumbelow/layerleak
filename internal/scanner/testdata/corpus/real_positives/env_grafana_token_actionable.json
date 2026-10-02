@@ -5,7 +5,7 @@
   "key": "GRAFANA_TOKEN",
   "content": "GRAFANA_TOKEN=glsa_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_12ab34cd",
   "expected_outcome": "actionable",
-  "expected_detectors": ["grafana_service_account_token", "keyword_entropy"],
+  "expected_detectors": ["grafana_service_account_token"],
   "expected_confidence_floor": "medium",
   "expected_reason": ""
 }

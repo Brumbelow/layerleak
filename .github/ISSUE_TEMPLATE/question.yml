@@ -1,0 +1,12 @@
+name: Question or discussion
+description: Ask a usage, design, or project question
+title: "question: "
+labels: [question]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and what have you already read or tried? Link the documentation section when one is close.
+    validations:
+      required: true

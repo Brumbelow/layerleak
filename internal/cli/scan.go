@@ -6,20 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
-	"text/tabwriter"
+	"time"
 
-	"github.com/brumbelow/layerleak/internal/config"
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/jobs"
-	"github.com/brumbelow/layerleak/internal/limits"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/scanservice"
-	"github.com/brumbelow/layerleak/internal/storage"
+	"github.com/brumbelow/layerleak/v3/internal/config"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/jobs"
+	"github.com/brumbelow/layerleak/v3/internal/limits"
+	"github.com/brumbelow/layerleak/v3/internal/logging"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
+	"github.com/brumbelow/layerleak/v3/internal/scanservice"
+	"github.com/brumbelow/layerleak/v3/internal/storage"
 	"github.com/spf13/cobra"
 )
 
-const repositorySweepWarning = "warning: --all-tags enumerates every public tag in the repository and may scan many distinct images"
+const repositorySweepWarning = "warning: --all-tags enumerates every public tag in the repository and may scan many distinct images" //nolint:gosec // user-facing warning text, not a credential
 
 func newScanCmd() *cobra.Command {
 	return newScanCmdWithStore(newStore)
@@ -34,11 +37,22 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 	var allTags bool
 	var allowPartial bool
 	var progressSetting string
+	var outputDir string
+	var outputPath string
+	var noArtifacts bool
+	var noDatabase bool
+	var failOn string
+	var username string
+	var passwordStdin bool
+	var logFormat string
+	var baselinePath string
 
 	cmd := &cobra.Command{
-		Use:   "scan <image-ref>",
-		Short: "Scan a public OCI image reference from any supported registry",
-		Args:  cobra.ExactArgs(1),
+		Use:     "scan <image-ref>",
+		Short:   "Scan an OCI image from a registry, an OCI layout or a docker save archive",
+		Long:    scanLongHelp,
+		Example: scanExample,
+		Args:    exactArgsWithHint(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			outputFormat, err := parseOutputFormat(format)
 			if err != nil {
@@ -48,7 +62,16 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err != nil {
 				return err
 			}
-			ref, err := manifest.ParseReference(args[0])
+			failThreshold, err := parseFailOn(failOn)
+			if err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("log-format") {
+				if _, err := logging.ParseFormat(logFormat); err != nil {
+					return fmt.Errorf("invalid --log-format: %w", err)
+				}
+			}
+			ref, err := manifest.ParseImageReference(args[0])
 			if err != nil {
 				return err
 			}
@@ -63,30 +86,69 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err := validateRepositoryScopeFlags(cmd, allTags); err != nil {
 				return err
 			}
+			credential, err := credentialFromFlags(username, passwordStdin, cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			if ref.IsLocal() && !credential.IsZero() {
+				return fmt.Errorf("--username/--password-stdin do not apply to the local image source %s: %w", ref.Repository, scanservice.ErrCredentialForLocalSource)
+			}
+			// The baseline is explicit (--baseline only; no implicit
+			// .layerleakignore) and validated before the scan starts.
+			var accepted *baseline
+			if strings.TrimSpace(baselinePath) != "" {
+				accepted, err = loadBaseline(baselinePath, time.Now())
+				if err != nil {
+					return exitError{code: exitCodeFailure, message: err.Error(), cause: err}
+				}
+				for _, warning := range accepted.Warnings {
+					if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
+						return err
+					}
+				}
+			}
 
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
+			// Flags win; otherwise the configured LAYERLEAK_REGISTRY_USERNAME/
+			// PASSWORD pair applies to the registry of this reference. The
+			// credential is bound to that one host by the registry client and
+			// only ever sent over https.
+			if credential.IsZero() {
+				credential = scanservice.ConfiguredCredential(cfg)
+			}
+			if ref.IsLocal() && !credential.IsZero() {
+				return fmt.Errorf("LAYERLEAK_REGISTRY_USERNAME/LAYERLEAK_REGISTRY_PASSWORD do not apply to the local image source %s: %w", ref.Repository, scanservice.ErrCredentialForLocalSource)
+			}
 			if err := applyScanScopeFlags(cmd, &cfg, tagPageSize, maxRepositoryTags, maxRepositoryTargets); err != nil {
 				return err
 			}
-			logger, err := newLogger(cfg.LogLevel)
+			// The flag wins over LAYERLEAK_LOG_FORMAT; both were validated above.
+			if cmd.Flags().Changed("log-format") {
+				cfg.LogFormat = strings.ToLower(strings.TrimSpace(logFormat))
+			}
+			logger, err := newLogger(cfg.LogLevel, cfg.LogFormat, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
+			progressMode = effectiveProgressMode(progressMode, cfg.LogLevel, os.Getenv)
 
-			ctx := cmd.Context()
-			if ctx == nil {
-				ctx = context.Background()
+			parentCtx := cmd.Context()
+			if parentCtx == nil {
+				parentCtx = context.Background()
 			}
+			ctx := parentCtx
 			if cfg.ScanTimeout > 0 {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, cfg.ScanTimeout)
 				defer cancel()
 			}
 
-			if allTags {
+			// A local source holds a known, finite set of tags; the warning is
+			// about registry sweeps.
+			if allTags && !ref.IsLocal() {
 				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), repositorySweepWarning); err != nil {
 					logger.Debug("progress update failed")
 				}
@@ -94,7 +156,10 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 
 			progress := newProgressRendererWithMode(cmd.ErrOrStderr(), progressMode)
 			startingMessage := "Preparing scan"
-			if allTags {
+			switch {
+			case allTags && ref.IsLocal():
+				startingMessage = "Preparing sweep across every tag of the local image source"
+			case allTags:
 				startingMessage = "Preparing repository sweep across every public tag"
 			}
 			if err := progress.Start(progressSnapshot{
@@ -104,8 +169,12 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			}); err != nil {
 				logger.Debug("progress update failed")
 			}
-			defer progress.Finish()
+			// The explicit Finish call after publication reports errors; this is a safety net.
+			defer func() { _ = progress.Finish() }()
 
+			if noDatabase {
+				openStore = func(config.Config) (storage.Store, error) { return storage.NewNoopStore(), nil }
+			}
 			store, err := openStore(cfg)
 			if err != nil {
 				if updateErr := progress.Update(progressSnapshot{
@@ -118,15 +187,21 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				return err
 			}
 			if closer, ok := store.(interface{ Close() error }); ok {
-				defer closer.Close()
+				defer func() {
+					if err := closer.Close(); err != nil {
+						logger.Debug("store close failed", "error", err)
+					}
+				}()
 			}
 
 			service := scanservice.New(cfg, store)
 			outcome, err := service.ScanAndSave(ctx, scanservice.Request{
-				Reference: ref,
-				Platform:  platform,
-				AllTags:   allTags,
-				Logger:    logger,
+				Reference:      ref,
+				Platform:       platform,
+				AllTags:        allTags,
+				Credential:     credential,
+				ScannerVersion: effectiveVersion(),
+				Logger:         logger,
 				Progress: func(update jobs.ProgressUpdate) {
 					if err := progress.UpdateFromJob(update); err != nil {
 						logger.Debug("progress update failed", "error", err)
@@ -150,7 +225,11 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					})
 				},
 			})
-			result := outcome.Result
+			// The database write inside ScanAndSave saw the scanner's
+			// dispositions; everything from here on (stdout, the scan record,
+			// SARIF, the exit code) is the caller's baselined view.
+			result, _ := applyBaseline(outcome.Result, accepted)
+			outcome.Result = result
 			scanErr := outcome.ScanError
 			saveErr := outcome.SaveError
 			operationErr := err
@@ -164,11 +243,24 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if operationErr == nil {
 				operationErr = scanErr
 			}
-			if ctx.Err() != nil {
+			// The scan error usually already wraps the context error; join
+			// it only when it does not, so the cause is reported once.
+			if ctx.Err() != nil && !errors.Is(operationErr, ctx.Err()) {
 				operationErr = errors.Join(operationErr, ctx.Err())
 			}
-			acceptPartial := allowPartial && canAcceptPartial(ctx, result, scanErr)
-			if isCancellation(scanErr) || ctx.Err() != nil || (scanErr != nil && !hasUsablePartialResult(result)) {
+			acceptablePartial := canAcceptPartial(ctx, result, scanErr)
+			acceptPartial := allowPartial && acceptablePartial
+			// Cancellation and failures before a result existed are the only
+			// silent paths. A failed scan still publishes its result (status
+			// failed, diagnostics, per-target errors) on stdout and in the
+			// local record so automation can see why it failed.
+			if isCancellation(scanErr) || ctx.Err() != nil {
+				if err := progress.Finish(); err != nil {
+					logger.Debug("progress update failed")
+				}
+				return cancellationExit(parentCtx, ctx, cfg.ScanTimeout, operationErr)
+			}
+			if !hasPublishableResult(result) {
 				if updateErr := progress.Update(progressSnapshot{
 					repository: ref.Repository,
 					phase:      "Error",
@@ -185,6 +277,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					tagsFailed:       result.TagsFailed,
 					tagsTotal:        result.TagsEnumerated,
 					targetsCompleted: result.CompletedTargetCount,
+					targetsPartial:   result.PartialTargetCount,
 					targetsFailed:    result.FailedTargetCount,
 					targetsTotal:     result.TargetCount,
 					findingsFound:    result.TotalFindings,
@@ -205,12 +298,16 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 				targetsTotal:     result.TargetCount,
 				findingsFound:    result.TotalFindings,
 				phase:            "Saving Results",
-				message:          "Writing findings file",
+				message:          "Writing scan record",
 			}); err != nil {
 				logger.Debug("progress update failed")
 			}
 
-			artifactPaths, publicationErr := writeResultArtifacts(cfg.FindingsDir, cfg.PersistRawSecrets, outcome, store.Name())
+			var artifact scanArtifact
+			var publicationErr error
+			if !noArtifacts {
+				artifact, publicationErr = writeResultArtifacts(artifactOptions{outputDir: outputDir, configuredDir: cfg.FindingsDir}, outcome, store.Name())
+			}
 			if publicationErr != nil {
 				if updateErr := progress.Update(progressSnapshot{
 					repository:       ref.Repository,
@@ -218,6 +315,7 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 					tagsFailed:       result.TagsFailed,
 					tagsTotal:        result.TagsEnumerated,
 					targetsCompleted: result.CompletedTargetCount,
+					targetsPartial:   result.PartialTargetCount,
 					targetsFailed:    result.FailedTargetCount,
 					targetsTotal:     result.TargetCount,
 					findingsFound:    result.TotalFindings,
@@ -235,70 +333,69 @@ func newScanCmdWithStore(openStore func(config.Config) (storage.Store, error)) *
 			if err := progress.Finish(); err != nil {
 				logger.Debug("progress update failed")
 			}
-			for _, artifact := range []struct{ label, path string }{
-				{"Findings", artifactPaths.Findings}, {"Scan record", artifactPaths.Scan},
-			} {
-				if artifact.path == "" {
-					continue
+			for _, warning := range artifact.Warnings {
+				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
+					logger.Debug("artifact warning reporting failed")
 				}
-				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", artifact.label, sanitizeProgressValue(artifact.path)); err != nil {
+			}
+			if artifact.Path != "" {
+				// The path is a trusted local value: %q keeps every byte
+				// copyable instead of collapsing whitespace.
+				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Scan record: %q\n", artifact.Path); err != nil {
 					logger.Debug("artifact path reporting failed")
 				}
 			}
 
-			switch outputFormat {
-			case "json":
-				encoder := json.NewEncoder(cmd.OutOrStdout())
-				encoder.SetIndent("", "  ")
-				if err := encoder.Encode(scanservice.RedactedResult(result)); err != nil {
-					return errors.Join(operationErr, publicationErr, err)
+			render := func(out io.Writer) error {
+				switch outputFormat {
+				case "json":
+					encoder := json.NewEncoder(out)
+					encoder.SetIndent("", "  ")
+					return encoder.Encode(scanservice.PublicResult(result))
+				case "summary":
+					return renderSummary(out, result)
+				case "sarif":
+					return renderSARIF(out, scanservice.PublicResult(result), accepted)
+				default:
+					return fmt.Errorf("unsupported output format: %s", outputFormat)
 				}
-			case "summary":
-				if err := renderSummary(cmd.OutOrStdout(), result); err != nil {
-					return errors.Join(operationErr, publicationErr, err)
-				}
-			default:
-				return fmt.Errorf("unsupported output format: %s", outputFormat)
+			}
+			if err := writeFormattedOutput(cmd.OutOrStdout(), outputPath, render); err != nil {
+				return errors.Join(operationErr, publicationErr, err)
 			}
 
 			if publicationErr != nil || saveErr != nil {
 				return errors.Join(operationErr, publicationErr)
 			}
-			if scanErr != nil && !acceptPartial {
-				return exitError{code: 1, message: scanErr.Error()}
-			}
-			if acceptPartial {
-				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "warning: incomplete scan accepted by --allow-partial"); err != nil {
+			warning, exit := exitForOutcome(result, scanErr, acceptablePartial, acceptPartial, failThreshold, registryHostFor(cfg, ref))
+			if warning != "" {
+				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), warning); err != nil {
 					logger.Debug("progress update failed")
 				}
 			}
-			if result.TotalFindings > 0 {
-				return exitError{code: 2}
-			}
-
-			return nil
+			return exit
 		},
 	}
 
-	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform in os/arch[/variant] format")
-	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary or json")
+	cmd.Flags().StringVar(&platform, "platform", "", "Scan only the specified platform as os, os/arch or os/arch/variant (default: every linux platform)")
+	cmd.Flags().StringVar(&format, "format", "summary", "Output format: summary, json, or sarif (SARIF 2.1.0)")
 	cmd.Flags().BoolVar(&allTags, "all-tags", false, "Enumerate and scan every public tag in a bare repository reference")
-	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed")
+	cmd.Flags().BoolVar(&allowPartial, "allow-partial", false, "Accept incomplete coverage when at least one manifest completed (otherwise exit code 3)")
+	cmd.Flags().StringVar(&failOn, "fail-on", "low", "Lowest confidence of an actionable finding that produces exit code 2: low, medium, high, or none to report only")
+	cmd.Flags().StringVar(&baselinePath, "baseline", "", "Baseline file (written by layerleak baseline create) whose fingerprints are reported with disposition baselined and never produce exit code 2. Nothing is read implicitly.")
 	cmd.Flags().StringVar(&progressSetting, "progress", string(progressModeAuto), "Progress mode: auto, tty, plain, or off")
+	cmd.Flags().StringVar(&logFormat, "log-format", "", "Log record format on stderr: json or text. Overrides LAYERLEAK_LOG_FORMAT (default json).")
+	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory for the scan record. Overrides LAYERLEAK_FINDINGS_DIR; the default is ./findings under the working directory.")
+	cmd.Flags().StringVar(&outputPath, "output", "-", "Write the formatted result to this file instead of stdout; - means stdout.")
+	cmd.Flags().BoolVar(&noArtifacts, "no-artifacts", false, "Do not write a scan record file.")
+	cmd.Flags().BoolVar(&noDatabase, "no-db", false, "Do not open or write to PostgreSQL even when LAYERLEAK_DATABASE_URL is set.")
+	cmd.Flags().StringVar(&username, "username", "", "Registry username for a private image; requires --password-stdin. Overrides LAYERLEAK_REGISTRY_USERNAME/PASSWORD for this scan.")
+	cmd.Flags().BoolVar(&passwordStdin, "password-stdin", false, "Read the registry password or token from standard input (to the end, one trailing newline removed); requires --username.")
 	cmd.Flags().IntVar(&tagPageSize, "tag-page-size", 0, "Registry tag-list page size for repository sweeps. Overrides LAYERLEAK_TAG_PAGE_SIZE. Must be greater than zero when set.")
 	cmd.Flags().IntVar(&maxRepositoryTags, "max-repository-tags", 0, "Maximum tags enumerated per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TAGS. Set to 0 to disable the limit; negative values are rejected.")
 	cmd.Flags().IntVar(&maxRepositoryTargets, "max-repository-targets", 0, "Maximum distinct targets resolved per repository sweep. Overrides LAYERLEAK_MAX_REPOSITORY_TARGETS. Set to 0 to disable the limit; negative values are rejected.")
 
 	return cmd
-}
-
-func parseOutputFormat(value string) (string, error) {
-	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
-	case "summary", "json":
-		return normalized, nil
-	default:
-		return "", fmt.Errorf("unsupported output format %q: use summary or json", value)
-	}
 }
 
 func validateRepositoryScopeFlags(cmd *cobra.Command, allTags bool) error {
@@ -317,6 +414,13 @@ func hasUsablePartialResult(result jobs.Result) bool {
 	return result.ResultSchemaVersion > 0 && result.CompletedManifestCount > 0
 }
 
+// hasPublishableResult reports whether the scan produced a result at all. A
+// failure before the scan started (registry client configuration, invalid
+// request) leaves the zero Result, which is not worth printing or recording.
+func hasPublishableResult(result jobs.Result) bool {
+	return result.ResultSchemaVersion > 0
+}
+
 func canAcceptPartial(ctx context.Context, result jobs.Result, err error) bool {
 	if err == nil || !hasUsablePartialResult(result) || scanservice.IsSaveError(err) || isCancellation(err) || manifest.IsIntegrityError(err) {
 		return false
@@ -324,7 +428,10 @@ func canAcceptPartial(ctx context.Context, result jobs.Result, err error) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
-	return jobs.IsIncomplete(err) || limits.IsExceeded(err)
+	// A manifest whose layers are foreign or non-distributable is incomplete
+	// coverage that --allow-partial may accept. It is typed separately from
+	// integrity failures, which the check above keeps fail-closed.
+	return jobs.IsIncomplete(err) || limits.IsExceeded(err) || scanner.IsUnsupportedManifest(err)
 }
 
 func isCancellation(err error) bool {
@@ -351,98 +458,4 @@ func applyScanScopeFlags(cmd *cobra.Command, cfg *config.Config, tagPageSize, ma
 		cfg.MaxRepositoryTargets = maxRepositoryTargets
 	}
 	return nil
-}
-
-func renderSummary(output io.Writer, result jobs.Result) error {
-	writer := tabwriter.NewWriter(output, 0, 0, 2, ' ', 0)
-	for _, row := range summaryRows(result) {
-		if _, err := fmt.Fprintf(writer, "%s:\t%v\n", row.label, row.value); err != nil {
-			return err
-		}
-	}
-	if _, err := fmt.Fprintln(writer, ""); err != nil {
-		return err
-	}
-	if err := renderSummaryTargets(writer, result); err != nil {
-		return err
-	}
-	return writer.Flush()
-}
-
-type summaryRow struct {
-	label string
-	value any
-}
-
-func summaryRows(result jobs.Result) []summaryRow {
-	rows := []summaryRow{
-		{"Requested Reference", sanitizeProgressValue(result.RequestedReference)},
-		{"Repository", sanitizeProgressValue(result.Repository)},
-		{"Status", result.Status},
-	}
-	if result.ResolvedReference != "" {
-		rows = append(rows, summaryRow{"Resolved Reference", sanitizeProgressValue(result.ResolvedReference)})
-	}
-	if result.RequestedDigest != "" {
-		rows = append(rows, summaryRow{"Requested Digest", sanitizeProgressValue(result.RequestedDigest)})
-	}
-	if result.TagsEnumerated > 0 || result.Mode == "repository" {
-		rows = append(rows,
-			summaryRow{"Tags Enumerated", result.TagsEnumerated},
-			summaryRow{"Tags Resolved", result.TagsResolved},
-			summaryRow{"Tags Failed", result.TagsFailed},
-		)
-	}
-	return append(rows,
-		summaryRow{"Targets Selected", result.TargetCount},
-		summaryRow{"Targets Completed", result.CompletedTargetCount},
-		summaryRow{"Targets Partial", result.PartialTargetCount},
-		summaryRow{"Targets Failed", result.FailedTargetCount},
-		summaryRow{"Manifests Selected", result.ManifestCount},
-		summaryRow{"Manifests Completed", result.CompletedManifestCount},
-		summaryRow{"Manifests Failed", result.FailedManifestCount},
-		summaryRow{"Coverage Complete", result.Coverage.Complete},
-		summaryRow{"Files Scanned", result.Coverage.FilesScanned},
-		summaryRow{"Files Skipped Oversize", result.Coverage.FilesSkippedOversize},
-		summaryRow{"Total Findings", result.TotalFindings},
-		summaryRow{"Unique Fingerprints", result.UniqueFingerprints},
-		summaryRow{"Suppressed Example Findings", result.SuppressedFindingsCount},
-	)
-}
-
-func renderSummaryTargets(writer io.Writer, result jobs.Result) error {
-	if result.Mode == "reference" && len(result.Targets) == 1 {
-		if _, err := fmt.Fprintln(writer, "Platform\tManifest Digest\tFindings\tStatus"); err != nil {
-			return err
-		}
-		for _, item := range result.Targets[0].PlatformResults {
-			if _, err := fmt.Fprintf(writer, "%s\t%s\t%d\t%s\n", sanitizeProgressValue(item.Platform.String()), sanitizeProgressValue(item.ManifestDigest), item.FindingsCount, summaryItemStatus(item.Error)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if _, err := fmt.Fprintln(writer, "Reference\tTags\tFindings\tStatus"); err != nil {
-		return err
-	}
-	for _, item := range result.Targets {
-		if _, err := fmt.Fprintf(writer, "%s\t%d\t%d\t%s\n", sanitizeProgressValue(targetReferenceLabel(item)), len(item.Tags), item.FindingsCount, summaryItemStatus(item.Error)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func summaryItemStatus(message string) string {
-	if message == "" {
-		return "ok"
-	}
-	return sanitizeProgressValue(message)
-}
-
-func targetReferenceLabel(item jobs.TargetResult) string {
-	if item.ResolvedReference != "" {
-		return item.ResolvedReference
-	}
-	return item.Reference
 }

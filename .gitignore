@@ -11,9 +11,12 @@
 # Test binary, built with `go test -c`
 *.test
 
-# Code coverage profiles and other test artifacts
+# Code coverage profiles and other test artifacts. Keep these patterns
+# narrow: a broad `coverage.*` once hid a Go source file named coverage.go
+# from `git add`.
 *.out
-coverage.*
+coverage.txt
+coverage.html
 *.coverprofile
 profile.cov
 
@@ -27,6 +30,14 @@ go.work.sum
 
 # env file
 .env
+
+# Python bytecode and the documentation-validator virtualenv
+__pycache__/
+*.pyc
+.venv-docs/
+
+# Pinned lint and vulnerability tools installed by `make tools`
+/.tools/
 
 # Editor/IDE
 # .idea/

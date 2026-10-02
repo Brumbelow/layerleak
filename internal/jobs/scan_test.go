@@ -12,11 +12,35 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brumbelow/layerleak/internal/detectors"
-	"github.com/brumbelow/layerleak/internal/findings"
-	"github.com/brumbelow/layerleak/internal/manifest"
-	"github.com/brumbelow/layerleak/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/detectors"
+	"github.com/brumbelow/layerleak/v3/internal/findings"
+	"github.com/brumbelow/layerleak/v3/internal/layers"
+	"github.com/brumbelow/layerleak/v3/internal/manifest"
+	"github.com/brumbelow/layerleak/v3/internal/registry"
+	"github.com/brumbelow/layerleak/v3/internal/scanner"
 )
+
+func TestMustPreserveScanErrorLetsUnsupportedManifestsContinueTheSweep(t *testing.T) {
+	unsupported := &scanner.UnsupportedManifestError{
+		Digest: "sha256:" + strings.Repeat("a", 64),
+		Cause:  &layers.UnsupportedLayerError{Digest: "sha256:" + strings.Repeat("f", 64), MediaType: manifest.MediaTypeDockerSchema2ForeignLayerGzip},
+	}
+	notFound := &scanner.PlatformNotFoundError{Selector: "linux/arm64", Actual: manifest.Platform{OS: "linux", Architecture: "amd64"}}
+	for _, err := range []error{unsupported, notFound} {
+		if mustPreserveScanError(err) {
+			t.Fatalf("mustPreserveScanError(%T) = true", err)
+		}
+	}
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		&manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch},
+	} {
+		if !mustPreserveScanError(err) {
+			t.Fatalf("mustPreserveScanError(%v) = false", err)
+		}
+	}
+}
 
 func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	configOneBody := []byte(`{"architecture":"amd64","os":"linux","config":{"Env":["GH_TOKEN=ghp_123456789012345678901234567890123456"]}}`)
@@ -84,7 +108,7 @@ func TestScanRepositoryEnumeratesTagsAndDeduplicatesDigests(t *testing.T) {
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -185,7 +209,7 @@ func TestScanRepositoryReturnsUnderlyingTargetErrorWhenAllTargetsFail(t *testing
 	_, err = Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -246,7 +270,7 @@ func TestScanRepositoryReturnsPartialResultWhenTargetLimitExceeded(t *testing.T)
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -332,7 +356,7 @@ func TestScanRepositoryAbortsOnLimitErrorAndPreservesCompletedTargets(t *testing
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -431,7 +455,7 @@ func TestScanRepositoryAbortsOnLayerLimitAndPreservesCompletedTargets(t *testing
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient: &http.Client{
@@ -511,7 +535,7 @@ func TestScanRepositoryPreservesFatalTagResolutionErrors(t *testing.T) {
 			result, err := Scan(context.Background(), Request{
 				Reference: ref,
 				AllTags:   true,
-				Registry: registry.NewClient(registry.Options{
+				Registry: registry.MustNewClient(registry.Options{
 					BaseURL:           "https://registry.test",
 					AllowPrivateHosts: true,
 					RequestAttempts:   1,
@@ -580,7 +604,7 @@ func TestScanRepositoryAppliesMaxFindingsAcrossTargets(t *testing.T) {
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},
@@ -596,8 +620,12 @@ func TestScanRepositoryAppliesMaxFindingsAcrossTargets(t *testing.T) {
 	if result.TotalFindings != 1 {
 		t.Fatalf("result.TotalFindings = %d", result.TotalFindings)
 	}
-	if len(result.Targets) != 1 || result.Targets[0].Status != ResultStatusCompleted {
+	// The unscanned second target is accounted for instead of dropped (CLI-04).
+	if len(result.Targets) != 2 || result.Targets[0].Status != ResultStatusCompleted || result.Targets[1].Status != ResultStatusFailed || !strings.Contains(result.Targets[1].Error, "not scanned") {
 		t.Fatalf("result.Targets = %#v", result.Targets)
+	}
+	if result.TargetCount != 2 || result.CompletedTargetCount != 1 || result.FailedTargetCount != 1 {
+		t.Fatalf("target counts = %d/%d/%d", result.TargetCount, result.CompletedTargetCount, result.FailedTargetCount)
 	}
 	if !hasDiagnosticCode(result.Diagnostics, "max_findings_exceeded") {
 		t.Fatalf("result.Diagnostics = %#v", result.Diagnostics)
@@ -656,7 +684,7 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 	result, err := Scan(context.Background(), Request{
 		Reference: ref,
 		AllTags:   true,
-		Registry: registry.NewClient(registry.Options{
+		Registry: registry.MustNewClient(registry.Options{
 			BaseURL:           "https://registry.test",
 			AllowPrivateHosts: true,
 			HTTPClient:        &http.Client{Transport: transport},
@@ -667,13 +695,15 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 		MaxRawFindingBytes: maxRawFindingBytes,
 		TagPageSize:        100,
 	})
-	if err == nil || !IsIncomplete(err) {
+	// Spending the raw budget disables retention for the rest of the sweep but
+	// never costs detection coverage, so both targets complete.
+	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
-	if result.Status != ResultStatusPartial {
+	if result.Status != ResultStatusCompleted {
 		t.Fatalf("result.Status = %q", result.Status)
 	}
-	if result.CompletedTargetCount != 1 || result.PartialTargetCount != 1 {
+	if result.CompletedTargetCount != 2 || result.PartialTargetCount != 0 {
 		t.Fatalf("target counts = completed %d, partial %d", result.CompletedTargetCount, result.PartialTargetCount)
 	}
 	if len(result.DetailedFindings) != 2 {
@@ -706,7 +736,7 @@ func TestScanRepositoryAppliesRawFindingByteLimitAcrossTargets(t *testing.T) {
 
 	foundDiagnostic := false
 	for _, diagnostic := range result.Diagnostics {
-		if diagnostic.Code != "max_raw_finding_bytes_exceeded" {
+		if diagnostic.Code != "raw_retention_truncated" {
 			continue
 		}
 		foundDiagnostic = true
@@ -742,9 +772,13 @@ func tagResolutionResponse(request *http.Request, goodDigest string) *http.Respo
 type tarEntry struct {
 	name string
 	body string
+	// typeflag and linkname are zero for a regular file; a symlink or hardlink
+	// sets them and carries no body.
+	typeflag byte
+	linkname string
 }
 
-func gzipLayer(t *testing.T, entries []tarEntry) []byte {
+func gzipLayer(t testing.TB, entries []tarEntry) []byte {
 	t.Helper()
 
 	var buffer bytes.Buffer
@@ -752,9 +786,11 @@ func gzipLayer(t *testing.T, entries []tarEntry) []byte {
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, entry := range entries {
 		header := &tar.Header{
-			Name: entry.name,
-			Mode: 0600,
-			Size: int64(len(entry.body)),
+			Name:     entry.name,
+			Mode:     0600,
+			Size:     int64(len(entry.body)),
+			Typeflag: entry.typeflag,
+			Linkname: entry.linkname,
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("WriteHeader() error = %v", err)
@@ -794,7 +830,7 @@ func repoResponse(statusCode int, contentType string, body []byte, headers map[s
 	}
 }
 
-func testDescriptor(t *testing.T, mediaType string, body []byte) manifest.Descriptor {
+func testDescriptor(t testing.TB, mediaType string, body []byte) manifest.Descriptor {
 	t.Helper()
 	digest, err := manifest.DigestBytes("sha256", body)
 	if err != nil {
@@ -803,7 +839,7 @@ func testDescriptor(t *testing.T, mediaType string, body []byte) manifest.Descri
 	return manifest.Descriptor{MediaType: mediaType, Digest: digest, Size: int64(len(body))}
 }
 
-func testManifestBody(t *testing.T, config manifest.Descriptor, layers []manifest.Descriptor) []byte {
+func testManifestBody(t testing.TB, config manifest.Descriptor, layers []manifest.Descriptor) []byte {
 	t.Helper()
 	if layers == nil {
 		layers = []manifest.Descriptor{}

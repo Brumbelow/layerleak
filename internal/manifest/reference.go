@@ -13,34 +13,26 @@ import (
 const DockerHubRegistry = "docker.io"
 
 type Reference struct {
-	Original    string
-	Registry    string
-	Repository  string
-	Tag         string
-	Digest      string
+	Original   string
+	Registry   string
+	Repository string
+	Tag        string
+	Digest     string
+	// Scheme is the local source scheme (oci, oci-archive, docker-archive)
+	// of a reference parsed by ParseLocalReference; it is empty for every
+	// registry reference. A local Repository already carries the scheme
+	// (`oci:/srv/images/app`) and renders without a registry prefix.
+	Scheme      string
 	TagExplicit bool
 }
 
 func ParseReference(raw string) (Reference, error) {
 	value := raw
-	if value == "" {
-		return Reference{}, fmt.Errorf("image reference is required")
-	}
-	if value != strings.TrimSpace(value) {
-		return Reference{}, fmt.Errorf("image reference must not include surrounding whitespace")
+	if err := checkReferenceSyntax(value); err != nil {
+		return Reference{}, err
 	}
 
-	if strings.Contains(value, "://") {
-		return Reference{}, fmt.Errorf("image reference must not include a scheme")
-	}
-	if strings.ContainsAny(value, `?#\\`) {
-		return Reference{}, fmt.Errorf("image reference contains invalid characters")
-	}
-	if strings.Count(value, "@") > 1 {
-		return Reference{}, fmt.Errorf("image reference must contain at most one digest separator")
-	}
-
-	named, err := distributionreference.ParseNormalizedNamed(value)
+	named, err := distributionreference.ParseNormalizedNamed(canonicalizeDockerHubDomain(value))
 	if err != nil {
 		return Reference{}, fmt.Errorf("parse image reference: %w", err)
 	}
@@ -54,16 +46,9 @@ func ParseReference(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("repository is required")
 	}
 
-	tag := ""
-	if tagged, ok := named.(distributionreference.Tagged); ok {
-		tag = tagged.Tag()
-	}
-	digest := ""
-	if digested, ok := named.(distributionreference.Digested); ok {
-		digest = digested.Digest().String()
-		if err := ValidateDigest(digest); err != nil {
-			return Reference{}, err
-		}
+	tag, digest, err := namedTagAndDigest(named)
+	if err != nil {
+		return Reference{}, err
 	}
 
 	return Reference{
@@ -74,6 +59,49 @@ func ParseReference(raw string) (Reference, error) {
 		Digest:      digest,
 		TagExplicit: tag != "",
 	}, nil
+}
+
+// checkReferenceSyntax rejects, before the reference grammar runs, an empty
+// value, surrounding whitespace, a local source scheme, a URL scheme, query,
+// fragment or backslash characters and more than one digest separator.
+func checkReferenceSyntax(value string) error {
+	if value == "" {
+		return fmt.Errorf("image reference is required")
+	}
+	if value != strings.TrimSpace(value) {
+		return fmt.Errorf("image reference must not include surrounding whitespace")
+	}
+
+	if LocalScheme(value) != "" {
+		return ErrLocalSourceNotSupported
+	}
+	if strings.Contains(value, "://") {
+		return fmt.Errorf("image reference must not include a scheme")
+	}
+	if strings.ContainsAny(value, `?#\\`) {
+		return fmt.Errorf("image reference contains invalid characters")
+	}
+	if strings.Count(value, "@") > 1 {
+		return fmt.Errorf("image reference must contain at most one digest separator")
+	}
+	return nil
+}
+
+// namedTagAndDigest returns the tag and the validated digest of a parsed
+// reference; either is empty when the reference does not carry it.
+func namedTagAndDigest(named distributionreference.Named) (string, string, error) {
+	tag := ""
+	if tagged, ok := named.(distributionreference.Tagged); ok {
+		tag = tagged.Tag()
+	}
+	digest := ""
+	if digested, ok := named.(distributionreference.Digested); ok {
+		digest = digested.Digest().String()
+		if err := ValidateDigest(digest); err != nil {
+			return "", "", err
+		}
+	}
+	return tag, digest, nil
 }
 
 // ValidateDigest verifies the OCI digest syntax and the encoded length for the
@@ -100,11 +128,18 @@ func ValidateDigest(value string) error {
 	}
 }
 
+// Identifier is the tag or digest the source is asked for: the digest when
+// set, otherwise the tag, otherwise "latest" for a registry reference. A
+// local reference without a tag or digest yields "" and the local source
+// selects the only image it holds.
 func (r Reference) Identifier() string {
 	if r.Digest != "" {
 		return r.Digest
 	}
 	if r.Tag == "" {
+		if r.IsLocal() {
+			return ""
+		}
 		return "latest"
 	}
 
@@ -112,7 +147,7 @@ func (r Reference) Identifier() string {
 }
 
 func (r Reference) CanonicalString(digest string) string {
-	value := r.Registry + "/" + r.Repository
+	value := r.RepositoryString()
 	if strings.TrimSpace(digest) != "" {
 		return value + "@" + strings.TrimSpace(digest)
 	}
@@ -125,7 +160,12 @@ func (r Reference) CanonicalString(digest string) string {
 	return value
 }
 
+// RepositoryString is the registry-qualified repository, or the scheme and
+// path of a local source.
 func (r Reference) RepositoryString() string {
+	if r.IsLocal() {
+		return r.Repository
+	}
 	return r.Registry + "/" + r.Repository
 }
 
@@ -135,9 +175,10 @@ func (r Reference) IsRepositoryOnly() bool {
 
 func (r Reference) WithTag(tag string) Reference {
 	return Reference{
-		Original:    r.Registry + "/" + r.Repository + ":" + strings.TrimSpace(tag),
+		Original:    r.RepositoryString() + ":" + strings.TrimSpace(tag),
 		Registry:    r.Registry,
 		Repository:  r.Repository,
+		Scheme:      r.Scheme,
 		Tag:         strings.TrimSpace(tag),
 		TagExplicit: true,
 	}
@@ -145,9 +186,10 @@ func (r Reference) WithTag(tag string) Reference {
 
 func (r Reference) WithDigest(digest string) Reference {
 	return Reference{
-		Original:   r.Registry + "/" + r.Repository + "@" + strings.TrimSpace(digest),
+		Original:   r.RepositoryString() + "@" + strings.TrimSpace(digest),
 		Registry:   r.Registry,
 		Repository: r.Repository,
+		Scheme:     r.Scheme,
 		Digest:     strings.TrimSpace(digest),
 	}
 }
@@ -157,7 +199,7 @@ func (r Reference) RepositoryScope() string {
 }
 
 func (r Reference) String() string {
-	value := r.Registry + "/" + r.Repository
+	value := r.RepositoryString()
 	if r.Tag != "" {
 		value += ":" + r.Tag
 	}
@@ -166,6 +208,23 @@ func (r Reference) String() string {
 	}
 
 	return value
+}
+
+// canonicalizeDockerHubDomain rewrites the Docker Hub aliases
+// (index.docker.io, registry-1.docker.io, any-case docker.io) to docker.io
+// before normalization, so the library/ prefix rule for official images applies
+// to every spelling of the registry. Other references are returned unchanged.
+func canonicalizeDockerHubDomain(value string) string {
+	slash := strings.IndexByte(value, '/')
+	if slash <= 0 {
+		return value
+	}
+	switch strings.ToLower(value[:slash]) {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return DockerHubRegistry + value[slash:]
+	default:
+		return value
+	}
 }
 
 func normalizeRegistry(value string) string {

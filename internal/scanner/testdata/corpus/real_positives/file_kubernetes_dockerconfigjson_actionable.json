@@ -1,0 +1,11 @@
+{
+  "name": "file_kubernetes_dockerconfigjson_actionable",
+  "source_type": "file_final",
+  "path": "app/manifests/regcred.yaml",
+  "key": "",
+  "content": "apiVersion: v1\nkind: Secret\ntype: kubernetes.io/dockerconfigjson\ndata:\n  .dockerconfigjson: eyJhdXRocyI6eyJyZWdpc3RyeS5pbnRlcm5hbCI6eyJhdXRoIjoiWkdWd2JHOTVPbE4xY0ROeVV6TmpjbVYwVUhkWWVYbz0ifX19\n",
+  "expected_outcome": "actionable",
+  "expected_detectors": ["docker_config_json_blob"],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

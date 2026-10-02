@@ -1,0 +1,13 @@
+{
+  "name": "env_dropbox_access_token_actionable",
+  "source_type": "env",
+  "path": "",
+  "key": "DROPBOX_TOKEN",
+  "content_base64": "RFJPUEJPWF9UT0tFTj1zbC5YazlmTDJtUTh2UjR0WTd3WjFhQjNjRDVlRjZnSDhqSzBsTTJuTzRwUTZyUzh0VTB2VzJ4WTR6WGs5ZkwybVE4dlI0dFk3d1oxYUIzY0Q1ZUY2Z0g4akswbE0ybk80cFE2clM4dFUwdlcyeFk0elhrOWZMMm1ROHZSNHRZN3daMWFCM2NENWVGNmdIOGpLMGxNMm5PNHBRNnJTOHRVMHZXMnhZNHo=",
+  "expected_outcome": "actionable",
+  "expected_detectors": [
+    "dropbox_access_token"
+  ],
+  "expected_confidence_floor": "high",
+  "expected_reason": ""
+}

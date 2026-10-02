@@ -231,6 +231,37 @@ func TestIsLowercaseSeparatorCandidate(t *testing.T) {
 	}
 }
 
+// TestIsLowercaseSeparatorCandidateEdges covers the alphabet, letter, digit
+// count and word-segment boundaries of the slug suppression.
+func TestIsLowercaseSeparatorCandidateEdges(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "", want: false},
+		{value: "123-456", want: false},
+		{value: "-_/", want: false},
+		{value: "a-1", want: true},
+		{value: "x9/y8", want: true},
+		{value: "café-crème", want: true},
+		{value: "abc def-x", want: false},
+		{value: "abc.def-x", want: false},
+		{value: "abc-d١٢٣", want: false},
+		{value: "abc-def-12-34", want: true},
+		{value: "abc-def-12-34-56", want: false},
+		{value: "abc-def-ghi-12-34-56", want: true},
+		{value: "abc-12-34-56", want: false},
+		{value: "abc12-def34-5", want: true},
+		{value: "abc123-def-1", want: false},
+		{value: "--abc//def__12-3", want: true},
+	}
+	for _, tt := range tests {
+		if got := isLowercaseSeparatorCandidate(tt.value); got != tt.want {
+			t.Errorf("isLowercaseSeparatorCandidate(%q) = %t, want %t", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestEntropyThresholdIsAlphabetAware(t *testing.T) {
 	for _, tt := range []struct {
 		value string

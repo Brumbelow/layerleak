@@ -618,33 +618,47 @@ func (contextEntropyDetector) Scan(input ScanInput) []Match {
 		if !keyIsSensitive && !containsSecretKeyword(lowered[line.Offset:line.Offset+len(line.Value)]) {
 			continue
 		}
-		candidates := entropyCandidateExpression.FindAllStringIndex(line.Value, -1)
-		for _, candidate := range candidates {
-			value := line.Value[candidate[0]:candidate[1]]
-			if !hasEntropyContext(line.Value, input.Key, candidate[0], candidate[1]) {
-				continue
-			}
-			if shouldSuppressEntropyCandidate(value) {
-				continue
-			}
-			if looksLikeContentDigest(line.Value[:candidate[0]], value, input.Path) {
-				continue
-			}
-			if !passesEntropy(value) {
-				continue
-			}
-			matches = append(matches, Match{
-				Detector:   "keyword_entropy",
-				Value:      value,
-				Start:      line.Offset + candidate[0],
-				End:        line.Offset + candidate[1],
-				Confidence: adjustConfidence(ConfidenceLow, input.Path, input.Key, value),
-				Priority:   priorityEntropy,
-			})
-		}
+		matches = appendEntropyLineMatches(matches, input, line)
 	}
 
 	return matches
+}
+
+// appendEntropyLineMatches appends a keyword_entropy match for every
+// entropy candidate on line that isEntropyLineCandidate accepts.
+func appendEntropyLineMatches(matches []Match, input ScanInput, line lineWithOffset) []Match {
+	candidates := entropyCandidateExpression.FindAllStringIndex(line.Value, -1)
+	for _, candidate := range candidates {
+		value := line.Value[candidate[0]:candidate[1]]
+		if !isEntropyLineCandidate(input, line.Value, value, candidate[0], candidate[1]) {
+			continue
+		}
+		matches = append(matches, Match{
+			Detector:   "keyword_entropy",
+			Value:      value,
+			Start:      line.Offset + candidate[0],
+			End:        line.Offset + candidate[1],
+			Confidence: adjustConfidence(ConfidenceLow, input.Path, input.Key, value),
+			Priority:   priorityEntropy,
+		})
+	}
+	return matches
+}
+
+// isEntropyLineCandidate applies, in order, the context, suppression,
+// content-digest and entropy checks to the candidate value at
+// lineValue[start:end].
+func isEntropyLineCandidate(input ScanInput, lineValue, value string, start, end int) bool {
+	if !hasEntropyContext(lineValue, input.Key, start, end) {
+		return false
+	}
+	if shouldSuppressEntropyCandidate(value) {
+		return false
+	}
+	if looksLikeContentDigest(lineValue[:start], value, input.Path) {
+		return false
+	}
+	return passesEntropy(value)
 }
 
 type lineWithOffset struct {
@@ -914,25 +928,39 @@ func isLowercaseSeparatorCandidate(value string) bool {
 	if value == "" || !strings.ContainsAny(value, "-_/") {
 		return false
 	}
-	hasLetter := false
-	for _, r := range value {
-		switch {
-		case unicode.IsLower(r):
-			hasLetter = true
-		case unicode.IsDigit(r), r == '-', r == '_', r == '/':
-		default:
-			return false
-		}
-	}
-	if !hasLetter {
+	if !isLowercaseSlugAlphabet(value) {
 		return false
 	}
 	if digitCount(value) <= 2 {
 		return true
 	}
-	segments := strings.FieldsFunc(value, func(r rune) bool {
-		return r == '-' || r == '_' || r == '/'
-	})
+	return hasMostlyWordSegments(value)
+}
+
+// isLowercaseSlugAlphabet reports whether value holds only lowercase
+// letters, digits and slug separators, with at least one letter.
+func isLowercaseSlugAlphabet(value string) bool {
+	hasLetter := false
+	for _, r := range value {
+		switch {
+		case unicode.IsLower(r):
+			hasLetter = true
+		case unicode.IsDigit(r), isSlugSeparator(r):
+		default:
+			return false
+		}
+	}
+	return hasLetter
+}
+
+func isSlugSeparator(r rune) bool {
+	return r == '-' || r == '_' || r == '/'
+}
+
+// hasMostlyWordSegments reports whether at least two separator-delimited
+// segments of value, and at least half of them, read as words.
+func hasMostlyWordSegments(value string) bool {
+	segments := strings.FieldsFunc(value, isSlugSeparator)
 	wordy := 0
 	for _, segment := range segments {
 		if lowercaseWordExpression.MatchString(segment) {

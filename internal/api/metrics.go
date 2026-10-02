@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -178,7 +179,7 @@ func (m *metrics) render() *bytes.Buffer {
 	}
 
 	writeFamily(writer, "layerleak_api_request_duration_seconds", "histogram", "Request duration in seconds, by mux route pattern.")
-	for _, route := range sortedKeys(m.durations) {
+	for _, route := range slices.Sorted(maps.Keys(m.durations)) {
 		entry := m.durations[route]
 		cumulative := uint64(0)
 		for index, bound := range durationBuckets {
@@ -191,12 +192,12 @@ func (m *metrics) render() *bytes.Buffer {
 	}
 
 	writeFamily(writer, "layerleak_scans_total", "counter", "Scans run by POST /api/v1/scans, by outcome (completed, partial or failed).")
-	for _, outcome := range sortedKeys(m.scans) {
+	for _, outcome := range slices.Sorted(maps.Keys(m.scans)) {
 		writeSample(writer, "layerleak_scans_total", labels{{"outcome", outcome}}, formatUint(m.scans[outcome]))
 	}
 
 	writeFamily(writer, "layerleak_scan_errors_total", "counter", "POST /api/v1/scans requests that answered an error, by error code.")
-	for _, code := range sortedKeys(m.scanErrors) {
+	for _, code := range slices.Sorted(maps.Keys(m.scanErrors)) {
 		writeSample(writer, "layerleak_scan_errors_total", labels{{"code", code}}, formatUint(m.scanErrors[code]))
 	}
 
@@ -253,15 +254,6 @@ func formatFloat(value float64) string {
 
 func formatUint(value uint64) string {
 	return strconv.FormatUint(value, 10)
-}
-
-func sortedKeys[V any](items map[string]V) []string {
-	keys := make([]string, 0, len(items))
-	for key := range items {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }
 
 // MetricsHandler serves the Prometheus exposition at GET /metrics. It is

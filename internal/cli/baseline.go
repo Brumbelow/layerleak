@@ -280,39 +280,59 @@ type baselineSource struct {
 // Only the fingerprint and the detector name are taken from the source; no
 // redacted value, path or snippet is copied.
 func baselineFromSource(reader io.Reader, reason string) (baselineDocument, error) {
+	source, err := readBaselineSource(reader)
+	if err != nil {
+		return baselineDocument{}, err
+	}
+	items, err := source.selectedFindings()
+	if err != nil {
+		return baselineDocument{}, err
+	}
+	return baselineDocument{BaselineSchemaVersion: baselineSchemaVersion, Entries: baselineEntriesFrom(items, reason)}, nil
+}
+
+// readBaselineSource reads at most maxBaselineSourceBytes and decodes them.
+func readBaselineSource(reader io.Reader) (baselineSource, error) {
 	data, err := io.ReadAll(io.LimitReader(reader, maxBaselineSourceBytes+1))
 	if err != nil {
-		return baselineDocument{}, fmt.Errorf("read: %w", err)
+		return baselineSource{}, fmt.Errorf("read: %w", err)
 	}
 	if len(data) > maxBaselineSourceBytes {
-		return baselineDocument{}, fmt.Errorf("exceeds %d bytes", maxBaselineSourceBytes)
+		return baselineSource{}, fmt.Errorf("exceeds %d bytes", maxBaselineSourceBytes)
 	}
 	var source baselineSource
 	if err := json.Unmarshal(data, &source); err != nil {
-		return baselineDocument{}, fmt.Errorf("not a JSON result: %w", err)
+		return baselineSource{}, fmt.Errorf("not a JSON result: %w", err)
 	}
-	items := source.Findings
+	return source, nil
+}
+
+// selectedFindings returns the findings of a supported result or scan record,
+// rejecting any other schema version.
+func (source baselineSource) selectedFindings() ([]findings.Finding, error) {
 	switch {
 	case source.RecordSchemaVersion != 0:
 		if source.RecordSchemaVersion != recordSchemaVersion || source.Result == nil {
-			return baselineDocument{}, fmt.Errorf("unsupported record_schema_version %d (this build reads version %d)", source.RecordSchemaVersion, recordSchemaVersion)
+			return nil, fmt.Errorf("unsupported record_schema_version %d (this build reads version %d)", source.RecordSchemaVersion, recordSchemaVersion)
 		}
 		if source.Result.ResultSchemaVersion != jobs.ResultSchemaVersion {
-			return baselineDocument{}, fmt.Errorf("unsupported result_schema_version %d (this build reads version %d)", source.Result.ResultSchemaVersion, jobs.ResultSchemaVersion)
+			return nil, fmt.Errorf("unsupported result_schema_version %d (this build reads version %d)", source.Result.ResultSchemaVersion, jobs.ResultSchemaVersion)
 		}
-		items = source.Result.Findings
+		return source.Result.Findings, nil
 	case source.ResultSchemaVersion != jobs.ResultSchemaVersion:
-		return baselineDocument{}, fmt.Errorf("unsupported result_schema_version %d (this build reads version %d)", source.ResultSchemaVersion, jobs.ResultSchemaVersion)
+		return nil, fmt.Errorf("unsupported result_schema_version %d (this build reads version %d)", source.ResultSchemaVersion, jobs.ResultSchemaVersion)
 	}
-	document := baselineDocument{BaselineSchemaVersion: baselineSchemaVersion, Entries: make([]baselineEntry, 0, len(items))}
+	return source.Findings, nil
+}
+
+// baselineEntriesFrom keeps the actionable findings with a well-formed
+// fingerprint and detector, de-duplicated and sorted.
+func baselineEntriesFrom(items []findings.Finding, reason string) []baselineEntry {
+	entries := make([]baselineEntry, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if item.Disposition != findings.DispositionActionable && item.Disposition != "" {
-			continue
-		}
-		fingerprint := strings.ToLower(strings.TrimSpace(item.Fingerprint))
-		detector := strings.TrimSpace(item.DetectorName)
-		if !fingerprintPattern.MatchString(fingerprint) || !detectorIDPattern.MatchString(detector) {
+		fingerprint, detector, ok := baselineEntryKey(item)
+		if !ok {
 			continue
 		}
 		key := detector + "\x00" + fingerprint
@@ -320,15 +340,33 @@ func baselineFromSource(reader io.Reader, reason string) (baselineDocument, erro
 			continue
 		}
 		seen[key] = struct{}{}
-		document.Entries = append(document.Entries, baselineEntry{Fingerprint: fingerprint, Detector: detector, Reason: reason})
+		entries = append(entries, baselineEntry{Fingerprint: fingerprint, Detector: detector, Reason: reason})
 	}
-	slices.SortFunc(document.Entries, func(left, right baselineEntry) int {
-		if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
-			return value
-		}
-		return strings.Compare(left.Detector, right.Detector)
-	})
-	return document, nil
+	slices.SortFunc(entries, compareBaselineEntries)
+	return entries
+}
+
+// baselineEntryKey returns the normalised fingerprint and detector of an
+// actionable finding, or false when the finding is suppressed or either part
+// is malformed.
+func baselineEntryKey(item findings.Finding) (string, string, bool) {
+	if item.Disposition != findings.DispositionActionable && item.Disposition != "" {
+		return "", "", false
+	}
+	fingerprint := strings.ToLower(strings.TrimSpace(item.Fingerprint))
+	detector := strings.TrimSpace(item.DetectorName)
+	if !fingerprintPattern.MatchString(fingerprint) || !detectorIDPattern.MatchString(detector) {
+		return "", "", false
+	}
+	return fingerprint, detector, true
+}
+
+// compareBaselineEntries orders entries by fingerprint, then detector.
+func compareBaselineEntries(left, right baselineEntry) int {
+	if value := strings.Compare(left.Fingerprint, right.Fingerprint); value != 0 {
+		return value
+	}
+	return strings.Compare(left.Detector, right.Detector)
 }
 
 // writeBaselineFile writes the document with mode 0600, refusing to replace

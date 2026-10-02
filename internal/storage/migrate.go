@@ -1174,21 +1174,9 @@ func checkSchemaVersion(ctx context.Context, queryer schemaQueryer) error {
 	if err != nil {
 		return err
 	}
-	rows, err := queryer.QueryContext(ctx, newSchemaLedger(schema).versionsSQL())
+	versions, err := readSchemaLedgerVersions(ctx, queryer, schema)
 	if err != nil {
-		return fmt.Errorf("read database schema version: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	versions := make([]string, 0, currentMigrationCount)
-	for rows.Next() {
-		var version string
-		if err := rows.Scan(&version); err != nil {
-			return fmt.Errorf("scan database schema version: %w", err)
-		}
-		versions = append(versions, version)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate database schema versions: %w", err)
+		return err
 	}
 	expectedVersions := make([]string, 0, currentMigrationCount)
 	for version := 1; version <= currentMigrationCount; version++ {
@@ -1201,6 +1189,28 @@ func checkSchemaVersion(ctx context.Context, queryer schemaQueryer) error {
 		return fmt.Errorf("database schema ledger says %s, but required schema objects are missing: %w; restore the database or repair the migration", CurrentSchemaVersion, err)
 	}
 	return nil
+}
+
+// readSchemaLedgerVersions returns the versions recorded in the
+// schema_migrations ledger of schema, in the order versionsSQL selects them.
+func readSchemaLedgerVersions(ctx context.Context, queryer schemaQueryer, schema string) ([]string, error) {
+	rows, err := queryer.QueryContext(ctx, newSchemaLedger(schema).versionsSQL())
+	if err != nil {
+		return nil, fmt.Errorf("read database schema version: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	versions := make([]string, 0, currentMigrationCount)
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return nil, fmt.Errorf("scan database schema version: %w", err)
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate database schema versions: %w", err)
+	}
+	return versions, nil
 }
 
 func (s *PostgresStore) Ready(ctx context.Context) error {

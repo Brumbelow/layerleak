@@ -207,6 +207,34 @@ func TestSchemaVersionChecksRejectNewerLedger(t *testing.T) {
 	assertCount(t, db, "SELECT COUNT(*) FROM schema_migrations", 5)
 }
 
+// TestSchemaVersionChecksWrapLedgerReadErrors pins the message prefix of a
+// ledger that cannot be read and of one whose versions are not the current
+// sequence.
+func TestSchemaVersionChecksWrapLedgerReadErrors(t *testing.T) {
+	t.Run("unreadable ledger", func(t *testing.T) {
+		db := openMigratedIntegrationDB(t)
+		defer func() { _ = db.Close() }()
+		if _, err := db.Exec(`ALTER TABLE schema_migrations RENAME COLUMN version TO renamed_version`); err != nil {
+			t.Fatalf("rename ledger column: %v", err)
+		}
+		err := checkSchemaVersion(context.Background(), db)
+		if err == nil || !strings.HasPrefix(err.Error(), "read database schema version: ") {
+			t.Fatalf("checkSchemaVersion() error = %v", err)
+		}
+	})
+	t.Run("missing ledger row", func(t *testing.T) {
+		db := openMigratedIntegrationDB(t)
+		defer func() { _ = db.Close() }()
+		if _, err := db.Exec(`DELETE FROM schema_migrations WHERE version = '0002'`); err != nil {
+			t.Fatalf("delete ledger row: %v", err)
+		}
+		err := checkSchemaVersion(context.Background(), db)
+		if err == nil || !strings.HasPrefix(err.Error(), "database schema ledger has versions [0001 0003") || !strings.HasSuffix(err.Error(), "; run layerleak-migrate-up") {
+			t.Fatalf("checkSchemaVersion() error = %v", err)
+		}
+	})
+}
+
 func TestRunMigrationsReadoptsAfterStorageHardeningRollback(t *testing.T) {
 	db := openMigratedIntegrationDB(t)
 	defer func() { _ = db.Close() }()

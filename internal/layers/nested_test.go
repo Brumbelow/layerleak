@@ -801,3 +801,98 @@ func TestReplayNestedExpansionIsDeterministic(t *testing.T) {
 		t.Fatalf("skips = %v", skips)
 	}
 }
+
+// TestNestedWalkEntryOutcomes covers the per-entry outcomes of the zip and
+// tar walks that a whole replay rarely reaches: entries that fail to open or
+// read, PAX global headers, and an entry that spends the byte allowance.
+func TestNestedWalkEntryOutcomes(t *testing.T) {
+	expand := func(t *testing.T, maxBytes int64, content []byte) ([]Artifact, *nestedExpander) {
+		t.Helper()
+		expander := newNestedExpander("sha256:nested", nestedOptions(maxBytes, 0), Coverage{})
+		return expander.expand("outer", content), expander
+	}
+	paths := func(nested []Artifact) string {
+		return strings.Join(nestedPaths(Artifact{Nested: nested}), ",")
+	}
+	centralHeader := func(t *testing.T, archive []byte) int {
+		t.Helper()
+		offset := bytes.Index(archive, []byte("PK\x01\x02"))
+		if offset < 0 {
+			t.Fatal("no central directory header")
+		}
+		return offset
+	}
+
+	t.Run("zip entry with a bad checksum is malformed and the walk goes on", func(t *testing.T) {
+		archive := zipArchive(t, []zipEntry{{name: "bad.txt", body: "bad"}, {name: "good.txt", body: "good"}})
+		archive[centralHeader(t, archive)+16] ^= 0xff
+		nested, expander := expand(t, 64<<20, archive)
+		if got := paths(nested); got != "outer!good.txt" {
+			t.Fatalf("nested = %q", got)
+		}
+		if skips := skipReasons(expander.skips); strings.Join(skips, ",") != "outer:malformed:1" {
+			t.Fatalf("skips = %v", skips)
+		}
+	})
+
+	t.Run("zip entry with an unknown method is unsupported", func(t *testing.T) {
+		archive := zipArchive(t, []zipEntry{{name: "odd.txt", body: "odd"}, {name: "good.txt", body: "good"}})
+		binary.LittleEndian.PutUint16(archive[centralHeader(t, archive)+10:], 99)
+		nested, expander := expand(t, 64<<20, archive)
+		if got := paths(nested); got != "outer!good.txt" {
+			t.Fatalf("nested = %q", got)
+		}
+		if skips := skipReasons(expander.skips); strings.Join(skips, ",") != "outer:unsupported_method:1" {
+			t.Fatalf("skips = %v", skips)
+		}
+	})
+
+	t.Run("zip entry whose local header is corrupt is malformed", func(t *testing.T) {
+		archive := zipArchive(t, []zipEntry{{name: "first.txt", body: "first"}, {name: "second.txt", body: "second"}})
+		second := bytes.Index(archive[4:], []byte("PK\x03\x04")) + 4
+		archive[second+3] = 0xff
+		nested, expander := expand(t, 64<<20, archive)
+		if got := paths(nested); got != "outer!first.txt" {
+			t.Fatalf("nested = %q", got)
+		}
+		if skips := skipReasons(expander.skips); strings.Join(skips, ",") != "outer:malformed:1" {
+			t.Fatalf("skips = %v", skips)
+		}
+	})
+
+	t.Run("tar global header is not an entry", func(t *testing.T) {
+		archive := tarArchive(t, []tarEntry{
+			{name: "meta", typeflag: tar.TypeXGlobalHeader, paxRecords: map[string]string{"comment": "x"}},
+			{name: "app/.env", body: nestedSecret},
+		})
+		nested, expander := expand(t, 64<<20, archive)
+		if got := paths(nested); got != "outer!app/.env" {
+			t.Fatalf("nested = %q", got)
+		}
+		if expander.entriesSeen != 1 || len(expander.skips) != 0 {
+			t.Fatalf("entriesSeen = %d, skips = %v", expander.entriesSeen, skipReasons(expander.skips))
+		}
+	})
+
+	t.Run("tar entry beyond the byte allowance stops the walk", func(t *testing.T) {
+		archive := tarArchive(t, []tarEntry{{name: "big", body: strings.Repeat("x", 4096)}, {name: "after", body: "after"}})
+		nested, expander := expand(t, 1024, archive)
+		if got := paths(nested); got != "" {
+			t.Fatalf("nested = %q", got)
+		}
+		if skips := skipReasons(expander.skips); strings.Join(skips, ",") != "outer:bytes_limit:1" {
+			t.Fatalf("skips = %v", skips)
+		}
+	})
+
+	t.Run("truncated tar entry is malformed and stops the walk", func(t *testing.T) {
+		archive := tarArchive(t, []tarEntry{{name: "cut", body: strings.Repeat("x", 4096)}, {name: "after", body: "after"}})
+		nested, expander := expand(t, 64<<20, archive[:512+100])
+		if got := paths(nested); got != "" {
+			t.Fatalf("nested = %q", got)
+		}
+		if skips := skipReasons(expander.skips); strings.Join(skips, ",") != "outer:malformed:1" {
+			t.Fatalf("skips = %v", skips)
+		}
+	})
+}

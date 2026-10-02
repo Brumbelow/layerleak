@@ -72,14 +72,29 @@ const maxNestedSkipRecords = 256
 // (.zip, .jar, .war, .whl, .egg), a gzip member or a POSIX/GNU tar archive.
 func nestedArchiveKind(content []byte) string {
 	switch {
-	case len(content) >= 4 && content[0] == 'P' && content[1] == 'K' && content[2] == 0x03 && content[3] == 0x04:
+	case hasZipMagic(content):
 		return "zip"
-	case len(content) >= 2 && content[0] == 0x1f && content[1] == 0x8b:
+	case hasGzipMagic(content):
 		return "gzip"
-	case len(content) >= 263 && (string(content[257:262]) == "ustar"):
+	case hasTarMagic(content):
 		return "tar"
 	}
 	return ""
+}
+
+// hasZipMagic reports a zip local file header signature (PK 03 04).
+func hasZipMagic(content []byte) bool {
+	return len(content) >= 4 && content[0] == 'P' && content[1] == 'K' && content[2] == 0x03 && content[3] == 0x04
+}
+
+// hasGzipMagic reports the gzip member magic (1f 8b).
+func hasGzipMagic(content []byte) bool {
+	return len(content) >= 2 && content[0] == 0x1f && content[1] == 0x8b
+}
+
+// hasTarMagic reports the POSIX/GNU "ustar" magic at offset 257.
+func hasTarMagic(content []byte) bool {
+	return len(content) >= 263 && (string(content[257:262]) == "ustar")
 }
 
 // nestedExpander expands the archives of one layer within the nested bounds
@@ -338,44 +353,66 @@ func (w *archiveWalk) readZip(content []byte) {
 		if !w.admitEntry() {
 			return
 		}
-		mode := file.Mode()
-		if strings.HasSuffix(file.Name, "/") || mode.IsDir() {
-			continue
-		}
-		if mode&fs.ModeSymlink != 0 || !mode.IsRegular() {
-			// Symlinks are never followed and device or socket entries carry
-			// nothing to scan; this mirrors the layer rules.
-			continue
-		}
-		if file.Flags&0x1 != 0 || file.Flags&0x40 != 0 {
-			w.encrypted++
-			continue
-		}
-		name, ok := w.safeInnerPath(file.Name)
-		if !ok {
-			continue
-		}
-		entryReader, err := file.Open()
-		if err != nil {
-			if errors.Is(err, zip.ErrAlgorithm) {
-				w.unsupported++
-			} else {
-				w.malformed++
-			}
-			continue
-		}
-		data, proceed, err := w.readEntry(entryReader)
-		_ = entryReader.Close()
-		if !proceed {
+		if !w.readZipFile(file) {
 			return
 		}
-		if err != nil {
+	}
+}
+
+// readZipFile reads one admitted zip entry. It returns false when the walk
+// must stop (byte allowance spent).
+func (w *archiveWalk) readZipFile(file *zip.File) bool {
+	name, ok := w.zipFileName(file)
+	if !ok {
+		return true
+	}
+	entryReader, err := file.Open()
+	if err != nil {
+		if errors.Is(err, zip.ErrAlgorithm) {
+			w.unsupported++
+		} else {
 			w.malformed++
-			continue
 		}
-		if data != nil {
-			w.files = append(w.files, nestedEntry{name: name, content: data})
-		}
+		return true
+	}
+	data, proceed, err := w.readEntry(entryReader)
+	_ = entryReader.Close()
+	if !proceed {
+		return false
+	}
+	if err != nil {
+		w.malformed++
+		return true
+	}
+	w.keep(name, data)
+	return true
+}
+
+// zipFileName returns the safe inner path of a regular, unencrypted zip
+// entry. ok is false for every other entry, which is skipped (and counted
+// when it is encrypted or its path is unsafe).
+func (w *archiveWalk) zipFileName(file *zip.File) (string, bool) {
+	mode := file.Mode()
+	if strings.HasSuffix(file.Name, "/") || mode.IsDir() {
+		return "", false
+	}
+	if mode&fs.ModeSymlink != 0 || !mode.IsRegular() {
+		// Symlinks are never followed and device or socket entries carry
+		// nothing to scan; this mirrors the layer rules.
+		return "", false
+	}
+	if file.Flags&0x1 != 0 || file.Flags&0x40 != 0 {
+		w.encrypted++
+		return "", false
+	}
+	return w.safeInnerPath(file.Name)
+}
+
+// keep records the content of an entry that was read; nil content (an
+// oversize entry) is not kept.
+func (w *archiveWalk) keep(name string, data []byte) {
+	if data != nil {
+		w.files = append(w.files, nestedEntry{name: name, content: data})
 	}
 }
 
@@ -425,9 +462,7 @@ func (w *archiveWalk) readGzip(outerPath string, content []byte) {
 	if !proceed || err != nil {
 		return
 	}
-	if data != nil {
-		w.files = append(w.files, nestedEntry{name: name, content: data})
-	}
+	w.keep(name, data)
 }
 
 // gzipMemberName picks the inner name of a single gzipped file: the header
@@ -459,67 +494,103 @@ func (w *archiveWalk) readTar(reader io.Reader) {
 			w.malformed++
 			return
 		}
-		if header.Typeflag == tar.TypeXGlobalHeader {
-			continue
-		}
-		if !w.admitEntry() {
+		if !w.readTarEntry(tarReader, header) {
 			return
-		}
-		switch header.Typeflag {
-		case tar.TypeReg, tar.TypeGNUSparse, tar.TypeCont:
-		default:
-			// Directories, symlinks, hardlinks and special files are not
-			// followed or recorded inside a nested archive.
-			continue
-		}
-		name, ok := w.safeInnerPath(header.Name)
-		if !ok {
-			continue
-		}
-		data, proceed, err := w.readEntry(tarReader)
-		if !proceed {
-			return
-		}
-		if err != nil {
-			w.malformed++
-			return
-		}
-		if data != nil {
-			w.files = append(w.files, nestedEntry{name: name, content: data})
 		}
 	}
+}
+
+// readTarEntry reads one tar entry. It returns false when the walk must stop
+// (entry or byte allowance spent, or an unreadable entry).
+func (w *archiveWalk) readTarEntry(tarReader *tar.Reader, header *tar.Header) bool {
+	if header.Typeflag == tar.TypeXGlobalHeader {
+		return true
+	}
+	if !w.admitEntry() {
+		return false
+	}
+	switch header.Typeflag {
+	case tar.TypeReg, tar.TypeGNUSparse, tar.TypeCont:
+	default:
+		// Directories, symlinks, hardlinks and special files are not
+		// followed or recorded inside a nested archive.
+		return true
+	}
+	name, ok := w.safeInnerPath(header.Name)
+	if !ok {
+		return true
+	}
+	data, proceed, err := w.readEntry(tarReader)
+	if !proceed {
+		return false
+	}
+	if err != nil {
+		w.malformed++
+		return false
+	}
+	w.keep(name, data)
+	return true
 }
 
 // finish classifies the entries that were read, charges the layer and image
 // allowances and records the skips. Entries that are archives themselves are
 // counted and left closed.
 func (e *nestedExpander) finish(walk *archiveWalk) []Artifact {
+	e.charge(walk)
+	nested, depth := e.classifyFiles(walk)
+	e.recordWalkSkips(walk, depth)
+	if walk.refused || (walk.malformed > 0 && len(walk.files) == 0 && walk.entriesSeen == 0) {
+		// Nothing was read: the archive is reported but not counted as
+		// expanded.
+		return nil
+	}
+	e.archivesExpanded++
+	return nested
+}
+
+// charge spends the walk's bytes and entries from the layer and image
+// allowances and adds them to the expander's counters.
+func (e *nestedExpander) charge(walk *archiveWalk) {
 	e.layerBytes = saturatingSub(e.layerBytes, walk.bytesRead)
 	e.imageBytes = saturatingSub(e.imageBytes, walk.bytesRead)
 	e.layerEntries = saturatingSub(e.layerEntries, walk.entries)
 	e.imageEntries = saturatingSub(e.imageEntries, walk.entries)
 	e.bytesExpanded += walk.bytesRead
 	e.entriesSeen += int(walk.entries)
+}
 
-	nested := make([]Artifact, 0, len(walk.files))
-	var depth int64
+// classifyFiles turns the walk's files into nested artifacts: text entries,
+// and non-text entries the keep filter selects. Entries that are archives
+// themselves stay closed and are counted in depth.
+func (e *nestedExpander) classifyFiles(walk *archiveWalk) (nested []Artifact, depth int64) {
+	nested = make([]Artifact, 0, len(walk.files))
 	for _, file := range walk.files {
 		innerPath := walk.outerPath + NestedPathSeparator + file.name
 		if nestedArchiveKind(file.content) != "" {
 			depth++
-			if e.options.NestedKeepPath != nil && e.options.NestedKeepPath(innerPath) {
+			if e.keepPath(innerPath) {
 				nested = append(nested, Artifact{Path: innerPath, LayerDigest: e.layerDigest, Type: ArtifactTypeRegularFile, Size: int64(len(file.content)), ContentClass: ContentClassBinaryNUL})
 			}
 			continue
 		}
 		artifact := classifyRegularContent(innerPath, e.layerDigest, file.content, int64(len(file.content)), e.options.MaxFileBytes)
 		e.entriesScanned++
-		if !artifact.Scannable && (e.options.NestedKeepPath == nil || !e.options.NestedKeepPath(innerPath)) {
+		if !artifact.Scannable && !e.keepPath(innerPath) {
 			continue
 		}
 		nested = append(nested, artifact)
 	}
+	return nested, depth
+}
 
+// keepPath reports whether the keep filter selects a non-text nested entry.
+func (e *nestedExpander) keepPath(innerPath string) bool {
+	return e.options.NestedKeepPath != nil && e.options.NestedKeepPath(innerPath)
+}
+
+// recordWalkSkips records why the walk stopped, if it did, and one skip per
+// kind of entry it passed over.
+func (e *nestedExpander) recordWalkSkips(walk *archiveWalk, depth int64) {
 	if walk.stopped != "" {
 		e.skip(walk.outerPath, walk.stopped, walk.entriesSeen, walk.stopLimit)
 	}
@@ -542,13 +613,6 @@ func (e *nestedExpander) finish(walk *archiveWalk) []Artifact {
 			e.skip(walk.outerPath, record.reason, record.count, limit)
 		}
 	}
-	if walk.refused || (walk.malformed > 0 && len(walk.files) == 0 && walk.entriesSeen == 0) {
-		// Nothing was read: the archive is reported but not counted as
-		// expanded.
-		return nil
-	}
-	e.archivesExpanded++
-	return nested
 }
 
 func saturatingSub(value, amount int64) int64 {

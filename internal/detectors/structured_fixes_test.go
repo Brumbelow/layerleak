@@ -87,3 +87,21 @@ func TestAWSSharedCredentialsHonourBOMSectionHeader(t *testing.T) {
 		t.Fatalf("BOM before the key line: %#v", bomKey)
 	}
 }
+
+// The slack_webhook rule is a search pattern: it must report the URL alone
+// wherever it appears, including directly after a word character such as the
+// "n" of a JSON-escaped "\n" or a concatenated prefix.
+func TestSlackWebhookIsFoundAnywhereWithItsOwnSpan(t *testing.T) {
+	// Assembled at run time so no webhook-shaped literal sits in the tree.
+	webhook := "https://hooks.slack.com/services/" + "T0123ABCD" + "/B0456EFGH" + "/abcdefghijklmnop" + "QRSTUVWX"
+	for _, prefix := range []string{"", " ", "url=", "\"", "(", "\n", `text\n`, "x", "9", "_"} {
+		content := prefix + webhook + "\n"
+		match, ok := findDetectorMatch(Default().Scan(ScanInput{Path: "/app/notify.conf", Content: content}), "slack_webhook")
+		if !ok {
+			t.Fatalf("prefix %q: no slack_webhook match", prefix)
+		}
+		if match.Value != webhook || content[match.Start:match.End] != webhook {
+			t.Fatalf("prefix %q: match %q at [%d:%d], want the URL alone", prefix, match.Value, match.Start, match.End)
+		}
+	}
+}

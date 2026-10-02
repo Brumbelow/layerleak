@@ -87,7 +87,11 @@ func Default() Set {
 		newRegexDetector("github_token", regexp.MustCompile(`\b(?:ghr_[A-Za-z0-9]{36,76}|gh[pous]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`), 0, ConfidenceHigh, nil).requiring("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
 		newRegexDetector("gitlab_personal_access_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,300}`+gitlabRoutableTail+`\b`), 0, ConfidenceHigh, nil),
 		newRegexDetector("slack_token", regexp.MustCompile(`\b(?:xox[abeprs]-[0-9]{10,}-[0-9]{10,}-[A-Za-z0-9-]{16,}|xapp-\d-[A-Z0-9]+-\d+-[a-z0-9]+|xoxe\.xox[bp]-\d-[A-Z0-9]{100,}|xoxe-\d-[A-Z0-9]{100,})\b`), 0, ConfidenceHigh, nil).requiring("xox", "xapp-"),
-		newRegexDetector("slack_webhook", regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{16,}`), 0, ConfidenceHigh, nil),
+		// A search pattern, not a URL validator: the webhook is found anywhere in
+		// arbitrary text, so it is deliberately unanchored. The dots of the host
+		// are written as [.] (identical to \.) so the rule reads as the search
+		// it is rather than as a host check.
+		newRegexDetector("slack_webhook", regexp.MustCompile(`https://hooks[.]slack[.]com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{16,}`), 0, ConfidenceHigh, nil).requiring("hooks.slack.com"),
 		newRegexDetector("stripe_api_key", regexp.MustCompile(`\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b`), 0, ConfidenceHigh, nil).requiring("sk_live_", "sk_test_", "rk_live_", "rk_test_"),
 		newRegexDetector("aws_access_key_id", regexp.MustCompile(`\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z0-9]{16}\b`), 0, ConfidenceHigh, nil).requiring("AKIA", "ASIA", "ABIA", "ACCA"),
 		// Matched on the lowercased content: the optional aws[_-]? prefix only moved

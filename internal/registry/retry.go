@@ -2,9 +2,10 @@ package registry
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -38,7 +39,21 @@ func (c *Client) retryDelay(attempt int, response *http.Response) time.Duration 
 	}
 	backoff = min(backoff, retryMaxDelay)
 	half := backoff / 2
-	return half + rand.N(half) //nolint:gosec // backoff jitter is not security sensitive
+	return half + jitter(half)
+}
+
+// jitter returns a uniformly distributed duration in [0, limit). It draws from
+// crypto/rand, so no package-level pseudo-random state is shared between
+// clients; if the system source fails the jitter is simply zero.
+func jitter(limit time.Duration) time.Duration {
+	if limit <= 0 {
+		return 0
+	}
+	var buffer [8]byte
+	if _, err := rand.Read(buffer[:]); err != nil {
+		return 0
+	}
+	return time.Duration(binary.LittleEndian.Uint64(buffer[:]) % uint64(limit)) //nolint:gosec // the remainder is below limit, a positive time.Duration
 }
 
 // parseRetryAfter reads a Retry-After value as delay-seconds or an HTTP-date.

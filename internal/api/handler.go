@@ -851,7 +851,10 @@ func isCleanPath(requestPath string) bool {
 	if requestPath == "" || requestPath[0] != '/' {
 		return false
 	}
-	cleaned := path.Clean(requestPath)
+	// Rooting the argument explicitly keeps Clean from ever seeing a
+	// relative path; requestPath already starts with "/", so this is the same
+	// value and only the comparison below decides.
+	cleaned := path.Clean("/" + strings.TrimPrefix(requestPath, "/"))
 	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
 		cleaned += "/"
 	}
@@ -1304,7 +1307,9 @@ func validRequestID(value string) string {
 		}
 		return ""
 	}
-	return value
+	// The allow-list above already excludes line breaks; removing them again
+	// keeps that guarantee visible where the value reaches the access log.
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\r", ""), "\n", "")
 }
 
 func newRequestID() string {

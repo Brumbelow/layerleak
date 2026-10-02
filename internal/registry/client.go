@@ -675,7 +675,7 @@ func (c *Client) join(parts ...string) string {
 	}
 
 	value := *c.baseURL
-	segments := make([]string, 0, len(parts)+1)
+	var segments []string
 	if trimmed := strings.Trim(value.Path, "/"); trimmed != "" {
 		segments = append(segments, trimmed)
 	}

@@ -155,7 +155,7 @@ func (sensitiveFileDetector) catalogEntries() []catalogEntry {
 		{id: sensitiveFilePrivateKey, strategy: StrategyPathOnly, confidence: ConfidenceMedium},
 		{id: sensitiveFileKeystore, strategy: StrategyPathOnly, confidence: ConfidenceLow},
 		{id: sensitiveFileKeystore, strategy: StrategyPathOnly, confidence: ConfidenceMedium},
-		{id: sensitiveFilePasswordDatabase, strategy: StrategyPathOnly, confidence: ConfidenceMedium},
+		{id: sensitiveFileKeePassVault, strategy: StrategyPathOnly, confidence: ConfidenceMedium},
 		{id: sensitiveFileCredentialStore, strategy: StrategyPathOnly, confidence: ConfidenceMedium},
 		{id: sensitiveFileGPGKeyring, strategy: StrategyPathOnly, confidence: ConfidenceMedium},
 	}

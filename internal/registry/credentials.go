@@ -2,12 +2,12 @@ package registry
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -45,15 +45,24 @@ func (c Credential) GoString() string {
 	return c.String()
 }
 
-// identity is a short, stable digest of the credential that scopes token-cache
-// entries to the identity that obtained them. It cannot be inverted into the
-// password and is not logged.
+// identitySeed keys credential identities for the life of the process. It is
+// random per process and never leaves memory, so an identity cannot be tested
+// against guessed passwords offline.
+var identitySeed = maphash.MakeSeed()
+
+// identity is a short key, stable within the process, that scopes token-cache
+// entries to the credential that obtained them. It is an in-memory cache key
+// only: it is never logged, persisted or compared across processes.
 func (c Credential) identity() string {
 	if c.IsZero() {
 		return "anonymous"
 	}
-	sum := sha256.Sum256([]byte(c.Username + "\x00" + c.Password))
-	return hex.EncodeToString(sum[:8])
+	var hash maphash.Hash
+	hash.SetSeed(identitySeed)
+	_, _ = hash.WriteString(c.Username)
+	_ = hash.WriteByte(0)
+	_, _ = hash.WriteString(c.Password)
+	return strconv.FormatUint(hash.Sum64(), 16)
 }
 
 // basicAuthorization is the Authorization header value for the credential.

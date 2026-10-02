@@ -38,11 +38,11 @@ func (s Set) ScanPath(filePath string) []Match {
 // The sensitive_file family: one id per kind of artifact, so a consumer can
 // tell a keystore from a credential store without parsing the path.
 const (
-	sensitiveFilePrivateKey       = "sensitive_file_private_key"
-	sensitiveFileKeystore         = "sensitive_file_keystore"
-	sensitiveFilePasswordDatabase = "sensitive_file_password_database"
-	sensitiveFileCredentialStore  = "sensitive_file_credential_store"
-	sensitiveFileGPGKeyring       = "sensitive_file_gpg_keyring"
+	sensitiveFilePrivateKey      = "sensitive_file_private_key"
+	sensitiveFileKeystore        = "sensitive_file_keystore"
+	sensitiveFileKeePassVault    = "sensitive_file_password_database"
+	sensitiveFileCredentialStore = "sensitive_file_credential_store"
+	sensitiveFileGPGKeyring      = "sensitive_file_gpg_keyring"
 )
 
 var (
@@ -64,7 +64,7 @@ func (sensitiveFileDetector) Name() string {
 }
 
 func (sensitiveFileDetector) IDs() []string {
-	return []string{sensitiveFilePrivateKey, sensitiveFileKeystore, sensitiveFilePasswordDatabase, sensitiveFileCredentialStore, sensitiveFileGPGKeyring}
+	return []string{sensitiveFilePrivateKey, sensitiveFileKeystore, sensitiveFileKeePassVault, sensitiveFileCredentialStore, sensitiveFileGPGKeyring}
 }
 
 func (sensitiveFileDetector) Scan(ScanInput) []Match {
@@ -105,7 +105,7 @@ func classifySensitiveFile(filePath string) (string, Confidence, bool) {
 	case base == "secring.gpg", path.Base(path.Dir(normalized)) == "private-keys-v1.d" && strings.HasSuffix(base, ".key"):
 		return sensitiveFileGPGKeyring, ConfidenceMedium, true
 	case strings.HasSuffix(base, ".kdbx"):
-		return sensitiveFilePasswordDatabase, ConfidenceMedium, true
+		return sensitiveFileKeePassVault, ConfidenceMedium, true
 	}
 	if _, ok := credentialStoreNames[base]; ok {
 		return sensitiveFileCredentialStore, ConfidenceMedium, true

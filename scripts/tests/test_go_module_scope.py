@@ -1,15 +1,16 @@
 import os
 import pathlib
 import shutil
-import subprocess
+import subprocess  # Runs the resolved go binary with fixed arguments and shell=False.  # nosec B404
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULE_PATH = 'github.com/brumbelow/layerleak/v3'
+GO = shutil.which('go')
 
 
-@unittest.skipIf(shutil.which('go') is None, 'the go command is not installed')
+@unittest.skipIf(GO is None, 'the go command is not installed')
 class GoModuleScopeTests(unittest.TestCase):
     """Go sources shipped inside npm packages must stay outside ./..."""
 
@@ -32,13 +33,15 @@ class GoModuleScopeTests(unittest.TestCase):
 
     def list_packages(self):
         env = dict(os.environ, GOFLAGS='-mod=mod', GOPROXY='off', GOWORK='off')
-        completed = subprocess.run(
-            ['go', 'list', './...'],
+        completed = subprocess.run(  # nosec B603
+            [GO, 'list', './...'],
             cwd=self.root,
             env=env,
             capture_output=True,
             text=True,
             check=False,
+            shell=False,
+            timeout=120,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return completed.stdout.split()

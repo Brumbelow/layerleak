@@ -64,26 +64,12 @@ func (c *Client) hardenHTTPClient() error {
 		return nil
 	}
 	client := *c.httpClient
-	transport := client.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	base, ok := transport.(*http.Transport)
-	if !ok {
-		return fmt.Errorf("custom registry transport requires explicit AllowPrivateHosts test override")
-	}
-	if base.TLSClientConfig != nil && base.TLSClientConfig.InsecureSkipVerify {
-		return fmt.Errorf("registry transport must verify TLS certificates")
+	base, err := hardenableTransport(client.Transport)
+	if err != nil {
+		return err
 	}
 	hardened := base.Clone()
-	if hardened.TLSClientConfig == nil {
-		hardened.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	} else if hardened.TLSClientConfig.MinVersion < tls.VersionTLS12 {
-		hardened.TLSClientConfig.MinVersion = tls.VersionTLS12
-	}
-	if hardened.MaxResponseHeaderBytes <= 0 || hardened.MaxResponseHeaderBytes > maxRegistryResponseHeaderBytes {
-		hardened.MaxResponseHeaderBytes = maxRegistryResponseHeaderBytes
-	}
+	enforceTransportMinimums(hardened)
 
 	pinned := &pinnedTransport{
 		base:        hardened,
@@ -104,6 +90,36 @@ func (c *Client) hardenHTTPClient() error {
 	client.Transport = pinned
 	c.httpClient = &client
 	return nil
+}
+
+// hardenableTransport returns the *http.Transport behind the configured
+// RoundTripper (http.DefaultTransport when unset). Any other RoundTripper, and
+// a transport that skips TLS verification, is refused.
+func hardenableTransport(transport http.RoundTripper) (*http.Transport, error) {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("custom registry transport requires explicit AllowPrivateHosts test override")
+	}
+	if base.TLSClientConfig != nil && base.TLSClientConfig.InsecureSkipVerify {
+		return nil, fmt.Errorf("registry transport must verify TLS certificates")
+	}
+	return base, nil
+}
+
+// enforceTransportMinimums raises the cloned transport to TLS 1.2 at least and
+// bounds its response header size by maxRegistryResponseHeaderBytes.
+func enforceTransportMinimums(hardened *http.Transport) {
+	if hardened.TLSClientConfig == nil {
+		hardened.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else if hardened.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+		hardened.TLSClientConfig.MinVersion = tls.VersionTLS12
+	}
+	if hardened.MaxResponseHeaderBytes <= 0 || hardened.MaxResponseHeaderBytes > maxRegistryResponseHeaderBytes {
+		hardened.MaxResponseHeaderBytes = maxRegistryResponseHeaderBytes
+	}
 }
 
 // boundedTimeout returns the configured transport timeout (or the fallback when
@@ -177,28 +193,38 @@ func (t *pinnedTransport) dialContext(ctx context.Context, network, address stri
 		return nil, fmt.Errorf("registry transport refused an unpinned dial")
 	}
 	if policy.pin == nil {
-		if policy.proxy == "" || !strings.EqualFold(address, policy.proxy) {
-			return nil, fmt.Errorf("registry transport refused a dial outside the selected proxy")
-		}
-		dialCtx, cancel := context.WithTimeout(ctx, t.dialTimeout)
-		defer cancel()
-		return t.dial(dialCtx, network, address)
+		return t.dialProxy(ctx, policy.proxy, network, address)
 	}
 
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || canonicalHostname(host) != policy.pin.host || port != policy.pin.port {
 		return nil, fmt.Errorf("registry transport refused a dial outside the pinned host")
 	}
+	return t.dialPinned(ctx, policy.pin.addresses, network, port)
+}
 
+// dialProxy dials the proxy the round trip selected, and nothing else.
+func (t *pinnedTransport) dialProxy(ctx context.Context, proxy, network, address string) (net.Conn, error) {
+	if proxy == "" || !strings.EqualFold(address, proxy) {
+		return nil, fmt.Errorf("registry transport refused a dial outside the selected proxy")
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, t.dialTimeout)
+	defer cancel()
+	return t.dial(dialCtx, network, address)
+}
+
+// dialPinned tries the validated addresses in order on port, splitting the
+// remaining dial budget evenly across the addresses not yet tried.
+func (t *pinnedTransport) dialPinned(ctx context.Context, addresses []net.IPAddr, network, port string) (net.Conn, error) {
 	deadline := time.Now().Add(t.dialTimeout)
-	errs := make([]error, 0, len(policy.pin.addresses))
-	for index, candidate := range policy.pin.addresses {
+	errs := make([]error, 0, len(addresses))
+	for index, candidate := range addresses {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			errs = append(errs, context.DeadlineExceeded)
 			break
 		}
-		budget := remaining / time.Duration(len(policy.pin.addresses)-index)
+		budget := remaining / time.Duration(len(addresses)-index)
 		dialCtx, cancel := context.WithTimeout(ctx, budget)
 		conn, err := t.dial(dialCtx, network, net.JoinHostPort(ipString(candidate), port))
 		cancel()

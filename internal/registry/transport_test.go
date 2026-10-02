@@ -411,3 +411,98 @@ func TestRequestTimeoutLongerThanDefaultsKeepsBaseHandshakeTimeout(t *testing.T)
 		t.Fatalf("dialTimeout = %s", transport.dialTimeout)
 	}
 }
+
+func TestHardenedTransportBoundsConfiguredResponseHeaderBytes(t *testing.T) {
+	for configured, want := range map[int64]int64{
+		-1:                                 maxRegistryResponseHeaderBytes,
+		maxRegistryResponseHeaderBytes + 1: maxRegistryResponseHeaderBytes,
+		4096:                               4096,
+	} {
+		base := &http.Transport{MaxResponseHeaderBytes: configured}
+		client, err := NewClient(Options{BaseURL: "https://example.com", HTTPClient: &http.Client{Transport: base}})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if got := client.httpClient.Transport.(*pinnedTransport).base.MaxResponseHeaderBytes; got != want {
+			t.Fatalf("MaxResponseHeaderBytes for configured %d = %d, want %d", configured, got, want)
+		}
+		if base.MaxResponseHeaderBytes != configured {
+			t.Fatalf("configured transport was modified: %d", base.MaxResponseHeaderBytes)
+		}
+	}
+}
+
+func TestPinnedDialProxyAndAddressBudget(t *testing.T) {
+	client := MustNewClient(Options{
+		BaseURL: "https://example.com",
+		LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	})
+	transport := client.httpClient.Transport.(*pinnedTransport)
+	var dialed []string
+	failures := map[string]error{}
+	transport.dial = func(_ context.Context, _, address string) (net.Conn, error) {
+		dialed = append(dialed, address)
+		if err := failures[address]; err != nil {
+			return nil, err
+		}
+		left, right := net.Pipe()
+		_ = right.Close()
+		return left, nil
+	}
+
+	proxied := context.WithValue(context.Background(), dialPolicyKey{}, &dialPolicy{proxy: "proxy.example:3128"})
+	if _, err := transport.dialContext(proxied, "tcp", "other.example:3128"); err == nil || err.Error() != "registry transport refused a dial outside the selected proxy" {
+		t.Fatalf("dialContext() to a non-proxy address error = %v", err)
+	}
+	conn, err := transport.dialContext(proxied, "tcp", "PROXY.example:3128")
+	if err != nil {
+		t.Fatalf("dialContext() to the proxy error = %v", err)
+	}
+	_ = conn.Close()
+	if got := strings.Join(dialed, ","); got != "PROXY.example:3128" {
+		t.Fatalf("proxy dials = %q", got)
+	}
+
+	dialed = nil
+	first, second := errors.New("first failed"), errors.New("second failed")
+	failures["93.184.216.34:443"] = first
+	failures["[2001:db8::1]:443"] = second
+	pinned := context.WithValue(context.Background(), dialPolicyKey{}, &dialPolicy{pin: &pinnedAddresses{
+		host:      "example.com",
+		port:      "443",
+		addresses: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}, {IP: net.ParseIP("2001:db8::1")}},
+	}})
+	_, err = transport.dialContext(pinned, "tcp", "Example.com.:443")
+	if !errors.Is(err, first) || !errors.Is(err, second) {
+		t.Fatalf("dialContext() with every address failing error = %v", err)
+	}
+	if got := strings.Join(dialed, ","); got != "93.184.216.34:443,[2001:db8::1]:443" {
+		t.Fatalf("pinned dial order = %q", got)
+	}
+
+	dialed = nil
+	canceled, cancel := context.WithCancel(pinned)
+	defer cancel()
+	transport.dial = func(_ context.Context, _, address string) (net.Conn, error) {
+		dialed = append(dialed, address)
+		cancel()
+		return nil, first
+	}
+	if _, err := transport.dialContext(canceled, "tcp", "example.com:443"); !errors.Is(err, first) || errors.Is(err, second) {
+		t.Fatalf("dialContext() after cancellation error = %v", err)
+	}
+	if len(dialed) != 1 {
+		t.Fatalf("dials after cancellation = %q, want only the first address", dialed)
+	}
+
+	dialed = nil
+	transport.dialTimeout = 0
+	if _, err := transport.dialContext(pinned, "tcp", "example.com:443"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dialContext() with an exhausted budget error = %v", err)
+	}
+	if len(dialed) != 0 {
+		t.Fatalf("dials with an exhausted budget = %q", dialed)
+	}
+}

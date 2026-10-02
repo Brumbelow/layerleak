@@ -57,30 +57,44 @@ func decodeCursor(value, kind string) (cursorPayload, error) {
 	if value == "" || len(value) > maxCursorLength {
 		return cursorPayload{}, errCursorInvalid
 	}
-	body, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return cursorPayload{}, errCursorInvalid
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	var payload cursorPayload
-	if err := decoder.Decode(&payload); err != nil || requireSingleJSONValue(decoder) != nil {
+	payload, ok := unmarshalCursor(value)
+	if !ok {
 		return cursorPayload{}, errCursorInvalid
 	}
 	if payload.Kind != kind || payload.Micros <= 0 {
 		return cursorPayload{}, errCursorInvalid
 	}
-	switch kind {
-	case cursorKindRepository:
-		if payload.ID != 0 || payload.Repository == "" || payload.Registry == "" {
-			return cursorPayload{}, errCursorInvalid
-		}
-	default:
-		if payload.ID <= 0 || payload.Repository != "" || payload.Registry != "" {
-			return cursorPayload{}, errCursorInvalid
-		}
+	if !cursorKeyComplete(payload, kind) {
+		return cursorPayload{}, errCursorInvalid
 	}
 	return payload, nil
+}
+
+// unmarshalCursor decodes the base64url JSON body of a cursor, rejecting
+// unknown fields and any data after the single JSON object.
+func unmarshalCursor(value string) (cursorPayload, bool) {
+	body, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return cursorPayload{}, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var payload cursorPayload
+	if err := decoder.Decode(&payload); err != nil || requireSingleJSONValue(decoder) != nil {
+		return cursorPayload{}, false
+	}
+	return payload, true
+}
+
+// cursorKeyComplete reports whether payload carries exactly the key parts of
+// its kind: repository cursors a repository and registry, the others an ID.
+func cursorKeyComplete(payload cursorPayload, kind string) bool {
+	switch kind {
+	case cursorKindRepository:
+		return payload.ID == 0 && payload.Repository != "" && payload.Registry != ""
+	default:
+		return payload.ID > 0 && payload.Repository == "" && payload.Registry == ""
+	}
 }
 
 // parseCursorParam reads the optional cursor query value. A cursor together

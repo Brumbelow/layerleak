@@ -915,19 +915,12 @@ func parseRegistryFilter(value string) (string, error) {
 // IPv6 literal, each optionally followed by :port, matching the registry
 // grammar manifest.ParseReference applies to image references.
 func validateRegistryHost(value string) error {
-	host := value
 	if strings.HasPrefix(value, "[") {
-		bracketed, port, err := net.SplitHostPort(value)
-		if err != nil || net.ParseIP(bracketed) == nil || !validRegistryPort(port) {
-			return errInvalidRegistryFilter
-		}
-		return nil
+		return validateBracketedRegistryHost(value)
 	}
-	if colon := strings.LastIndexByte(value, ':'); colon >= 0 {
-		if strings.Count(value, ":") != 1 || !validRegistryPort(value[colon+1:]) {
-			return errInvalidRegistryFilter
-		}
-		host = value[:colon]
+	host, err := splitRegistryHostPort(value)
+	if err != nil {
+		return err
 	}
 	if host == "" {
 		return errInvalidRegistryFilter
@@ -935,20 +928,59 @@ func validateRegistryHost(value string) error {
 	if net.ParseIP(host) != nil {
 		return nil
 	}
+	return validateRegistryHostname(host)
+}
+
+// validateBracketedRegistryHost accepts "[IPv6]:port".
+func validateBracketedRegistryHost(value string) error {
+	bracketed, port, err := net.SplitHostPort(value)
+	if err != nil || net.ParseIP(bracketed) == nil || !validRegistryPort(port) {
+		return errInvalidRegistryFilter
+	}
+	return nil
+}
+
+// splitRegistryHostPort strips an optional single ":port" suffix, rejecting a
+// second colon or an out-of-range port.
+func splitRegistryHostPort(value string) (string, error) {
+	colon := strings.LastIndexByte(value, ':')
+	if colon < 0 {
+		return value, nil
+	}
+	if strings.Count(value, ":") != 1 || !validRegistryPort(value[colon+1:]) {
+		return "", errInvalidRegistryFilter
+	}
+	return value[:colon], nil
+}
+
+// validateRegistryHostname accepts a lowercase DNS name of at most 253 bytes
+// whose labels are 1-63 bytes of [a-z0-9-] not starting or ending with '-'.
+func validateRegistryHostname(host string) error {
 	if len(host) > 253 {
 		return errInvalidRegistryFilter
 	}
 	for _, label := range strings.Split(host, ".") {
-		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+		if !validRegistryHostLabel(label) {
 			return errInvalidRegistryFilter
-		}
-		for _, r := range label {
-			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
-				return errInvalidRegistryFilter
-			}
 		}
 	}
 	return nil
+}
+
+func validRegistryHostLabel(label string) bool {
+	if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+		return false
+	}
+	for _, r := range label {
+		if invalidRegistryHostRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func invalidRegistryHostRune(r rune) bool {
+	return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-'
 }
 
 func validRegistryPort(value string) bool {
@@ -1045,18 +1077,33 @@ func classifyScanError(scanCtx, requestCtx context.Context, err error, draining 
 	case errors.Is(scanCtx.Err(), context.DeadlineExceeded):
 		return scanFailure{status: http.StatusGatewayTimeout, code: "scan_timeout", message: "the scan exceeded its configured deadline"}
 	case jobs.IsIncomplete(err):
-		var incomplete *jobs.IncompleteError
-		if errors.As(err, &incomplete) && incomplete != nil {
-			return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: fmt.Sprintf(
-				"scan coverage is %s: %d manifest(s) completed, %d failed",
-				incomplete.Status,
-				incomplete.CompletedManifestCount,
-				incomplete.FailedManifestCount,
-			)}
-		}
-		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: "the scan did not cover every selected manifest"}
+		return incompleteScanFailure(err)
 	case limits.IsExceeded(err):
 		return limitExceededFailure(err)
+	default:
+		return registryScanFailure(err)
+	}
+}
+
+// incompleteScanFailure reports the manifest counts of an incomplete scan as
+// 422 scan_incomplete, or a fixed message when the typed error is absent.
+func incompleteScanFailure(err error) scanFailure {
+	var incomplete *jobs.IncompleteError
+	if errors.As(err, &incomplete) && incomplete != nil {
+		return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: fmt.Sprintf(
+			"scan coverage is %s: %d manifest(s) completed, %d failed",
+			incomplete.Status,
+			incomplete.CompletedManifestCount,
+			incomplete.FailedManifestCount,
+		)}
+	}
+	return scanFailure{status: http.StatusUnprocessableEntity, code: "scan_incomplete", message: "the scan did not cover every selected manifest"}
+}
+
+// registryScanFailure maps the remaining, registry-side failures; anything
+// unrecognised is a generic 502 scan_failed.
+func registryScanFailure(err error) scanFailure {
+	switch {
 	case registry.IsNotFound(err):
 		return scanFailure{status: http.StatusNotFound, code: "image_not_found", message: "the requested image was not found in the registry"}
 	case registry.IsRateLimited(err):

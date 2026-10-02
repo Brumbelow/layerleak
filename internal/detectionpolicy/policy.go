@@ -45,6 +45,15 @@ func DiscardReason(value string) string {
 }
 
 func ExampleReason(filePath, key, line, value string) string {
+	if reason := strongExampleReason(filePath, key, line, value); reason != ReasonNone {
+		return reason
+	}
+	return weakExampleReason(filePath, key, line, value)
+}
+
+// strongExampleReason returns the reason of the first signal that alone
+// marks a value as example material, or ReasonNone.
+func strongExampleReason(filePath, key, line, value string) string {
 	if TestPathReason(filePath) != ReasonNone {
 		return ReasonTestPath
 	}
@@ -64,10 +73,12 @@ func ExampleReason(filePath, key, line, value string) string {
 		return ReasonPlaceholderMarker
 	}
 
-	if reason := credentialPairReason(value); reason != ReasonNone {
-		return reason
-	}
+	return credentialPairReason(value)
+}
 
+// weakExampleReason counts the signals that only suggest example material
+// and returns the first one's reason when at least two are present.
+func weakExampleReason(filePath, key, line, value string) string {
 	weakSignals := 0
 	reason := ReasonNone
 	if hasWeakExamplePathSignal(filePath) {

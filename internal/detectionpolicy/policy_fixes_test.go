@@ -131,3 +131,35 @@ func TestDefaultCredentialPairsAreSuppressedNotDiscarded(t *testing.T) {
 		})
 	}
 }
+
+// TestExampleReasonSignalPrecedence pins which reason wins when several
+// signals apply: test path, example filename, known dummy value, placeholder
+// marker and default credentials in that order, each ahead of the weak
+// signals, and among weak signals the first one counted.
+func TestExampleReasonSignalPrecedence(t *testing.T) {
+	const credentials = "postgres://postgres:postgres@localhost:5432/app"
+	tests := []struct {
+		name     string
+		filePath string
+		key      string
+		line     string
+		value    string
+		want     string
+	}{
+		{name: "test path first", filePath: "app/tests/config.example", key: "FAKE_API_KEY", line: "FAKE_API_KEY=YOUR_TOKEN_HERE", value: "YOUR_TOKEN_HERE", want: ReasonTestPath},
+		{name: "example filename next", filePath: "app/config.example", key: "FAKE_API_KEY", line: "FAKE_API_KEY=YOUR_TOKEN_HERE", value: "YOUR_TOKEN_HERE", want: ReasonExamplePath},
+		{name: "known dummy value next", filePath: "etc/config.yaml", key: "FAKE_API_KEY", line: "FAKE_API_KEY=YOUR_TOKEN_HERE", value: "YOUR_TOKEN_HERE", want: ReasonKnownDummyValue},
+		{name: "placeholder marker before default credentials", filePath: "etc/config.yaml", key: "FAKE_DATABASE_URL", line: "FAKE_DATABASE_URL=" + credentials, value: credentials, want: ReasonPlaceholderMarker},
+		{name: "default credentials before weak signals", filePath: "docs/usage.md", key: "EXAMPLE_DATABASE_URL", line: "EXAMPLE_DATABASE_URL=" + credentials, value: credentials, want: ReasonDefaultCredentials},
+		{name: "template filename before path marker", filePath: "srv/fake/app.conf.template", key: "TOKEN", line: "TOKEN=s3cr3tvalue", value: "s3cr3tvalue", want: ReasonExamplePath},
+		{name: "path marker before reserved host", filePath: "srv/fake/app.conf", key: "TOKEN", line: "TOKEN=s3cr3tvalue # localhost", value: "s3cr3tvalue", want: ReasonPlaceholderMarker},
+		{name: "one weak signal is not enough", filePath: "srv/fake/app.conf", key: "TOKEN", line: "TOKEN=s3cr3tvalue", value: "s3cr3tvalue", want: ReasonNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ExampleReason(tt.filePath, tt.key, tt.line, tt.value); got != tt.want {
+				t.Fatalf("ExampleReason(%q, %q, %q, %q) = %q, want %q", tt.filePath, tt.key, tt.line, tt.value, got, tt.want)
+			}
+		})
+	}
+}

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Validate SARIF 2.1.0 files against the OASIS schema.
+"""
+Validate SARIF 2.1.0 files against the OASIS schema.
 
 The schema is fetched from json.schemastore.org and pinned by SHA-256 so a
 silently changed copy fails closed; pass --schema to use a local file instead
@@ -30,7 +31,8 @@ def fetch_schema(cache_dir: str | None) -> dict:
     cached = os.path.join(cache_dir, f'sarif-2.1.0-{SCHEMA_SHA256[:16]}.json')
     if not os.path.exists(cached):
         request = urllib.request.Request(SCHEMA_URL, headers={'User-Agent': 'layerleak-validate-sarif'})
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - fixed https URL
+        # A constant https URL whose payload is pinned by SHA-256 below.
+        with urllib.request.urlopen(request, timeout=60) as response:  # nosec B310 # noqa: S310
             payload = response.read(MAX_SCHEMA_BYTES + 1)
         if len(payload) > MAX_SCHEMA_BYTES:
             raise SystemExit('schema download exceeded the size bound')

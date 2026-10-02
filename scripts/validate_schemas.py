@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Validate Layerleak's published JSON Schemas and the fixtures they govern.
+"""
+Validate Layerleak's published JSON Schemas and the fixtures they govern.
 
 Checks that web/docs/schemas/result-v2.schema.json and
 scan-record-v2.schema.json are valid JSON Schema 2020-12 documents, then
@@ -42,6 +43,7 @@ class Validators:
     """The two schema validators sharing one reference registry."""
 
     def __init__(self, root: str):
+        """Load both schemas from root, check them, and share one registry."""
         result_schema = load_json(os.path.join(root, RESULT_SCHEMA))
         record_schema = load_json(os.path.join(root, RECORD_SCHEMA))
         for schema in (result_schema, record_schema):

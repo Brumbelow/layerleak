@@ -184,8 +184,31 @@ def expected_cli_archives(version):
     return sorted(cli_archive_name(version, goos, goarch) for goos, goarch in CLI_TARGETS)
 
 
+def _checksum_lines(text):
+    """Yield (line number, line) after checking the file's size and line endings."""
+    if not text or len(text) > MAX_CHECKSUMS_BYTES:
+        raise ValueError(f'checksums file must contain at most {MAX_CHECKSUMS_BYTES} bytes and at least one line')
+    if '\r' in text or not text.endswith('\n'):
+        raise ValueError('checksums file must use LF line endings and end with a newline')
+    return enumerate(text[:-1].split('\n'), 1)
+
+
+def _checksum_entry(number, line, entries, expected):
+    """Parse one checksums line, rejecting malformed, duplicate and unexpected names."""
+    match = CHECKSUM_LINE.fullmatch(line)
+    if not match:
+        raise ValueError(f'checksums line {number} is not "<sha256>  <archive>"')
+    digest, name = match.groups()
+    if name in entries:
+        raise ValueError(f'checksums list {name} twice')
+    if name not in expected:
+        raise ValueError(f'checksums name unexpected archive {name}')
+    return name, digest
+
+
 def parse_cli_checksums(text, version):
-    """Parse a sha256sum-format checksums file that names exactly the expected archives.
+    """
+    Parse a sha256sum-format checksums file that names exactly the expected archives.
 
     Returns an ordered mapping of archive name to lowercase hex digest. The file
     must use LF line endings, end with a newline, carry two-space separators
@@ -193,20 +216,9 @@ def parse_cli_checksums(text, version):
     sorted order with no duplicates, omissions or extras.
     """
     expected = expected_cli_archives(version)
-    if not text or len(text) > MAX_CHECKSUMS_BYTES:
-        raise ValueError(f'checksums file must contain at most {MAX_CHECKSUMS_BYTES} bytes and at least one line')
-    if '\r' in text or not text.endswith('\n'):
-        raise ValueError('checksums file must use LF line endings and end with a newline')
     entries = {}
-    for number, line in enumerate(text[:-1].split('\n'), 1):
-        match = CHECKSUM_LINE.fullmatch(line)
-        if not match:
-            raise ValueError(f'checksums line {number} is not "<sha256>  <archive>"')
-        digest, name = match.groups()
-        if name in entries:
-            raise ValueError(f'checksums list {name} twice')
-        if name not in expected:
-            raise ValueError(f'checksums name unexpected archive {name}')
+    for number, line in _checksum_lines(text):
+        name, digest = _checksum_entry(number, line, entries, expected)
         entries[name] = digest
     missing = [name for name in expected if name not in entries]
     if missing:

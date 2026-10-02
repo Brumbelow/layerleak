@@ -370,7 +370,8 @@ def _web_default(cell):
 
 
 def validate_web_variables(root: Path):
-    """Keep the site's configuration tables in step with README in both directions.
+    """
+    Keep the site's configuration tables in step with README in both directions.
 
     Every LAYERLEAK_* variable the site mentions must have a README table row,
     every README row must have a site table row, and both must state the same

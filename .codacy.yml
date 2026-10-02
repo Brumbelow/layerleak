@@ -2,7 +2,16 @@
 engines:
   revive:
     exclude_paths:
+      - "go.mod"
       - "go.sum"
+  # Lizard's function-length and complexity limits are applied to production
+  # code. Test files are excluded: table-driven tests and fixture builders are
+  # long by design, and splitting them would not make them safer to read.
+  lizard:
+    exclude_paths:
+      - "**/*_test.go"
+      - "scripts/tests/**"
+      - "scripts/test_*.py"
 exclude_paths:
   - ".github/**"
   - "migrations/**"

@@ -78,7 +78,8 @@
   }
 
   function stepFrame(index) {
-    const frame = state.data.frames[index];
+    const frame = state.data.frames.at(index);
+    if (!frame) return;
     terminalEl.textContent = frame.terminal;
     renderStatus(frame.status);
     terminalEl.scrollTop = terminalEl.scrollHeight;
@@ -200,8 +201,10 @@
       else if (event.key === "End") next = tabs.length - 1;
       else return;
       event.preventDefault();
-      tabs[next].focus();
-      selectTable(tabs[next].dataset.table);
+      const target = tabs.at(next);
+      if (!target) return;
+      target.focus();
+      selectTable(target.dataset.table);
     });
   }
 

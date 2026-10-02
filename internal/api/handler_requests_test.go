@@ -250,6 +250,39 @@ func TestInvalidPathAndQueryParametersAreRejected(t *testing.T) {
 	}
 }
 
+// TestRepositoryFindingsQueryValidationOrder pins which 400 message wins when
+// several query parameters of the repository findings route are invalid:
+// disposition, then pagination, then registry, then cursor.
+func TestRepositoryFindingsQueryValidationOrder(t *testing.T) {
+	const base = "/api/v1/repositories/library/app/findings?"
+	tests := []struct {
+		query   string
+		message string
+	}{
+		{query: "disposition=everything&limit=abc&registry=bad_host&cursor=bogus", message: "disposition must be one of actionable, suppressed, or all"},
+		{query: "disposition=all&limit=abc&registry=bad_host&cursor=bogus", message: "limit must be an integer"},
+		{query: "disposition=all&offset=-1&registry=bad_host&cursor=bogus", message: "offset must be greater than or equal to zero"},
+		{query: "disposition=all&limit=5&registry=bad_host&cursor=bogus", message: errInvalidRegistryFilter.Error()},
+		{query: "disposition=all&limit=5&registry=quay.io&cursor=bogus", message: "cursor is invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			store := &stubReadStore{}
+			recorder := serve(NewHandler(&stubScanner{}, store), http.MethodGet, base+test.query)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+			}
+			errorObject, _ := decodeErrorBody(t, recorder.Body.Bytes())
+			if errorObject["code"] != "invalid_request" || errorObject["message"] != test.message {
+				t.Fatalf("error = %v", errorObject)
+			}
+			if store.limit != 0 {
+				t.Fatalf("store was queried: %+v", store)
+			}
+		})
+	}
+}
+
 // TestPaginationClampsLimitAndDefaults pins the documented clamp: limit above
 // 200 is reduced to 200 rather than rejected.
 func TestPaginationClampsLimitAndDefaults(t *testing.T) {

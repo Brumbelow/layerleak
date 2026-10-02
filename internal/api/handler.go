@@ -604,49 +604,63 @@ func (h *Handler) handleListRepositoryFindings(writer http.ResponseWriter, reque
 		return
 	}
 
-	disposition, err := parseDispositionFilter(request.URL.Query().Get("disposition"))
-	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	limit, offset, err := parsePagination(request.URL.Query())
-	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	registry, err := parseRegistryFilter(request.URL.Query().Get("registry"))
-	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	cursor, err := parseCursorParam(request.URL.Query(), cursorKindFinding, offset)
+	query, err := parseRepositoryFindingsQuery(request.URL.Query())
 	if err != nil {
 		writeAPIError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), h.options.QueryTimeout)
 	defer cancel()
-	items, err := h.store.ListRepositoryFindings(ctx, registry, repository, disposition, limit, offset, findingCursorFrom(cursor))
+	items, err := h.store.ListRepositoryFindings(ctx, query.registry, repository, query.disposition, query.limit, query.offset, findingCursorFrom(query.cursor))
 	if err != nil {
 		h.writeStorageError(writer, "list repository findings", err)
 		return
 	}
 
 	response := repositoryFindingsResponse{
-		Registry:    registry,
+		Registry:    query.registry,
 		Repository:  repository,
 		Findings:    make([]findingSummaryItem, 0, len(items)),
-		Disposition: string(disposition),
-		Limit:       limit,
-		Offset:      offset,
-		NextCursor:  nextFindingCursor(items, limit),
+		Disposition: string(query.disposition),
+		Limit:       query.limit,
+		Offset:      query.offset,
+		NextCursor:  nextFindingCursor(items, query.limit),
 	}
 	for _, item := range items {
 		response.Findings = append(response.Findings, mapFindingSummary(item))
 	}
 
 	writeJSON(writer, http.StatusOK, response)
+}
+
+// repositoryFindingsQuery holds the validated query parameters of
+// GET /api/v1/repositories/{repository}/findings.
+type repositoryFindingsQuery struct {
+	disposition storage.FindingDispositionFilter
+	registry    string
+	limit       int
+	offset      int
+	cursor      *cursorPayload
+}
+
+// parseRepositoryFindingsQuery validates the disposition, pagination,
+// registry and cursor parameters in that order and returns the first error.
+func parseRepositoryFindingsQuery(values url.Values) (repositoryFindingsQuery, error) {
+	var query repositoryFindingsQuery
+	var err error
+	if query.disposition, err = parseDispositionFilter(values.Get("disposition")); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	if query.limit, query.offset, err = parsePagination(values); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	if query.registry, err = parseRegistryFilter(values.Get("registry")); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	if query.cursor, err = parseCursorParam(values, cursorKindFinding, query.offset); err != nil {
+		return repositoryFindingsQuery{}, err
+	}
+	return query, nil
 }
 
 func (h *Handler) handleGetScan(writer http.ResponseWriter, request *http.Request) {

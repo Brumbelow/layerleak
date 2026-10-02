@@ -187,30 +187,41 @@ func (d *dockerArchive) selectImage(ctx context.Context, identifier string) (*do
 		return d.image(ctx, 0)
 	}
 	if manifest.ValidateDigest(identifier) == nil {
-		// An image over a configured limit has no synthesised manifest and so
-		// no digest; skip it so an unrelated oversize image cannot make the
-		// others unselectable, and report the limit only when nothing matches.
-		var skipped error
-		for index := range d.entries {
-			image, err := d.image(ctx, index)
-			if err != nil {
-				if limits.IsExceeded(err) {
-					if skipped == nil {
-						skipped = err
-					}
-					continue
-				}
-				return nil, err
-			}
-			if image.digest == identifier {
-				return image, nil
-			}
-		}
-		if skipped != nil {
-			return nil, fmt.Errorf("docker archive %s has no in-limit image with digest %s: %w", d.location, identifier, skipped)
-		}
-		return nil, fmt.Errorf("docker archive %s has no image with digest %s", d.location, identifier)
+		return d.selectImageByDigest(ctx, identifier)
 	}
+	return d.selectImageByName(ctx, identifier)
+}
+
+// selectImageByDigest returns the image whose synthesised manifest has the
+// digest. An image over a configured limit has no synthesised manifest and so
+// no digest; it is skipped so an unrelated oversize image cannot make the
+// others unselectable, and the limit is reported only when nothing matches.
+func (d *dockerArchive) selectImageByDigest(ctx context.Context, identifier string) (*dockerImage, error) {
+	var skipped error
+	for index := range d.entries {
+		image, err := d.image(ctx, index)
+		if err != nil {
+			if limits.IsExceeded(err) {
+				if skipped == nil {
+					skipped = err
+				}
+				continue
+			}
+			return nil, err
+		}
+		if image.digest == identifier {
+			return image, nil
+		}
+	}
+	if skipped != nil {
+		return nil, fmt.Errorf("docker archive %s has no in-limit image with digest %s: %w", d.location, identifier, skipped)
+	}
+	return nil, fmt.Errorf("docker archive %s has no image with digest %s", d.location, identifier)
+}
+
+// selectImageByName returns the one image carrying the name, compared after
+// normalizeImageName.
+func (d *dockerArchive) selectImageByName(ctx context.Context, identifier string) (*dockerImage, error) {
 	wanted := normalizeImageName(identifier)
 	matches := make([]int, 0, 1)
 	for index := range d.entries {
@@ -246,26 +257,66 @@ func (d *dockerArchive) image(ctx context.Context, index int) (*dockerImage, err
 		return nil, err
 	}
 	entry := d.entries[index]
-	if d.options.MaxImageLayers > 0 && len(entry.Layers) > d.options.MaxImageLayers {
-		return nil, fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.Kind("image_layers"), int64(d.options.MaxImageLayers), "image manifest"))
-	}
-	if int64(len(entry.Layers)) > d.options.MaxManifestBytes/minLayerDescriptorJSONBytes {
-		return nil, fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.KindManifestBytes, d.options.MaxManifestBytes, "synthesised image manifest"))
+	if err := d.checkLayerCount(index, len(entry.Layers)); err != nil {
+		return nil, err
 	}
 	blobs := make(map[string]string, len(entry.Layers)+1)
 
-	configName, err := cleanArchivePath(entry.Config)
+	configDescriptor, err := d.describeConfig(ctx, index, entry.Config, blobs)
 	if err != nil {
-		return nil, fmt.Errorf("docker archive %s: image %d config: %w", d.location, index, err)
+		return nil, err
+	}
+	layers, err := d.describeLayers(ctx, index, entry.Layers, blobs)
+	if err != nil {
+		return nil, err
+	}
+
+	body, digest, err := d.encodeImageManifest(index, configDescriptor, layers)
+	if err != nil {
+		return nil, err
+	}
+	image := &dockerImage{digest: digest, body: body, blobs: blobs}
+	d.images[index] = image
+	for blobDigest, name := range blobs {
+		d.blobs[blobDigest] = name
+	}
+	return image, nil
+}
+
+// checkLayerCount refuses a layer list longer than Options.MaxImageLayers, or
+// one whose manifest could not fit Options.MaxManifestBytes, before anything
+// is hashed.
+func (d *dockerArchive) checkLayerCount(index, layerCount int) error {
+	if d.options.MaxImageLayers > 0 && layerCount > d.options.MaxImageLayers {
+		return fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.Kind("image_layers"), int64(d.options.MaxImageLayers), "image manifest"))
+	}
+	if int64(layerCount) > d.options.MaxManifestBytes/minLayerDescriptorJSONBytes {
+		return fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.KindManifestBytes, d.options.MaxManifestBytes, "synthesised image manifest"))
+	}
+	return nil
+}
+
+// describeConfig hashes the config entry of an image and records it in blobs.
+// The caller holds d.mu.
+func (d *dockerArchive) describeConfig(ctx context.Context, index int, configPath string, blobs map[string]string) (manifest.Descriptor, error) {
+	configName, err := cleanArchivePath(configPath)
+	if err != nil {
+		return manifest.Descriptor{}, fmt.Errorf("docker archive %s: image %d config: %w", d.location, index, err)
 	}
 	configDescriptor, err := d.describeEntry(ctx, configName, manifest.MediaTypeDockerContainerConfig)
 	if err != nil {
-		return nil, fmt.Errorf("docker archive %s: image %d config: %w", d.location, index, err)
+		return manifest.Descriptor{}, fmt.Errorf("docker archive %s: image %d config: %w", d.location, index, err)
 	}
 	blobs[configDescriptor.Digest] = configName
+	return configDescriptor, nil
+}
 
-	layers := make([]manifest.Descriptor, 0, len(entry.Layers))
-	for position, layerPath := range entry.Layers {
+// describeLayers hashes the layer entries of an image in order and records
+// them in blobs. Two different entries with the same digest are refused. The
+// caller holds d.mu.
+func (d *dockerArchive) describeLayers(ctx context.Context, index int, layerPaths []string, blobs map[string]string) ([]manifest.Descriptor, error) {
+	layers := make([]manifest.Descriptor, 0, len(layerPaths))
+	for position, layerPath := range layerPaths {
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
@@ -283,7 +334,12 @@ func (d *dockerArchive) image(ctx context.Context, index int) (*dockerImage, err
 		blobs[descriptor.Digest] = layerName
 		layers = append(layers, descriptor)
 	}
+	return layers, nil
+}
 
+// encodeImageManifest encodes the synthesised image manifest, refuses one
+// over Options.MaxManifestBytes and returns it with its digest.
+func (d *dockerArchive) encodeImageManifest(index int, configDescriptor manifest.Descriptor, layers []manifest.Descriptor) ([]byte, string, error) {
 	body, err := json.Marshal(manifest.ImageManifest{
 		SchemaVersion: 2,
 		MediaType:     manifest.MediaTypeDockerSchema2Manifest,
@@ -291,21 +347,16 @@ func (d *dockerArchive) image(ctx context.Context, index int) (*dockerImage, err
 		Layers:        layers,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("docker archive %s: encode manifest: %w", d.location, err)
+		return nil, "", fmt.Errorf("docker archive %s: encode manifest: %w", d.location, err)
 	}
 	if int64(len(body)) > d.options.MaxManifestBytes {
-		return nil, fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.KindManifestBytes, d.options.MaxManifestBytes, "synthesised image manifest"))
+		return nil, "", fmt.Errorf("docker archive %s: image %d: %w", d.location, index, limits.NewExceeded(limits.KindManifestBytes, d.options.MaxManifestBytes, "synthesised image manifest"))
 	}
 	digest, err := manifest.DigestBytes("sha256", body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	image := &dockerImage{digest: digest, body: body, blobs: blobs}
-	d.images[index] = image
-	for blobDigest, name := range blobs {
-		d.blobs[blobDigest] = name
-	}
-	return image, nil
+	return body, digest, nil
 }
 
 // describeEntry returns the descriptor of one archive entry, hashing it the

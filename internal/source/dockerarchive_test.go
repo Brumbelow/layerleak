@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -204,5 +205,75 @@ func TestDockerArchiveDigestSelectionSkipsAnOverLimitImage(t *testing.T) {
 	exceeded, ok := limits.AsExceeded(err)
 	if !ok || exceeded.Kind != limits.Kind("image_layers") || !strings.Contains(err.Error(), missing) {
 		t.Fatalf("FetchManifest(@unknown digest) with an over-limit image error = %v", err)
+	}
+}
+
+// Layer entries are validated, hashed and deduplicated in manifest.json
+// order, and the errors name the image and layer position.
+func TestDockerArchiveReportsLayerEntryErrors(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, layers ...string) string {
+		path := filepath.Join(dir, name)
+		writeFile(t, path, tarBytes(t, []tarFile{
+			{name: "config.json", body: configJSON(t, linuxAMD64)},
+			{name: "a.tar", body: []byte("same bytes")},
+			{name: "b.tar", body: []byte("same bytes")},
+			{name: dockerManifestName, body: mustJSON(t, []dockerManifestEntry{{Config: "config.json", RepoTags: []string{"app:1"}, Layers: layers}})},
+		}))
+		return path
+	}
+	ctx := context.Background()
+
+	unsafe := write("unsafe.tar", "a.tar", "../a.tar")
+	_, err := openSource(t, "docker-archive:"+unsafe, Options{}).FetchManifest(ctx, "", "app:1")
+	if !errors.Is(err, errUnsafeArchivePath) || !strings.HasPrefix(err.Error(), "docker archive "+unsafe+": image 0 layer 1: ") {
+		t.Fatalf("unsafe layer path error = %v", err)
+	}
+
+	missing := write("missing.tar", "a.tar", "a.tar", "c.tar")
+	_, err = openSource(t, "docker-archive:"+missing, Options{}).FetchManifest(ctx, "", "app:1")
+	if !errors.Is(err, os.ErrNotExist) || !strings.HasPrefix(err.Error(), "docker archive "+missing+": image 0 layer 2: ") {
+		t.Fatalf("missing layer error = %v", err)
+	}
+
+	duplicate := write("duplicate.tar", "a.tar", "b.tar")
+	_, err = openSource(t, "docker-archive:"+duplicate, Options{}).FetchManifest(ctx, "", "app:1")
+	if err == nil || err.Error() != "docker archive "+duplicate+": image 0: entries a.tar and b.tar have the same digest" {
+		t.Fatalf("duplicate digest error = %v", err)
+	}
+}
+
+// An archive with several images needs a selector; a name carried by two
+// images or a digest no image has is refused with the matching message.
+func TestDockerArchiveSelectionErrors(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "two.tar")
+	writeFile(t, archive, tarBytes(t, []tarFile{
+		{name: "one.json", body: configJSON(t, linuxAMD64, "IMAGE=one")},
+		{name: "two.json", body: configJSON(t, linuxAMD64, "IMAGE=two")},
+		{name: dockerManifestName, body: mustJSON(t, []dockerManifestEntry{
+			{Config: "one.json", RepoTags: []string{"app:shared", "app:one"}},
+			{Config: "two.json", RepoTags: []string{"docker.io/library/app:shared"}},
+		})},
+	}))
+	opened := openSource(t, "docker-archive:"+archive, Options{})
+	ctx := context.Background()
+
+	if _, err := opened.FetchManifest(ctx, "", " "); err == nil || !strings.HasPrefix(err.Error(), "docker archive "+archive+" holds 2 images; select one with") {
+		t.Fatalf("FetchManifest(\"\") error = %v", err)
+	}
+	if _, err := opened.FetchManifest(ctx, "", "app:shared"); err == nil || err.Error() != "docker archive "+archive+` names 2 images "app:shared"; select one with @<digest>` {
+		t.Fatalf("FetchManifest(app:shared) error = %v", err)
+	}
+	absent := "sha256:" + strings.Repeat("0", 64)
+	if _, err := opened.FetchManifest(ctx, "", absent); err == nil || err.Error() != "docker archive "+archive+" has no image with digest "+absent {
+		t.Fatalf("FetchManifest(absent digest) error = %v", err)
+	}
+	one, err := opened.FetchManifest(ctx, "", "app:one")
+	if err != nil {
+		t.Fatalf("FetchManifest(app:one) error = %v", err)
+	}
+	byDigest, err := opened.FetchManifest(ctx, "", one.Digest)
+	if err != nil || byDigest.Digest != one.Digest {
+		t.Fatalf("FetchManifest(@digest) = %s, %v; want %s", byDigest.Digest, err, one.Digest)
 	}
 }

@@ -1062,31 +1062,52 @@ func nestedSkipDiagnostics(detectorSet detectors.Set, manifestDigest string, res
 
 func nestedSkipMessage(detectorSet detectors.Set, skip layers.NestedSkip) string {
 	prefix := fmt.Sprintf("nested archive %s in layer %s: ", redactedDiagnosticPath(detectorSet, skip.Path), strings.TrimSpace(skip.LayerDigest))
+	if detail, ok := nestedSkipLimitDetail(skip); ok {
+		return prefix + detail
+	}
+	if detail, ok := nestedSkipEntryDetail(skip); ok {
+		return prefix + detail
+	}
+	return prefix + string(skip.Reason)
+}
+
+// nestedSkipLimitDetail words the skips that a size, entry, budget or
+// retention limit caused; ok is false for any other reason.
+func nestedSkipLimitDetail(skip layers.NestedSkip) (string, bool) {
 	switch skip.Reason {
 	case layers.NestedSkipOversize:
-		return prefix + fmt.Sprintf("not expanded, its %d bytes exceed the %d byte nested archive limit", skip.Observed, skip.Limit)
+		return fmt.Sprintf("not expanded, its %d bytes exceed the %d byte nested archive limit", skip.Observed, skip.Limit), true
 	case layers.NestedSkipBytesLimit:
-		return prefix + fmt.Sprintf("expansion stopped at the %d byte nested archive limit after %d entries", skip.Limit, skip.Observed)
+		return fmt.Sprintf("expansion stopped at the %d byte nested archive limit after %d entries", skip.Limit, skip.Observed), true
 	case layers.NestedSkipEntriesLimit:
-		return prefix + fmt.Sprintf("expansion stopped at the %d entry nested archive limit", skip.Limit)
+		return fmt.Sprintf("expansion stopped at the %d entry nested archive limit", skip.Limit), true
 	case layers.NestedSkipLayerBudget:
-		return prefix + fmt.Sprintf("expansion stopped after %d entries when the remaining layer or image budget (%d) was spent", skip.Observed, skip.Limit)
+		return fmt.Sprintf("expansion stopped after %d entries when the remaining layer or image budget (%d) was spent", skip.Observed, skip.Limit), true
 	case layers.NestedSkipRetainedBytes:
-		return prefix + fmt.Sprintf("%d expanded entries were dropped to stay within the %d retained bytes limit", skip.Observed, skip.Limit)
-	case layers.NestedSkipMalformed:
-		return prefix + fmt.Sprintf("%d entries (or the archive structure) could not be decoded", skip.Observed)
-	case layers.NestedSkipEncrypted:
-		return prefix + fmt.Sprintf("%d encrypted entries were skipped", skip.Observed)
-	case layers.NestedSkipUnsupportedMethod:
-		return prefix + fmt.Sprintf("%d entries use an unsupported compression method", skip.Observed)
-	case layers.NestedSkipUnsafeEntries:
-		return prefix + fmt.Sprintf("%d entries with unsafe paths were skipped", skip.Observed)
+		return fmt.Sprintf("%d expanded entries were dropped to stay within the %d retained bytes limit", skip.Observed, skip.Limit), true
 	case layers.NestedSkipOversizeEntries:
-		return prefix + fmt.Sprintf("%d entries exceeded the %d byte per-file limit", skip.Observed, skip.Limit)
-	case layers.NestedSkipDepth:
-		return prefix + fmt.Sprintf("%d archives inside it were not opened (one nesting level)", skip.Observed)
+		return fmt.Sprintf("%d entries exceeded the %d byte per-file limit", skip.Observed, skip.Limit), true
 	default:
-		return prefix + string(skip.Reason)
+		return "", false
+	}
+}
+
+// nestedSkipEntryDetail words the skips of entries that could not be read or
+// stay closed; ok is false for any other reason.
+func nestedSkipEntryDetail(skip layers.NestedSkip) (string, bool) {
+	switch skip.Reason {
+	case layers.NestedSkipMalformed:
+		return fmt.Sprintf("%d entries (or the archive structure) could not be decoded", skip.Observed), true
+	case layers.NestedSkipEncrypted:
+		return fmt.Sprintf("%d encrypted entries were skipped", skip.Observed), true
+	case layers.NestedSkipUnsupportedMethod:
+		return fmt.Sprintf("%d entries use an unsupported compression method", skip.Observed), true
+	case layers.NestedSkipUnsafeEntries:
+		return fmt.Sprintf("%d entries with unsafe paths were skipped", skip.Observed), true
+	case layers.NestedSkipDepth:
+		return fmt.Sprintf("%d archives inside it were not opened (one nesting level)", skip.Observed), true
+	default:
+		return "", false
 	}
 }
 
@@ -1135,20 +1156,8 @@ func redactedDiagnosticPath(detectorSet detectors.Set, value string) string {
 // the redacted value and context snippet are empty and the fingerprint is
 // that of the layer digest and path rather than of a value.
 func (b *detectionBudget) scanPath(detectorSet detectors.Set, input findings.Input) []findings.DetailedFinding {
-	if b != nil {
-		if b.stopped() || b.err != nil {
-			return nil
-		}
-		if b.exhausted() {
-			b.markExceeded(input.ManifestDigest)
-			return nil
-		}
-		if b.ctx != nil {
-			if err := b.ctx.Err(); err != nil {
-				b.err = err
-				return nil
-			}
-		}
+	if !b.admitPathScan(input.ManifestDigest) {
+		return nil
 	}
 	matches := detectorSet.ScanPath(input.FilePath)
 	if len(matches) == 0 {
@@ -1162,29 +1171,68 @@ func (b *detectionBudget) scanPath(detectorSet detectors.Set, input findings.Inp
 	fingerprint := findings.Fingerprint(input.LayerDigest + "\n" + input.FilePath)
 	result := make([]findings.DetailedFinding, 0, len(matches))
 	for _, match := range matches {
-		if b != nil && b.maxFindings > 0 && b.retained >= b.maxFindings {
-			b.exceeded = true
-			b.observed = b.retained + 1
-			b.diagnosticManifest = input.ManifestDigest
+		if b.pathFindingsFull(input.ManifestDigest) {
 			break
 		}
 		finding, err := normalizer.NormalizeWithRaw(match, false)
 		if err != nil {
 			continue
 		}
-		finding.RedactedValue = ""
-		finding.ContextSnippet = ""
-		finding.LineNumber = 0
-		finding.Fingerprint = fingerprint
-		finding.Finding.MatchStart, finding.Finding.MatchEnd = 0, 0
-		finding.MatchStart, finding.MatchEnd = 0, 0
-		finding.Value, finding.RawSnippet = "", ""
-		result = append(result, finding)
+		result = append(result, pathOnlyFinding(finding, fingerprint))
 		if b != nil {
 			b.retained++
 		}
 	}
 	return result
+}
+
+// admitPathScan reports whether a path-only scan may run: a nil budget
+// admits every scan; a stopped, failed, exhausted or cancelled one does not,
+// and records why.
+func (b *detectionBudget) admitPathScan(manifestDigest string) bool {
+	if b == nil {
+		return true
+	}
+	if b.stopped() || b.err != nil {
+		return false
+	}
+	if b.exhausted() {
+		b.markExceeded(manifestDigest)
+		return false
+	}
+	if b.ctx != nil {
+		if err := b.ctx.Err(); err != nil {
+			b.err = err
+			return false
+		}
+	}
+	return true
+}
+
+// pathFindingsFull reports whether the budget's finding limit is reached
+// before another path-only finding is kept, and records the overflow.
+func (b *detectionBudget) pathFindingsFull(manifestDigest string) bool {
+	if b != nil && b.maxFindings > 0 && b.retained >= b.maxFindings {
+		b.exceeded = true
+		b.observed = b.retained + 1
+		b.diagnosticManifest = manifestDigest
+		return true
+	}
+	return false
+}
+
+// pathOnlyFinding drops a path-only finding's value-derived fields: there is
+// no secret value, so the redacted value and context snippet are empty and
+// the fingerprint is that of the layer digest and path.
+func pathOnlyFinding(finding findings.DetailedFinding, fingerprint string) findings.DetailedFinding {
+	finding.RedactedValue = ""
+	finding.ContextSnippet = ""
+	finding.LineNumber = 0
+	finding.Fingerprint = fingerprint
+	finding.Finding.MatchStart, finding.Finding.MatchEnd = 0, 0
+	finding.MatchStart, finding.MatchEnd = 0, 0
+	finding.Value, finding.RawSnippet = "", ""
+	return finding
 }
 
 func scanString(detectorSet detectors.Set, input findings.Input, scanInput detectors.ScanInput) []findings.DetailedFinding {

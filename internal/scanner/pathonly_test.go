@@ -222,3 +222,106 @@ func TestReplayedBinaryAndOversizeSensitiveFilesAreReported(t *testing.T) {
 		}
 	}
 }
+
+// scanPath runs only while the detection budget admits it: a stopped, failed,
+// exhausted or cancelled budget yields nothing and records why, and the
+// finding limit is enforced between the matches of one path.
+func TestScanPathHonoursTheDetectionBudget(t *testing.T) {
+	input := findings.Input{
+		ManifestDigest:      pathOnlyManifestDigest,
+		Platform:            pathOnlyPlatform,
+		SourceType:          findings.SourceTypeFileFinal,
+		FilePath:            "etc/ssl/private/server.p12",
+		LayerDigest:         pathOnlyLayerDigest,
+		PresentInFinalImage: true,
+	}
+	set := detectors.Default()
+
+	unbounded := (*detectionBudget)(nil).scanPath(set, input)
+	if len(unbounded) == 0 {
+		t.Fatal("scanPath() with no budget found nothing")
+	}
+	for _, finding := range unbounded {
+		if finding.RedactedValue != "" || finding.ContextSnippet != "" || finding.LineNumber != 0 || finding.Value != "" || finding.RawSnippet != "" ||
+			finding.MatchStart != 0 || finding.MatchEnd != 0 || finding.Finding.MatchStart != 0 || finding.Finding.MatchEnd != 0 ||
+			finding.Fingerprint != findings.Fingerprint(pathOnlyLayerDigest+"\n"+input.FilePath) {
+			t.Fatalf("path-only finding keeps value-derived fields: %#v", finding)
+		}
+	}
+
+	stopped := newDetectionBudget(context.Background(), Request{})
+	stopped.exceeded = true
+	if got := stopped.scanPath(set, input); got != nil {
+		t.Fatalf("stopped budget: scanPath() = %#v", got)
+	}
+
+	failed := newDetectionBudget(context.Background(), Request{})
+	failed.err = context.DeadlineExceeded
+	if got := failed.scanPath(set, input); got != nil {
+		t.Fatalf("failed budget: scanPath() = %#v", got)
+	}
+
+	exhausted := newDetectionBudget(context.Background(), Request{MaxFindings: 1, ExistingFindings: 1})
+	if got := exhausted.scanPath(set, input); got != nil || !exhausted.exceeded || exhausted.observed != 1 || exhausted.diagnosticManifest != pathOnlyManifestDigest {
+		t.Fatalf("exhausted budget: scanPath() = %#v, budget = %+v", got, exhausted)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelled := newDetectionBudget(ctx, Request{})
+	if got := cancelled.scanPath(set, input); got != nil || cancelled.err != context.Canceled || cancelled.exceeded {
+		t.Fatalf("cancelled budget: scanPath() = %#v, budget = %+v", got, cancelled)
+	}
+
+	admitted := newDetectionBudget(context.Background(), Request{MaxFindings: 10})
+	if got := admitted.scanPath(set, input); len(got) != len(unbounded) || admitted.retained != len(got) {
+		t.Fatalf("admitted budget: %d findings, retained = %d, want %d", len(got), admitted.retained, len(unbounded))
+	}
+}
+
+// The finding limit between the matches of one path records the overflow
+// as the next finding that did not fit.
+func TestPathFindingsFullRecordsTheOverflow(t *testing.T) {
+	var none *detectionBudget
+	if none.pathFindingsFull(pathOnlyManifestDigest) {
+		t.Fatal("a nil budget has no finding limit")
+	}
+	unlimited := newDetectionBudget(context.Background(), Request{ExistingFindings: 5})
+	if unlimited.pathFindingsFull(pathOnlyManifestDigest) || unlimited.exceeded {
+		t.Fatal("a budget without MaxFindings has no finding limit")
+	}
+	full := newDetectionBudget(context.Background(), Request{MaxFindings: 2, ExistingFindings: 2})
+	if !full.pathFindingsFull(pathOnlyManifestDigest) || !full.exceeded || full.observed != 3 || full.diagnosticManifest != pathOnlyManifestDigest {
+		t.Fatalf("full budget = %+v", full)
+	}
+}
+
+// Every nested skip reason has its own wording; an unknown reason is named.
+func TestNestedSkipMessageWordsEveryReason(t *testing.T) {
+	tests := []struct {
+		reason layers.NestedSkipReason
+		want   string
+	}{
+		{layers.NestedSkipOversize, "not expanded, its 3 bytes exceed the 1024 byte nested archive limit"},
+		{layers.NestedSkipBytesLimit, "expansion stopped at the 1024 byte nested archive limit after 3 entries"},
+		{layers.NestedSkipEntriesLimit, "expansion stopped at the 1024 entry nested archive limit"},
+		{layers.NestedSkipLayerBudget, "expansion stopped after 3 entries when the remaining layer or image budget (1024) was spent"},
+		{layers.NestedSkipRetainedBytes, "3 expanded entries were dropped to stay within the 1024 retained bytes limit"},
+		{layers.NestedSkipMalformed, "3 entries (or the archive structure) could not be decoded"},
+		{layers.NestedSkipEncrypted, "3 encrypted entries were skipped"},
+		{layers.NestedSkipUnsupportedMethod, "3 entries use an unsupported compression method"},
+		{layers.NestedSkipUnsafeEntries, "3 entries with unsafe paths were skipped"},
+		{layers.NestedSkipOversizeEntries, "3 entries exceeded the 1024 byte per-file limit"},
+		{layers.NestedSkipDepth, "3 archives inside it were not opened (one nesting level)"},
+		{layers.NestedSkipReason("future_reason"), "future_reason"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.reason), func(t *testing.T) {
+			skip := layers.NestedSkip{Path: "lib/app.jar", LayerDigest: " " + pathOnlyLayerDigest + " ", Reason: test.reason, Observed: 3, Limit: 1024}
+			want := "nested archive lib/app.jar in layer " + pathOnlyLayerDigest + ": " + test.want
+			if got := nestedSkipMessage(detectors.Default(), skip); got != want {
+				t.Fatalf("nestedSkipMessage() = %q, want %q", got, want)
+			}
+		})
+	}
+}

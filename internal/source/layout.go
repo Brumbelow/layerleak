@@ -188,33 +188,52 @@ func (l *layout) FetchManifest(ctx context.Context, _, identifier string) (regis
 	if err != nil {
 		return registry.ManifestResponse{}, err
 	}
-	name, err := blobPath(descriptor.Digest)
+	body, err := l.readManifest(descriptor)
 	if err != nil {
 		return registry.ManifestResponse{}, err
 	}
-	body, err := l.fs.readAll(name, l.options.MaxManifestBytes)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return registry.ManifestResponse{}, fmt.Errorf("OCI layout %s: manifest %s is not in the layout", l.location, descriptor.Digest)
-		}
-		return registry.ManifestResponse{}, fmt.Errorf("OCI layout %s: %w", l.location, err)
-	}
-	if descriptor.Size > 0 && descriptor.Size != int64(len(body)) {
-		return registry.ManifestResponse{}, &manifest.IntegrityError{Kind: manifest.IntegritySizeMismatch, Subject: descriptor.Digest, Expected: fmt.Sprintf("%d", descriptor.Size), Actual: fmt.Sprintf("%d", len(body))}
-	}
-	algorithm, _, _ := strings.Cut(descriptor.Digest, ":")
-	actual, err := manifest.DigestBytes(algorithm, body)
-	if err != nil {
+	if err := verifyManifestBody(descriptor, body); err != nil {
 		return registry.ManifestResponse{}, err
-	}
-	if actual != descriptor.Digest {
-		return registry.ManifestResponse{}, &manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch, Subject: descriptor.Digest, Expected: descriptor.Digest, Actual: actual}
 	}
 	mediaType, err := declaredMediaType(body, descriptor.MediaType)
 	if err != nil {
 		return registry.ManifestResponse{}, &manifest.IntegrityError{Kind: manifest.IntegrityInvalidDocument, Subject: descriptor.Digest, Expected: "valid image manifest or index JSON", Actual: "invalid document", Cause: err}
 	}
 	return registry.ManifestResponse{Digest: descriptor.Digest, MediaType: mediaType, Size: int64(len(body)), Body: body}, nil
+}
+
+// readManifest reads the manifest blob of the descriptor within
+// Options.MaxManifestBytes.
+func (l *layout) readManifest(descriptor manifest.Descriptor) ([]byte, error) {
+	name, err := blobPath(descriptor.Digest)
+	if err != nil {
+		return nil, err
+	}
+	body, err := l.fs.readAll(name, l.options.MaxManifestBytes)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("OCI layout %s: manifest %s is not in the layout", l.location, descriptor.Digest)
+		}
+		return nil, fmt.Errorf("OCI layout %s: %w", l.location, err)
+	}
+	return body, nil
+}
+
+// verifyManifestBody checks the manifest bytes against the size (when the
+// descriptor declares one) and the digest of the descriptor.
+func verifyManifestBody(descriptor manifest.Descriptor, body []byte) error {
+	if descriptor.Size > 0 && descriptor.Size != int64(len(body)) {
+		return &manifest.IntegrityError{Kind: manifest.IntegritySizeMismatch, Subject: descriptor.Digest, Expected: fmt.Sprintf("%d", descriptor.Size), Actual: fmt.Sprintf("%d", len(body))}
+	}
+	algorithm, _, _ := strings.Cut(descriptor.Digest, ":")
+	actual, err := manifest.DigestBytes(algorithm, body)
+	if err != nil {
+		return err
+	}
+	if actual != descriptor.Digest {
+		return &manifest.IntegrityError{Kind: manifest.IntegrityDigestMismatch, Subject: descriptor.Digest, Expected: descriptor.Digest, Actual: actual}
+	}
+	return nil
 }
 
 func (l *layout) ResolveManifest(ctx context.Context, _, identifier string) (registry.ManifestMetadata, error) {

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -769,5 +770,27 @@ func TestOCIArchiveSweepEnumeratesRefNames(t *testing.T) {
 	single, err := scanLocal(t, "oci-archive:"+archive+":app:1.2", false)
 	if err != nil || single.TotalFindings != 1 || single.ResolvedReference != "oci-archive:"+archive+"@"+app.Digest {
 		t.Fatalf("Scan(:app:1.2) = findings=%d resolved=%q, %v", single.TotalFindings, single.ResolvedReference, err)
+	}
+}
+
+// A manifest blob whose length differs from the index descriptor is a size
+// mismatch, reported before the digest is computed.
+func TestLayoutRefusesManifestOfTheWrongSize(t *testing.T) {
+	dir := t.TempDir()
+	builder := newLayoutBuilder()
+	image := builder.addImage(t, "1.0", linuxAMD64, configJSON(t, linuxAMD64))
+	builder.writeDir(t, dir)
+	algorithm, encoded, _ := strings.Cut(image.Digest, ":")
+	manifestPath := filepath.Join(dir, layoutBlobsDir, algorithm, encoded)
+	original, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, manifestPath, append(original, '\n'))
+
+	_, err = openSource(t, "oci:"+dir, Options{}).FetchManifest(context.Background(), "", "1.0")
+	integrity, ok := manifest.AsIntegrityError(err)
+	if !ok || integrity.Kind != manifest.IntegritySizeMismatch || integrity.Subject != image.Digest || integrity.Expected != fmt.Sprintf("%d", len(original)) || integrity.Actual != fmt.Sprintf("%d", len(original)+1) {
+		t.Fatalf("resized manifest error = %v", err)
 	}
 }

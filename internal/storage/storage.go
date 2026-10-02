@@ -296,32 +296,53 @@ func (c PostgresConfig) Validate() error {
 }
 
 func validateDatabaseURL(dsn string) error {
-	parsed, err := url.Parse(dsn)
+	parsed, query, err := parseDatabaseURL(dsn)
 	if err != nil {
-		return fmt.Errorf("database url is invalid")
-	}
-	query := url.Values{}
-	if parsed.RawQuery != "" {
-		query, err = url.ParseQuery(parsed.RawQuery)
-		if err != nil {
-			return fmt.Errorf("database url is invalid")
-		}
+		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
 	case "postgres", "postgresql":
 	default:
 		return fmt.Errorf("database url must use postgres scheme")
 	}
-	// The host may live in the query string instead of the authority, which
-	// is how libpq addresses unix sockets (host=/var/run/postgresql) and how
-	// Cloud SQL Auth Proxy style deployments are configured.
-	if strings.TrimSpace(parsed.Hostname()) == "" && strings.TrimSpace(query.Get("host")) == "" && strings.TrimSpace(query.Get("hostaddr")) == "" {
+	if !databaseURLHasHost(parsed, query) {
 		return fmt.Errorf("database url host is required")
 	}
-	if (strings.TrimSpace(parsed.Path) == "" || parsed.Path == "/") && strings.TrimSpace(query.Get("dbname")) == "" {
+	if !databaseURLHasName(parsed, query) {
 		return fmt.Errorf("database url name is required")
 	}
 	return nil
+}
+
+// parseDatabaseURL parses the URL and its query string. A failure is the one
+// fixed message: the parser's own error quotes the URL, password included.
+func parseDatabaseURL(dsn string) (*url.URL, url.Values, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("database url is invalid")
+	}
+	query := url.Values{}
+	if parsed.RawQuery != "" {
+		query, err = url.ParseQuery(parsed.RawQuery)
+		if err != nil {
+			return nil, nil, fmt.Errorf("database url is invalid")
+		}
+	}
+	return parsed, query, nil
+}
+
+// databaseURLHasHost reports whether the URL names a host. The host may live
+// in the query string instead of the authority, which is how libpq addresses
+// unix sockets (host=/var/run/postgresql) and how Cloud SQL Auth Proxy style
+// deployments are configured.
+func databaseURLHasHost(parsed *url.URL, query url.Values) bool {
+	return strings.TrimSpace(parsed.Hostname()) != "" || strings.TrimSpace(query.Get("host")) != "" || strings.TrimSpace(query.Get("hostaddr")) != ""
+}
+
+// databaseURLHasName reports whether the URL names a database, in its path or
+// in the dbname query parameter.
+func databaseURLHasName(parsed *url.URL, query url.Values) bool {
+	return (strings.TrimSpace(parsed.Path) != "" && parsed.Path != "/") || strings.TrimSpace(query.Get("dbname")) != ""
 }
 
 func validateKeywordDSN(dsn string) error {
@@ -342,66 +363,99 @@ func validateKeywordDSN(dsn string) error {
 // or an unquoted run up to the next whitespace, and an empty value allowed.
 func parseKeywordDSN(value string) (map[string]string, error) {
 	pairs := make(map[string]string)
-	index := 0
-	skipSpaces := func() {
-		for index < len(value) && isDSNSpace(value[index]) {
-			index++
-		}
-	}
+	parser := keywordDSNParser{value: value}
 	for {
-		skipSpaces()
-		if index >= len(value) {
+		parser.skipSpaces()
+		if parser.index >= len(value) {
 			return pairs, nil
 		}
-		start := index
-		for index < len(value) && isDSNKeyByte(value[index]) {
-			index++
+		key, err := parser.key()
+		if err != nil {
+			return nil, err
 		}
-		if index == start {
-			return nil, fmt.Errorf("connection string key is missing")
+		parsed, err := parser.pairValue(key)
+		if err != nil {
+			return nil, err
 		}
-		key := value[start:index]
-		skipSpaces()
-		if index >= len(value) || value[index] != '=' {
-			return nil, fmt.Errorf("connection string key %q is not followed by '='", key)
-		}
-		index++
-		skipSpaces()
-		var builder strings.Builder
-		if index < len(value) && value[index] == '\'' {
-			index++
-			terminated := false
-			for index < len(value) {
-				character := value[index]
-				index++
-				if character == '\\' && index < len(value) {
-					builder.WriteByte(value[index])
-					index++
-					continue
-				}
-				if character == '\'' {
-					terminated = true
-					break
-				}
-				builder.WriteByte(character)
-			}
-			if !terminated {
-				return nil, fmt.Errorf("connection string value for %q has an unterminated quote", key)
-			}
-		} else {
-			for index < len(value) && !isDSNSpace(value[index]) {
-				character := value[index]
-				index++
-				if character == '\\' && index < len(value) {
-					builder.WriteByte(value[index])
-					index++
-					continue
-				}
-				builder.WriteByte(character)
-			}
-		}
-		pairs[key] = builder.String()
+		pairs[key] = parsed
 	}
+}
+
+// keywordDSNParser is the cursor parseKeywordDSN advances over the string.
+type keywordDSNParser struct {
+	value string
+	index int
+}
+
+func (p *keywordDSNParser) skipSpaces() {
+	for p.index < len(p.value) && isDSNSpace(p.value[p.index]) {
+		p.index++
+	}
+}
+
+// key reads a key and the '=' after it, with optional whitespace between.
+func (p *keywordDSNParser) key() (string, error) {
+	start := p.index
+	for p.index < len(p.value) && isDSNKeyByte(p.value[p.index]) {
+		p.index++
+	}
+	if p.index == start {
+		return "", fmt.Errorf("connection string key is missing")
+	}
+	key := p.value[start:p.index]
+	p.skipSpaces()
+	if p.index >= len(p.value) || p.value[p.index] != '=' {
+		return "", fmt.Errorf("connection string key %q is not followed by '='", key)
+	}
+	p.index++
+	return key, nil
+}
+
+// pairValue reads the value after "key=": single-quoted or an unquoted run up
+// to the next whitespace, possibly empty.
+func (p *keywordDSNParser) pairValue(key string) (string, error) {
+	p.skipSpaces()
+	if p.index < len(p.value) && p.value[p.index] == '\'' {
+		p.index++
+		return p.quotedValue(key)
+	}
+	return p.unquotedValue(), nil
+}
+
+// quotedValue reads up to the closing quote; the error names only the key,
+// never the value, which may be a password.
+func (p *keywordDSNParser) quotedValue(key string) (string, error) {
+	var builder strings.Builder
+	for p.index < len(p.value) {
+		character, escaped := p.nextValueByte()
+		if !escaped && character == '\'' {
+			return builder.String(), nil
+		}
+		builder.WriteByte(character)
+	}
+	return "", fmt.Errorf("connection string value for %q has an unterminated quote", key)
+}
+
+func (p *keywordDSNParser) unquotedValue() string {
+	var builder strings.Builder
+	for p.index < len(p.value) && !isDSNSpace(p.value[p.index]) {
+		character, _ := p.nextValueByte()
+		builder.WriteByte(character)
+	}
+	return builder.String()
+}
+
+// nextValueByte consumes one value byte, resolving a backslash escape of the
+// byte after it; a trailing backslash is kept literally.
+func (p *keywordDSNParser) nextValueByte() (byte, bool) {
+	character := p.value[p.index]
+	p.index++
+	if character == '\\' && p.index < len(p.value) {
+		character = p.value[p.index]
+		p.index++
+		return character, true
+	}
+	return character, false
 }
 
 func isDSNSpace(character byte) bool {

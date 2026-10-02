@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"slices"
 	"strings"
@@ -71,42 +72,65 @@ func MigrationStatus(ctx context.Context, config MigrationConfig) (MigrationStat
 	defer func() { _ = db.Close() }()
 	defer func() { _ = connection.Close() }()
 
+	return migrationStatusOn(ctx, connection, migrations)
+}
+
+// migrationStatusOn reads the ledger and legacy schema on an open connection
+// and compares them with the shipped migrations.
+func migrationStatusOn(ctx context.Context, connection *sql.Conn, migrations []migrationFile) (MigrationStatusResult, error) {
 	schema, err := resolveCurrentSchema(ctx, connection)
 	if err != nil {
 		return MigrationStatusResult{}, err
 	}
 	ledger := newSchemaLedger(schema)
-	ledgerExists, err := tableExistsContext(ctx, connection, "schema_migrations")
+	state, err := readMigrationLedgerState(ctx, connection, ledger)
 	if err != nil {
 		return MigrationStatusResult{}, err
 	}
-	applied := map[string]migrationRow{}
-	if ledgerExists {
-		applied, err = readAppliedMigrations(ctx, connection, ledger)
-		if err != nil {
-			return MigrationStatusResult{}, err
-		}
-	}
-	var legacy []string
-	if len(applied) == 0 {
-		legacy, err = inspectLegacySchema(ctx, connection)
-		if err != nil {
-			return MigrationStatusResult{}, err
-		}
-	}
-	if err := validateAppliedMigrations(migrations, applied); err != nil {
+	if err := validateAppliedMigrations(migrations, state.applied); err != nil {
 		return MigrationStatusResult{}, err
 	}
 
-	result := buildMigrationStatus(migrations, applied, legacy)
+	result := buildMigrationStatus(migrations, state.applied, state.legacy)
 	result.Ledger = ledger.table
-	result.LedgerExists = ledgerExists
+	result.LedgerExists = state.ledgerExists
 	if result.UpToDate() {
 		if err := checkSchemaVersion(ctx, connection); err != nil {
 			return MigrationStatusResult{}, err
 		}
 	}
 	return result, nil
+}
+
+// migrationLedgerState is what MigrationStatus reads before comparing: whether
+// the ledger exists, its applied rows, and (only when nothing is applied) the
+// legacy schema versions that could be adopted.
+type migrationLedgerState struct {
+	ledgerExists bool
+	applied      map[string]migrationRow
+	legacy       []string
+}
+
+// readMigrationLedgerState only reads: it never creates the ledger.
+func readMigrationLedgerState(ctx context.Context, connection *sql.Conn, ledger schemaLedger) (migrationLedgerState, error) {
+	ledgerExists, err := tableExistsContext(ctx, connection, "schema_migrations")
+	if err != nil {
+		return migrationLedgerState{}, err
+	}
+	state := migrationLedgerState{ledgerExists: ledgerExists, applied: map[string]migrationRow{}}
+	if ledgerExists {
+		state.applied, err = readAppliedMigrations(ctx, connection, ledger)
+		if err != nil {
+			return migrationLedgerState{}, err
+		}
+	}
+	if len(state.applied) == 0 {
+		state.legacy, err = inspectLegacySchema(ctx, connection)
+		if err != nil {
+			return migrationLedgerState{}, err
+		}
+	}
+	return state, nil
 }
 
 // buildMigrationStatus is the pure comparison behind MigrationStatus.

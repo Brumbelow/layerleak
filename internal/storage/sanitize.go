@@ -35,9 +35,26 @@ func sanitizeScanRecord(record ScanRecord) (ScanRecord, error) {
 	record.Mode = clean(record.Mode)
 	record.ErrorMessage = clean(record.ErrorMessage)
 
-	record.Tags = slices.Clone(record.Tags)
-	for index := range record.Tags {
-		tag := &record.Tags[index]
+	record.Tags = sanitizeTagRecords(record.Tags)
+	record.Targets = sanitizeTargetRecords(record.Targets)
+	record.DetailedFindings = sanitizeDetailedFindings(record.DetailedFindings)
+
+	resultJSON, err := sanitizeResultJSON(record.ResultJSON)
+	if err != nil {
+		return ScanRecord{}, err
+	}
+	record.ResultJSON = resultJSON
+
+	return record, nil
+}
+
+// sanitizeTagRecords returns a sanitised copy; the caller's slice is not
+// modified.
+func sanitizeTagRecords(tags []TagRecord) []TagRecord {
+	clean := findings.SanitizeControlCharacters
+	tags = slices.Clone(tags)
+	for index := range tags {
+		tag := &tags[index]
 		tag.Name = clean(tag.Name)
 		tag.RootDigest = clean(tag.RootDigest)
 		tag.ManifestDigest = clean(tag.ManifestDigest)
@@ -45,10 +62,16 @@ func sanitizeScanRecord(record ScanRecord) (ScanRecord, error) {
 		tag.Status = clean(tag.Status)
 		tag.Error = clean(tag.Error)
 	}
+	return tags
+}
 
-	record.Targets = slices.Clone(record.Targets)
-	for targetIndex := range record.Targets {
-		target := &record.Targets[targetIndex]
+// sanitizeTargetRecords returns a sanitised copy, cloning each target's tag
+// and manifest slices too; the caller's slices are not modified.
+func sanitizeTargetRecords(targets []TargetRecord) []TargetRecord {
+	clean := findings.SanitizeControlCharacters
+	targets = slices.Clone(targets)
+	for targetIndex := range targets {
+		target := &targets[targetIndex]
 		target.Reference = clean(target.Reference)
 		target.ResolvedReference = clean(target.ResolvedReference)
 		target.RequestedDigest = clean(target.RequestedDigest)
@@ -57,20 +80,32 @@ func sanitizeScanRecord(record ScanRecord) (ScanRecord, error) {
 		for index := range target.Tags {
 			target.Tags[index] = clean(target.Tags[index])
 		}
-		target.Manifests = slices.Clone(target.Manifests)
-		for index := range target.Manifests {
-			item := &target.Manifests[index]
-			item.Digest = clean(item.Digest)
-			item.RootDigest = clean(item.RootDigest)
-			item.Platform = sanitizePlatform(item.Platform)
-			item.Status = clean(item.Status)
-			item.Error = clean(item.Error)
-		}
+		target.Manifests = sanitizeManifestRecords(target.Manifests)
 	}
+	return targets
+}
 
-	record.DetailedFindings = slices.Clone(record.DetailedFindings)
-	for index := range record.DetailedFindings {
-		item := &record.DetailedFindings[index]
+func sanitizeManifestRecords(manifests []ManifestRecord) []ManifestRecord {
+	clean := findings.SanitizeControlCharacters
+	manifests = slices.Clone(manifests)
+	for index := range manifests {
+		item := &manifests[index]
+		item.Digest = clean(item.Digest)
+		item.RootDigest = clean(item.RootDigest)
+		item.Platform = sanitizePlatform(item.Platform)
+		item.Status = clean(item.Status)
+		item.Error = clean(item.Error)
+	}
+	return manifests
+}
+
+// sanitizeDetailedFindings returns a sanitised copy of every text field;
+// fingerprints are identities and are left untouched.
+func sanitizeDetailedFindings(items []findings.DetailedFinding) []findings.DetailedFinding {
+	clean := findings.SanitizeControlCharacters
+	items = slices.Clone(items)
+	for index := range items {
+		item := &items[index]
 		item.DetectorName = clean(item.DetectorName)
 		item.Confidence = clean(item.Confidence)
 		item.Disposition = findings.Disposition(clean(string(item.Disposition)))
@@ -87,14 +122,7 @@ func sanitizeScanRecord(record ScanRecord) (ScanRecord, error) {
 		item.RawSnippet = clean(item.RawSnippet)
 		item.SourceLocation = clean(item.SourceLocation)
 	}
-
-	resultJSON, err := sanitizeResultJSON(record.ResultJSON)
-	if err != nil {
-		return ScanRecord{}, err
-	}
-	record.ResultJSON = resultJSON
-
-	return record, nil
+	return items
 }
 
 func sanitizePlatform(platform manifest.Platform) manifest.Platform {

@@ -307,13 +307,36 @@ func scanSingleReference(ctx context.Context, request Request, started time.Time
 		currentRef:     request.Reference.CanonicalString(""),
 		findingsBefore: 0,
 	})
+	applySingleTargetScan(&result, request.Reference, scanResult, tags)
+	tagStatus := countSingleTargetOutcome(&result, scanResult, err)
+	// Reference mode never enumerates tags (tags_enumerated stays 0), but the
+	// requested tag is reported in tag_results whenever it resolved to a digest.
+	if len(tags) > 0 && strings.TrimSpace(scanResult.RequestedDigest) != "" {
+		result.TagResults = []TagResult{singleReferenceTagResult(tags[0], scanResult, tagStatus, err)}
+	}
+	if err != nil {
+		return singleReferenceFailure(result, err)
+	}
+	finalizeResult(&result, result.DetailedFindings, result.SuppressedDetailedFindings)
+
+	emitProgress(request, progressFromResult(request, result, ProgressPhaseCompleted, "Scan complete", "", ""))
+
+	if result.Status != ResultStatusCompleted {
+		return result, newIncompleteError(result, nil)
+	}
+	return result, nil
+}
+
+// applySingleTargetScan copies the one target's scan into a reference-mode
+// result.
+func applySingleTargetScan(result *Result, reference manifest.Reference, scanResult scanner.Result, tags []string) {
 	result.ResolvedReference = scanResult.ResolvedReference
 	result.RequestedDigest = scanResult.RequestedDigest
 	result.TargetCount = 1
 	result.ManifestCount = scanResult.ManifestCount
 	result.CompletedManifestCount = scanResult.CompletedManifestCount
 	result.FailedManifestCount = scanResult.FailedManifestCount
-	result.Targets = []TargetResult{targetResultFromScanResult(request.Reference, scanResult, tags)}
+	result.Targets = []TargetResult{targetResultFromScanResult(reference, scanResult, tags)}
 	result.Findings = scanResult.Findings
 	result.DetailedFindings = scanResult.DetailedFindings
 	result.SuppressedFindings = scanResult.SuppressedFindings
@@ -324,48 +347,48 @@ func scanSingleReference(ctx context.Context, request Request, started time.Time
 	result.SuppressedUniqueFingerprints = scanResult.SuppressedUniqueFingerprints
 	result.Coverage = scanResult.Coverage
 	result.Diagnostics = slices.Clone(scanResult.Diagnostics)
+}
 
-	tagStatus := TagStatusFailed
+// countSingleTargetOutcome counts the target as completed, partial or failed
+// and returns the matching tag status.
+func countSingleTargetOutcome(result *Result, scanResult scanner.Result, err error) TagStatus {
 	switch {
 	case err == nil && scanResult.Status == scanner.ResultStatusCompleted:
 		result.CompletedTargetCount = 1
-		tagStatus = TagStatusScanned
+		return TagStatusScanned
 	case scanResult.CompletedManifestCount > 0:
 		result.PartialTargetCount = 1
-		tagStatus = TagStatusPartial
+		return TagStatusPartial
 	default:
 		result.FailedTargetCount = 1
+		return TagStatusFailed
 	}
-	// Reference mode never enumerates tags (tags_enumerated stays 0), but the
-	// requested tag is reported in tag_results whenever it resolved to a digest.
-	if len(tags) > 0 && strings.TrimSpace(scanResult.RequestedDigest) != "" {
-		tagResult := TagResult{
-			Tag:             tags[0],
-			RootDigest:      scanResult.RequestedDigest,
-			TargetReference: scanResult.ResolvedReference,
-			Status:          tagStatus,
-		}
-		if err != nil {
-			tagResult.Error = err.Error()
-		}
-		result.TagResults = []TagResult{tagResult}
+}
+
+// singleReferenceTagResult is the tag_results entry of the requested tag.
+func singleReferenceTagResult(tag string, scanResult scanner.Result, status TagStatus, err error) TagResult {
+	tagResult := TagResult{
+		Tag:             tag,
+		RootDigest:      scanResult.RequestedDigest,
+		TargetReference: scanResult.ResolvedReference,
+		Status:          status,
 	}
 	if err != nil {
-		result.Targets[0].Error = err.Error()
-		finalizeResult(&result, result.DetailedFindings, result.SuppressedDetailedFindings)
-		if hasCompletedManifest(result) && !mustPreserveScanError(err) && !limits.IsExceeded(err) {
-			return result, newIncompleteError(result, err)
-		}
-		return result, err
+		tagResult.Error = err.Error()
 	}
+	return tagResult
+}
+
+// singleReferenceFailure finalizes a failed reference scan. A scan that still
+// completed a manifest reports an IncompleteError unless the cause must be
+// preserved or is a limit.
+func singleReferenceFailure(result Result, err error) (Result, error) {
+	result.Targets[0].Error = err.Error()
 	finalizeResult(&result, result.DetailedFindings, result.SuppressedDetailedFindings)
-
-	emitProgress(request, progressFromResult(request, result, ProgressPhaseCompleted, "Scan complete", "", ""))
-
-	if result.Status != ResultStatusCompleted {
-		return result, newIncompleteError(result, nil)
+	if hasCompletedManifest(result) && !mustPreserveScanError(err) && !limits.IsExceeded(err) {
+		return result, newIncompleteError(result, err)
 	}
-	return result, nil
+	return result, err
 }
 
 // progressFromResult builds a progress update whose counters mirror the
@@ -409,47 +432,47 @@ func scanRepository(ctx context.Context, request Request, started time.Time) (Re
 		return result, err
 	}
 
+	groups, err := resolveRepositoryTargets(ctx, request, &result, tags)
+	if err != nil {
+		return result, err
+	}
+	if len(groups) == 0 {
+		finalizeResult(&result, nil, nil)
+		return result, fmt.Errorf("repository %s did not resolve any scannable tags", request.Reference.Repository)
+	}
+
+	groupList := sortedTargetGroups(groups)
+	result.TargetCount = len(groupList)
+
+	sweep := newRepositorySweep(request, &result, groupList)
+	for index, group := range groupList {
+		if stopped, err := sweep.scanGroup(ctx, index, group); stopped {
+			return result, err
+		}
+	}
+	return sweep.finish()
+}
+
+// resolveRepositoryTargets resolves every tag to its root digest and groups
+// the tags by digest, recording each tag in tag_results. On an error that
+// stops the sweep the result is already finalized.
+func resolveRepositoryTargets(ctx context.Context, request Request, result *Result, tags []string) (map[string]*targetGroup, error) {
 	groups := make(map[string]*targetGroup)
 	for tagIndex, tag := range tags {
-		emitProgress(request, progressFromResult(request, result, ProgressPhaseResolvingTags, "Resolving tag digest", tag, ""))
+		emitProgress(request, progressFromResult(request, *result, ProgressPhaseResolvingTags, "Resolving tag digest", tag, ""))
 
-		resolved, err := request.Registry.ResolveManifest(ctx, request.Reference.Repository, tag)
+		digest, err := resolveRepositoryTag(ctx, request, result, tag)
 		if err != nil {
-			result.TagsFailed++
-			result.TagResults = append(result.TagResults, TagResult{
-				Tag:    tag,
-				Status: TagStatusFailed,
-				Error:  err.Error(),
-			})
-			if mustPreserveScanError(err) || limits.IsExceeded(err) {
-				finalizeResult(&result, nil, nil)
-				return result, err
-			}
+			finalizeResult(result, nil, nil)
+			return nil, err
+		}
+		if digest == "" {
 			continue
 		}
-		if strings.TrimSpace(resolved.Digest) == "" {
-			result.TagsFailed++
-			result.TagResults = append(result.TagResults, TagResult{
-				Tag:    tag,
-				Status: TagStatusFailed,
-				Error:  "resolved digest is empty",
-			})
-			continue
-		}
-
-		result.TagsResolved++
-		targetReference := request.Reference.WithDigest(resolved.Digest).CanonicalString("")
-		result.TagResults = append(result.TagResults, TagResult{
-			Tag:             tag,
-			RootDigest:      resolved.Digest,
-			TargetReference: targetReference,
-			Status:          TagStatusResolved,
-		})
-
-		group, ok := groups[resolved.Digest]
+		group, ok := groups[digest]
 		if !ok {
-			group = &targetGroup{digest: resolved.Digest}
-			groups[resolved.Digest] = group
+			group = &targetGroup{digest: digest}
+			groups[digest] = group
 		}
 		group.tags = append(group.tags, tag)
 
@@ -457,19 +480,63 @@ func scanRepository(ctx context.Context, request Request, started time.Time) (Re
 		// first target past it, the sweep fails with the limit error without
 		// sending one more manifest request for the remaining tags.
 		if request.MaxRepositoryTargets > 0 && len(groups) > request.MaxRepositoryTargets {
-			limitErr := limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
-			markUnresolvedTags(&result, tags[tagIndex+1:], limitErr)
-			result.TargetCount = len(groups)
-			finalizeResult(&result, nil, nil)
-			return result, limitErr
+			return nil, repositoryTargetsExceeded(request, result, tags[tagIndex+1:], len(groups))
 		}
 	}
+	return groups, nil
+}
 
-	if len(groups) == 0 {
-		finalizeResult(&result, nil, nil)
-		return result, fmt.Errorf("repository %s did not resolve any scannable tags", request.Reference.Repository)
+// resolveRepositoryTag resolves one tag and records it in tag_results. It
+// returns the digest, or "" for a tag that failed without stopping the sweep;
+// an error is returned only when it must stop the sweep.
+func resolveRepositoryTag(ctx context.Context, request Request, result *Result, tag string) (string, error) {
+	resolved, err := request.Registry.ResolveManifest(ctx, request.Reference.Repository, tag)
+	if err != nil {
+		result.TagsFailed++
+		result.TagResults = append(result.TagResults, TagResult{
+			Tag:    tag,
+			Status: TagStatusFailed,
+			Error:  err.Error(),
+		})
+		if mustPreserveScanError(err) || limits.IsExceeded(err) {
+			return "", err
+		}
+		return "", nil
+	}
+	if strings.TrimSpace(resolved.Digest) == "" {
+		result.TagsFailed++
+		result.TagResults = append(result.TagResults, TagResult{
+			Tag:    tag,
+			Status: TagStatusFailed,
+			Error:  "resolved digest is empty",
+		})
+		return "", nil
 	}
 
+	result.TagsResolved++
+	targetReference := request.Reference.WithDigest(resolved.Digest).CanonicalString("")
+	result.TagResults = append(result.TagResults, TagResult{
+		Tag:             tag,
+		RootDigest:      resolved.Digest,
+		TargetReference: targetReference,
+		Status:          TagStatusResolved,
+	})
+	return resolved.Digest, nil
+}
+
+// repositoryTargetsExceeded builds the repository target limit error, marks
+// the tags not yet resolved and finalizes the result.
+func repositoryTargetsExceeded(request Request, result *Result, remaining []string, targetCount int) error {
+	limitErr := limits.NewExceeded(limits.KindRepositoryTargets, int64(request.MaxRepositoryTargets), "repository "+request.Reference.Repository)
+	markUnresolvedTags(result, remaining, limitErr)
+	result.TargetCount = targetCount
+	finalizeResult(result, nil, nil)
+	return limitErr
+}
+
+// sortedTargetGroups orders the targets by their first tag, each target's tags
+// sorted.
+func sortedTargetGroups(groups map[string]*targetGroup) []targetGroup {
 	groupList := make([]targetGroup, 0, len(groups))
 	for _, group := range groups {
 		slices.Sort(group.tags)
@@ -478,102 +545,154 @@ func scanRepository(ctx context.Context, request Request, started time.Time) (Re
 	slices.SortFunc(groupList, func(left, right targetGroup) int {
 		return strings.Compare(firstTag(left.tags), firstTag(right.tags))
 	})
+	return groupList
+}
 
-	result.TargetCount = len(groupList)
+// repositorySweep is the state of an --all-tags scan across its targets.
+type repositorySweep struct {
+	request    Request
+	result     *Result
+	groups     []targetGroup
+	detailed   []findings.DetailedFinding
+	suppressed []findings.DetailedFinding
+	layerCache *layers.LayerCache
+}
 
-	allDetailedFindings := make([]findings.DetailedFinding, 0)
-	allSuppressedDetailedFindings := make([]findings.DetailedFinding, 0)
-	// The layer cache lives exactly as long as this sweep: adjacent tags of a
-	// repository share most layers, and a layer whose files held no findings
-	// is replayed from its metadata instead of being fetched again. It is nil
-	// (off) unless LAYERLEAK_MAX_LAYER_CACHE_BYTES is set.
-	layerCache := layers.NewLayerCache(request.MaxLayerCacheBytes)
-	// stopEarly records every target the sweep did not reach so the per-target
-	// accounting and tag_results describe the whole repository, then finalizes.
-	stopEarly := func(from int, cause error) {
-		markUnscannedTargets(&result, request, groupList[from:], cause)
-		finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
+func newRepositorySweep(request Request, result *Result, groups []targetGroup) *repositorySweep {
+	return &repositorySweep{
+		request:    request,
+		result:     result,
+		groups:     groups,
+		detailed:   make([]findings.DetailedFinding, 0),
+		suppressed: make([]findings.DetailedFinding, 0),
+		// The layer cache lives exactly as long as this sweep: adjacent tags of
+		// a repository share most layers, and a layer whose files held no
+		// findings is replayed from its metadata instead of being fetched
+		// again. It is nil (off) unless LAYERLEAK_MAX_LAYER_CACHE_BYTES is set.
+		layerCache: layers.NewLayerCache(request.MaxLayerCacheBytes),
 	}
-	for index, group := range groupList {
-		findingsRetained := len(allDetailedFindings) + len(allSuppressedDetailedFindings)
-		rawBytesRetained := detailedRawBytes(allDetailedFindings) + detailedRawBytes(allSuppressedDetailedFindings)
-		if request.MaxFindings > 0 && findingsRetained >= request.MaxFindings {
-			diagnostic := maxFindingsDiagnostic(request.MaxFindings, findingsRetained, group.digest)
-			result.Diagnostics = append(result.Diagnostics, diagnostic)
-			result.Coverage.Complete = false
-			stopEarly(index, errors.New(diagnostic.Message))
-			return result, newIncompleteError(result, nil)
-		}
-		scanReference := request.Reference.WithDigest(group.digest)
-		scanResult, err := scanTarget(ctx, request, scanReference, group.tags, progressState{
-			tagsCompleted:    result.TagsResolved,
-			tagsTotal:        result.TagsEnumerated,
-			tagsFailed:       result.TagsFailed,
-			targetsCompleted: result.CompletedTargetCount,
-			targetsPartial:   result.PartialTargetCount,
-			targetsFailed:    result.FailedTargetCount,
-			targetsTotal:     result.TargetCount,
-			currentTag:       firstTag(group.tags),
-			currentRef:       scanReference.CanonicalString(""),
-			findingsBefore:   len(allDetailedFindings),
-			findingsRetained: findingsRetained,
-			rawBytesRetained: rawBytesRetained,
-			layerCache:       layerCache,
-		})
-		targetResult := targetResultFromScanResult(scanReference, scanResult, group.tags)
-		result.ManifestCount += scanResult.ManifestCount
-		result.CompletedManifestCount += scanResult.CompletedManifestCount
-		result.FailedManifestCount += scanResult.FailedManifestCount
-		allDetailedFindings = append(allDetailedFindings, scanResult.DetailedFindings...)
-		allSuppressedDetailedFindings = append(allSuppressedDetailedFindings, scanResult.SuppressedDetailedFindings...)
-		result.Coverage = mergeCoverage(result.Coverage, scanResult.Coverage)
-		result.Diagnostics = append(result.Diagnostics, scanResult.Diagnostics...)
-		if err != nil {
-			targetResult.Error = err.Error()
-			result.Targets = append(result.Targets, targetResult)
-			tagStatus := TagStatusFailed
-			if scanResult.CompletedManifestCount > 0 {
-				result.PartialTargetCount++
-				tagStatus = TagStatusPartial
-			} else {
-				result.FailedTargetCount++
-			}
-			setTagStatus(&result, group.tags, tagStatus, err.Error())
-			result.TotalFindings = len(allDetailedFindings)
-			emitProgress(request, progressFromResult(request, result, ProgressPhaseTargetFailed, err.Error(), firstTag(group.tags), scanReference.CanonicalString("")))
-			if limits.IsExceeded(err) || mustPreserveScanError(err) {
-				stopEarly(index+1, err)
-				return result, err
-			}
-			continue
-		}
+}
 
-		result.Targets = append(result.Targets, targetResult)
-		if scanResult.Status == scanner.ResultStatusPartial {
-			result.PartialTargetCount++
-			setTagStatus(&result, group.tags, TagStatusPartial, "")
-		} else {
-			result.CompletedTargetCount++
-			setTagStatus(&result, group.tags, TagStatusScanned, "")
-		}
-		if hasDiagnosticCode(scanResult.Diagnostics, "max_findings_exceeded") {
-			stopEarly(index+1, errors.New("scan reached the max findings limit"))
-			return result, newIncompleteError(result, nil)
-		}
-		result.TotalFindings = len(allDetailedFindings)
-		emitProgress(request, progressFromResult(request, result, ProgressPhaseTargetDone, "Target scan complete", firstTag(group.tags), scanResult.ResolvedReference))
-	}
+// stopEarly records every target the sweep did not reach so the per-target
+// accounting and tag_results describe the whole repository, then finalizes.
+func (s *repositorySweep) stopEarly(from int, cause error) {
+	markUnscannedTargets(s.result, s.request, s.groups[from:], cause)
+	finalizeResult(s.result, s.detailed, s.suppressed)
+}
 
-	finalizeResult(&result, allDetailedFindings, allSuppressedDetailedFindings)
-	if result.CompletedTargetCount+result.PartialTargetCount == 0 {
-		return result, allRepositoryTargetsFailedError(result.Targets)
+// scanGroup scans one target and records its outcome. It reports whether the
+// sweep stopped, with the error the scan returns.
+func (s *repositorySweep) scanGroup(ctx context.Context, index int, group targetGroup) (bool, error) {
+	findingsRetained := len(s.detailed) + len(s.suppressed)
+	rawBytesRetained := detailedRawBytes(s.detailed) + detailedRawBytes(s.suppressed)
+	if s.request.MaxFindings > 0 && findingsRetained >= s.request.MaxFindings {
+		return true, s.stopAtMaxFindings(index, findingsRetained, group)
 	}
-	emitProgress(request, progressFromResult(request, result, ProgressPhaseCompleted, "Repository scan complete", "", ""))
+	scanReference := s.request.Reference.WithDigest(group.digest)
+	scanResult, err := scanTarget(ctx, s.request, scanReference, group.tags, s.targetProgress(group, scanReference, findingsRetained, rawBytesRetained))
+	targetResult := targetResultFromScanResult(scanReference, scanResult, group.tags)
+	s.accumulate(scanResult)
+	if err != nil {
+		return s.recordFailedTarget(index, group, scanReference, targetResult, scanResult, err)
+	}
+	return s.recordScannedTarget(index, group, targetResult, scanResult)
+}
 
-	if result.Status != ResultStatusCompleted {
-		return result, newIncompleteError(result, nil)
+// stopAtMaxFindings stops the sweep before a target once the retained
+// findings reached the max findings limit.
+func (s *repositorySweep) stopAtMaxFindings(index, findingsRetained int, group targetGroup) error {
+	diagnostic := maxFindingsDiagnostic(s.request.MaxFindings, findingsRetained, group.digest)
+	s.result.Diagnostics = append(s.result.Diagnostics, diagnostic)
+	s.result.Coverage.Complete = false
+	s.stopEarly(index, errors.New(diagnostic.Message))
+	return newIncompleteError(*s.result, nil)
+}
+
+// targetProgress is the progress context of the target about to be scanned.
+func (s *repositorySweep) targetProgress(group targetGroup, scanReference manifest.Reference, findingsRetained int, rawBytesRetained int64) progressState {
+	return progressState{
+		tagsCompleted:    s.result.TagsResolved,
+		tagsTotal:        s.result.TagsEnumerated,
+		tagsFailed:       s.result.TagsFailed,
+		targetsCompleted: s.result.CompletedTargetCount,
+		targetsPartial:   s.result.PartialTargetCount,
+		targetsFailed:    s.result.FailedTargetCount,
+		targetsTotal:     s.result.TargetCount,
+		currentTag:       firstTag(group.tags),
+		currentRef:       scanReference.CanonicalString(""),
+		findingsBefore:   len(s.detailed),
+		findingsRetained: findingsRetained,
+		rawBytesRetained: rawBytesRetained,
+		layerCache:       s.layerCache,
 	}
-	return result, nil
+}
+
+// accumulate adds one target's manifests, findings, coverage and diagnostics
+// to the sweep totals.
+func (s *repositorySweep) accumulate(scanResult scanner.Result) {
+	s.result.ManifestCount += scanResult.ManifestCount
+	s.result.CompletedManifestCount += scanResult.CompletedManifestCount
+	s.result.FailedManifestCount += scanResult.FailedManifestCount
+	s.detailed = append(s.detailed, scanResult.DetailedFindings...)
+	s.suppressed = append(s.suppressed, scanResult.SuppressedDetailedFindings...)
+	s.result.Coverage = mergeCoverage(s.result.Coverage, scanResult.Coverage)
+	s.result.Diagnostics = append(s.result.Diagnostics, scanResult.Diagnostics...)
+}
+
+// recordFailedTarget counts a target whose scan returned an error as partial
+// or failed. A limit or a preserved error stops the sweep.
+func (s *repositorySweep) recordFailedTarget(index int, group targetGroup, scanReference manifest.Reference, targetResult TargetResult, scanResult scanner.Result, err error) (bool, error) {
+	targetResult.Error = err.Error()
+	s.result.Targets = append(s.result.Targets, targetResult)
+	tagStatus := TagStatusFailed
+	if scanResult.CompletedManifestCount > 0 {
+		s.result.PartialTargetCount++
+		tagStatus = TagStatusPartial
+	} else {
+		s.result.FailedTargetCount++
+	}
+	setTagStatus(s.result, group.tags, tagStatus, err.Error())
+	s.result.TotalFindings = len(s.detailed)
+	emitProgress(s.request, progressFromResult(s.request, *s.result, ProgressPhaseTargetFailed, err.Error(), firstTag(group.tags), scanReference.CanonicalString("")))
+	if limits.IsExceeded(err) || mustPreserveScanError(err) {
+		s.stopEarly(index+1, err)
+		return true, err
+	}
+	return false, nil
+}
+
+// recordScannedTarget counts a target whose scan returned no error as
+// completed or partial. Reaching the max findings limit stops the sweep.
+func (s *repositorySweep) recordScannedTarget(index int, group targetGroup, targetResult TargetResult, scanResult scanner.Result) (bool, error) {
+	s.result.Targets = append(s.result.Targets, targetResult)
+	if scanResult.Status == scanner.ResultStatusPartial {
+		s.result.PartialTargetCount++
+		setTagStatus(s.result, group.tags, TagStatusPartial, "")
+	} else {
+		s.result.CompletedTargetCount++
+		setTagStatus(s.result, group.tags, TagStatusScanned, "")
+	}
+	if hasDiagnosticCode(scanResult.Diagnostics, "max_findings_exceeded") {
+		s.stopEarly(index+1, errors.New("scan reached the max findings limit"))
+		return true, newIncompleteError(*s.result, nil)
+	}
+	s.result.TotalFindings = len(s.detailed)
+	emitProgress(s.request, progressFromResult(s.request, *s.result, ProgressPhaseTargetDone, "Target scan complete", firstTag(group.tags), scanResult.ResolvedReference))
+	return false, nil
+}
+
+// finish finalizes a sweep that reached every target.
+func (s *repositorySweep) finish() (Result, error) {
+	finalizeResult(s.result, s.detailed, s.suppressed)
+	if s.result.CompletedTargetCount+s.result.PartialTargetCount == 0 {
+		return *s.result, allRepositoryTargetsFailedError(s.result.Targets)
+	}
+	emitProgress(s.request, progressFromResult(s.request, *s.result, ProgressPhaseCompleted, "Repository scan complete", "", ""))
+
+	if s.result.Status != ResultStatusCompleted {
+		return *s.result, newIncompleteError(*s.result, nil)
+	}
+	return *s.result, nil
 }
 
 // setTagStatus records the outcome of a target on every tag that resolved to

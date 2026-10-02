@@ -60,39 +60,65 @@ func (d discordBotTokenDetector) Scan(input ScanInput) []Match {
 // discordBotTokenAt reports the span of a token whose first '.' is at dot and
 // whose start is not before searchStart.
 func discordBotTokenAt(content string, searchStart, dot int) (int, int, bool) {
-	// First segment: 23-28 alphanumerics ending at the dot, starting at a word
-	// boundary. A longer run cannot match because \b only holds at its start.
+	start, ok := discordFirstSegmentStart(content, searchStart, dot)
+	if !ok {
+		return 0, 0, false
+	}
+	middleEnd, ok := discordMiddleSegmentEnd(content, dot+1)
+	if !ok {
+		return 0, 0, false
+	}
+	end, ok := discordThirdSegmentEnd(content, middleEnd+1)
+	if !ok {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// discordFirstSegmentStart finds the first segment: 23-28 alphanumerics ending
+// at the dot, starting at a word boundary. A longer run cannot match because
+// \b only holds at its start.
+func discordFirstSegmentStart(content string, searchStart, dot int) (int, bool) {
 	start := dot
 	for start > 0 && isAlphanumericByte(content[start-1]) {
 		start--
 	}
 	if length := dot - start; length < 23 || length > 28 {
-		return 0, 0, false
+		return 0, false
 	}
-	if start < searchStart || (start > 0 && isWordByte(content[start-1])) {
-		return 0, 0, false
-	}
+	return start, startsAtWordBoundary(content, searchStart, start)
+}
 
-	// Second segment: exactly 6-8 token bytes between the two dots.
-	middle := dot + 1
+// discordMiddleSegmentEnd finds the second segment: exactly 6-8 token bytes
+// between the two dots. It returns the index of the second dot.
+func discordMiddleSegmentEnd(content string, middle int) (int, bool) {
 	middleEnd := middle
 	for middleEnd < len(content) && isTokenByte(content[middleEnd]) {
 		middleEnd++
 	}
 	if length := middleEnd - middle; length < 6 || length > 8 || middleEnd >= len(content) || content[middleEnd] != '.' {
-		return 0, 0, false
+		return 0, false
 	}
+	return middleEnd, true
+}
 
-	// Third segment: at least 27 token bytes, greedy up to 38.
-	third := middleEnd + 1
+// discordThirdSegmentEnd finds the third segment: at least 27 token bytes,
+// greedy up to 38.
+func discordThirdSegmentEnd(content string, third int) (int, bool) {
 	end := third
 	for end < len(content) && end-third < 38 && isTokenByte(content[end]) {
 		end++
 	}
 	if end-third < 27 {
-		return 0, 0, false
+		return 0, false
 	}
-	return start, end, true
+	return end, true
+}
+
+// startsAtWordBoundary reports whether a match starting at start lies inside
+// the search window and begins at a \b word boundary.
+func startsAtWordBoundary(content string, searchStart, start int) bool {
+	return start >= searchStart && (start == 0 || !isWordByte(content[start-1]))
 }
 
 // telegramBotTokenDetector implements
@@ -141,24 +167,41 @@ func (d telegramBotTokenDetector) Scan(input ScanInput) []Match {
 }
 
 func telegramBotTokenAt(content string, searchStart, colon int) (int, int, bool) {
+	start, ok := telegramBotIDStart(content, searchStart, colon)
+	if !ok {
+		return 0, 0, false
+	}
+	end, ok := telegramSecretEnd(content, colon+1)
+	if !ok {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// telegramBotIDStart finds the 8-10 digit bot id ending at the colon, starting
+// at a word boundary.
+func telegramBotIDStart(content string, searchStart, colon int) (int, bool) {
 	start := colon
 	for start > 0 && isDigitByte(content[start-1]) {
 		start--
 	}
 	if length := colon - start; length < 8 || length > 10 {
-		return 0, 0, false
+		return 0, false
 	}
-	if start < searchStart || (start > 0 && isWordByte(content[start-1])) {
-		return 0, 0, false
-	}
-	end := colon + 1
-	for end < len(content) && end-(colon+1) < 35 && isTokenByte(content[end]) {
+	return start, startsAtWordBoundary(content, searchStart, start)
+}
+
+// telegramSecretEnd finds the 35 token bytes after the colon and requires the
+// trailing boundary, so a longer secret is not cut at 35 characters.
+func telegramSecretEnd(content string, secret int) (int, bool) {
+	end := secret
+	for end < len(content) && end-secret < 35 && isTokenByte(content[end]) {
 		end++
 	}
-	if end-(colon+1) < 35 || (end < len(content) && isTokenByte(content[end])) {
-		return 0, 0, false
+	if end-secret < 35 || (end < len(content) && isTokenByte(content[end])) {
+		return 0, false
 	}
-	return start, end, true
+	return end, true
 }
 
 func isDigitByte(b byte) bool {

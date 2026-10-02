@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""
-Validate Layerleak's published JSON Schemas and the fixtures they govern.
-
-Checks that web/docs/schemas/result-v2.schema.json and
-scan-record-v2.schema.json are valid JSON Schema 2020-12 documents, then
-validates the golden CLI fixtures (internal/cli/testdata/result-v2.json and
-scan-record-v2.json) and every result object embedded in the API contract
-fixtures (web/testdata/api/*.json) against them. Extra files given on the
-command line are validated too: a document with a top-level
-record_schema_version is a scan record, one with result_schema_version is a
-result, and any other document is searched for embedded results.
-
-Exit status is 0 when every document validates.
-"""
+"""Validate Layerleak's published JSON Schemas and the fixtures they govern."""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +9,18 @@ import sys
 
 import jsonschema
 from referencing import Registry, Resource
+
+DETAILS = '''\
+Checks that web/docs/schemas/result-v2.schema.json and
+scan-record-v2.schema.json are valid JSON Schema 2020-12 documents, then
+validates the golden CLI fixtures (internal/cli/testdata/result-v2.json and
+scan-record-v2.json) and every result object embedded in the API contract
+fixtures (web/testdata/api/*.json) against them. Extra files given on the
+command line are validated too: a document with a top-level
+record_schema_version is a scan record, one with result_schema_version is a
+result, and any other document is searched for embedded results.
+
+Exit status is 0 when every document validates.'''
 
 RESULT_SCHEMA = os.path.join('web', 'docs', 'schemas', 'result-v2.schema.json')
 RECORD_SCHEMA = os.path.join('web', 'docs', 'schemas', 'scan-record-v2.schema.json')
@@ -113,7 +112,7 @@ def default_files(root: str) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=__doc__, epilog=DETAILS, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('files', nargs='*', help='additional result or scan-record JSON files to validate')
     parser.add_argument('--root', default=repository_root(), help='repository root (default: the parent of scripts/)')
     parser.add_argument('--no-defaults', action='store_true', help='validate only the files given on the command line')

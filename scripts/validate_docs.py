@@ -370,13 +370,10 @@ def _web_default(cell):
 
 
 def validate_web_variables(root: Path):
-    """
-    Keep the site's configuration tables in step with README in both directions.
-
-    Every LAYERLEAK_* variable the site mentions must have a README table row,
-    every README row must have a site table row, and both must state the same
-    default.
-    """
+    """Keep the site's configuration tables in step with README in both directions."""
+    # Every LAYERLEAK_* variable the site mentions must have a README table
+    # row, every README row must have a site table row, and both must state
+    # the same default.
     readme = (root / "README.md").read_text(encoding="utf-8")
     documented = set(README_VARIABLE_ROW.findall(readme))
     if len(documented) < 50:

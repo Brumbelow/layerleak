@@ -207,14 +207,11 @@ def _checksum_entry(number, line, entries, expected):
 
 
 def parse_cli_checksums(text, version):
-    """
-    Parse a sha256sum-format checksums file that names exactly the expected archives.
-
-    Returns an ordered mapping of archive name to lowercase hex digest. The file
-    must use LF line endings, end with a newline, carry two-space separators
-    without the binary marker, contain no paths, and list the archives in
-    sorted order with no duplicates, omissions or extras.
-    """
+    """Return the archive-to-digest mapping of a checksums file naming exactly the expected archives."""
+    # The mapping is ordered and digests are lowercase hex. The file must use
+    # LF line endings, end with a newline, carry two-space separators without
+    # the binary marker, contain no paths, and list the archives in sorted
+    # order with no duplicates, omissions or extras.
     expected = expected_cli_archives(version)
     entries = {}
     for number, line in _checksum_lines(text):

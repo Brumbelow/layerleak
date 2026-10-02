@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Validate SARIF 2.1.0 files against the OASIS schema.
-
-The schema is fetched from json.schemastore.org and pinned by SHA-256 so a
-silently changed copy fails closed; pass --schema to use a local file instead
-(for offline runs or tests). Exit status is 0 when every file validates.
-"""
+"""Validate SARIF 2.1.0 files against the OASIS schema."""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +11,11 @@ import tempfile
 import urllib.request
 
 import jsonschema
+
+DETAILS = '''\
+The schema is fetched from json.schemastore.org and pinned by SHA-256 so a
+silently changed copy fails closed; pass --schema to use a local file instead
+(for offline runs or tests). Exit status is 0 when every file validates.'''
 
 SCHEMA_URL = 'https://json.schemastore.org/sarif-2.1.0.json'
 # sha256 of the schemastore copy reviewed on 2026-10-01. Re-pin deliberately
@@ -73,7 +72,9 @@ def validate_file(validator: jsonschema.protocols.Validator, path: str) -> list[
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, epilog=DETAILS, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument('files', nargs='+', help='SARIF files to validate')
     parser.add_argument('--schema', help='local schema file instead of the pinned download')
     parser.add_argument('--cache-dir', help='directory for the downloaded schema')

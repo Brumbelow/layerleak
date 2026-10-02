@@ -771,6 +771,73 @@ func TestReplayRollsBackFailedLayer(t *testing.T) {
 	}
 }
 
+// trackedLayerStream is a layer body whose Close is counted and can fail.
+type trackedLayerStream struct {
+	io.Reader
+	closes   *int
+	closeErr error
+}
+
+func (s trackedLayerStream) Close() error {
+	*s.closes++
+	return s.closeErr
+}
+
+// TestReplayWrapsOpenApplyAndCloseErrors pins the wrapping, the stream
+// closing and the coverage counters when the second of two layers fails to
+// open, to apply or to close.
+func TestReplayWrapsOpenApplyAndCloseErrors(t *testing.T) {
+	good := gzipLayer(t, []tarEntry{{name: "app/lower.txt", body: "lower"}})
+	sentinel := errors.New("synthetic layer failure")
+	tests := []struct {
+		name       string
+		openErr    error
+		body       []byte
+		closeErr   error
+		wantPrefix string
+		wantSame   bool
+		wantCloses int
+	}{
+		{name: "open", openErr: sentinel, wantPrefix: "open layer sha256:upper: ", wantSame: true, wantCloses: 1},
+		{name: "apply", body: []byte("not a gzip stream"), wantPrefix: "apply layer sha256:upper: ", wantCloses: 2},
+		{name: "close", body: good, closeErr: sentinel, wantPrefix: "close layer sha256:upper: ", wantSame: true, wantCloses: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			closes := 0
+			descriptors := []manifest.Descriptor{
+				{Digest: "sha256:lower", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+				{Digest: "sha256:upper", MediaType: manifest.MediaTypeDockerSchema2LayerGzip},
+			}
+			opener := OpenFunc(func(_ context.Context, descriptor manifest.Descriptor) (io.ReadCloser, error) {
+				if descriptor.Digest == "sha256:lower" {
+					return trackedLayerStream{Reader: bytes.NewReader(good), closes: &closes}, nil
+				}
+				if test.openErr != nil {
+					return nil, test.openErr
+				}
+				return trackedLayerStream{Reader: bytes.NewReader(test.body), closes: &closes, closeErr: test.closeErr}, nil
+			})
+			result, err := Replay(context.Background(), descriptors, ReplayOptions{MaxFileBytes: 1 << 20}, opener)
+			if err == nil || !strings.HasPrefix(err.Error(), test.wantPrefix) {
+				t.Fatalf("Replay() error = %v, want prefix %q", err, test.wantPrefix)
+			}
+			if test.wantSame && (!errors.Is(err, sentinel) || err.Error() != test.wantPrefix+sentinel.Error()) {
+				t.Fatalf("Replay() error = %v, want it to wrap %v", err, sentinel)
+			}
+			if closes != test.wantCloses {
+				t.Fatalf("closes = %d, want %d", closes, test.wantCloses)
+			}
+			if result.Coverage.LayersSeen != 2 || result.Coverage.LayersCompleted != 1 {
+				t.Fatalf("result.Coverage = %#v", result.Coverage)
+			}
+			if len(result.FinalFiles) == 0 || result.FinalFiles[0].Path != "app/lower.txt" {
+				t.Fatalf("result.FinalFiles = %#v", result.FinalFiles)
+			}
+		})
+	}
+}
+
 func TestReplayEnforcesAggregateLimitsTransactionally(t *testing.T) {
 	lower := gzipLayer(t, []tarEntry{{name: "app/lower.txt", body: "lower"}})
 	upper := gzipLayer(t, []tarEntry{{name: "app/upper.txt", body: "upper"}})

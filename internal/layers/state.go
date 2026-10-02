@@ -244,10 +244,8 @@ func Replay(ctx context.Context, descriptors []manifest.Descriptor, options Repl
 	state := NewState()
 	// Decide up front whether the whole manifest can be replayed so that no
 	// blob is downloaded for an image whose later layers are unscannable.
-	for index, descriptor := range descriptors {
-		if !manifest.IsLayerMediaType(descriptor.MediaType) {
-			return state.Result(), &UnsupportedLayerError{Index: index, Digest: descriptor.Digest, MediaType: descriptor.MediaType}
-		}
+	if err := checkLayerMediaTypes(descriptors); err != nil {
+		return state.Result(), err
 	}
 	for _, descriptor := range descriptors {
 		if err := contextError(ctx); err != nil {
@@ -255,34 +253,53 @@ func Replay(ctx context.Context, descriptors []manifest.Descriptor, options Repl
 		}
 		state.coverage.LayersSeen++
 
-		if !options.SkipCacheLookup {
-			if record := options.Cache.lookup(descriptor); record != nil {
-				// The layer's entry list is known and its files are known to
-				// hold no findings: replay it without touching the registry.
-				if err := state.applyCachedLayer(ctx, descriptor, record, options); err != nil {
-					return state.Result(), fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
-				}
-				state.coverage.LayersCompleted++
-				continue
-			}
-		}
-
-		stream, err := opener.OpenLayer(ctx, descriptor)
-		if err != nil {
-			return state.Result(), fmt.Errorf("open layer %s: %w", descriptor.Digest, err)
-		}
-
-		if err := state.applyLayer(ctx, descriptor, stream, options); err != nil {
-			_ = stream.Close()
-			return state.Result(), fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
-		}
-		if err := stream.Close(); err != nil {
-			return state.Result(), fmt.Errorf("close layer %s: %w", descriptor.Digest, err)
+		if err := state.replayLayer(ctx, descriptor, options, opener); err != nil {
+			return state.Result(), err
 		}
 		state.coverage.LayersCompleted++
 	}
 
 	return state.Result(), nil
+}
+
+// checkLayerMediaTypes reports the first descriptor whose media type is not
+// a layer media type Replay can apply.
+func checkLayerMediaTypes(descriptors []manifest.Descriptor) error {
+	for index, descriptor := range descriptors {
+		if !manifest.IsLayerMediaType(descriptor.MediaType) {
+			return &UnsupportedLayerError{Index: index, Digest: descriptor.Digest, MediaType: descriptor.MediaType}
+		}
+	}
+	return nil
+}
+
+// replayLayer applies one layer to the state: from the layer cache when it
+// holds the layer, otherwise from the blob the opener returns.
+func (s *State) replayLayer(ctx context.Context, descriptor manifest.Descriptor, options ReplayOptions, opener BlobOpener) error {
+	if !options.SkipCacheLookup {
+		if record := options.Cache.lookup(descriptor); record != nil {
+			// The layer's entry list is known and its files are known to
+			// hold no findings: replay it without touching the registry.
+			if err := s.applyCachedLayer(ctx, descriptor, record, options); err != nil {
+				return fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
+			}
+			return nil
+		}
+	}
+
+	stream, err := opener.OpenLayer(ctx, descriptor)
+	if err != nil {
+		return fmt.Errorf("open layer %s: %w", descriptor.Digest, err)
+	}
+
+	if err := s.applyLayer(ctx, descriptor, stream, options); err != nil {
+		_ = stream.Close()
+		return fmt.Errorf("apply layer %s: %w", descriptor.Digest, err)
+	}
+	if err := stream.Close(); err != nil {
+		return fmt.Errorf("close layer %s: %w", descriptor.Digest, err)
+	}
+	return nil
 }
 
 func (s *State) Result() ReplayResult {

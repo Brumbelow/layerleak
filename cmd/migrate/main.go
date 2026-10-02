@@ -100,9 +100,39 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 		return exitOK, nil
 	}
 
+	settings, err := migrationSettingsFromEnv()
+	if err != nil {
+		return exitError, err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := migrationContext(ctx, settings.timeout)
+	defer cancel()
+
+	config := settings.migrationConfig(stderr)
+	switch selected {
+	case modeStatus, modeDryRun:
+		return runStatus(ctx, config, selected, stdout, settings.timeout)
+	default:
+	}
+	return runApply(ctx, config, stdout, settings.timeout)
+}
+
+// migrationSettings is the environment-supplied configuration of a run.
+type migrationSettings struct {
+	databaseURL   string
+	migrationsDir string
+	timeout       time.Duration
+	lockTimeout   time.Duration
+}
+
+// migrationSettingsFromEnv reads the database URL, migrations directory and
+// the two timeouts, in that order, failing on the first invalid value.
+func migrationSettingsFromEnv() (migrationSettings, error) {
 	databaseURL := strings.TrimSpace(os.Getenv("LAYERLEAK_DATABASE_URL"))
 	if databaseURL == "" {
-		return exitError, fmt.Errorf("LAYERLEAK_DATABASE_URL is required")
+		return migrationSettings{}, fmt.Errorf("LAYERLEAK_DATABASE_URL is required")
 	}
 	migrationsDir := strings.TrimSpace(os.Getenv("LAYERLEAK_MIGRATIONS_DIR"))
 	if migrationsDir == "" {
@@ -110,42 +140,45 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	timeout, err := durationFromEnv(migrationTimeoutEnv, defaultMigrationTimeout)
 	if err != nil {
-		return exitError, err
+		return migrationSettings{}, err
 	}
 	lockTimeout, err := durationFromEnv(migrationLockTimeoutEnv, storage.DefaultMigrationLockTimeout)
 	if err != nil {
-		return exitError, err
+		return migrationSettings{}, err
 	}
+	return migrationSettings{databaseURL: databaseURL, migrationsDir: migrationsDir, timeout: timeout, lockTimeout: lockTimeout}, nil
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	ctx, cancel := migrationContext(ctx, timeout)
-	defer cancel()
-
-	config := storage.MigrationConfig{
-		DatabaseURL: databaseURL,
-		Directory:   migrationsDir,
-		LockTimeout: lockTimeout,
+// migrationConfig builds the storage configuration, reporting progress on
+// stderr.
+func (s migrationSettings) migrationConfig(stderr io.Writer) storage.MigrationConfig {
+	return storage.MigrationConfig{
+		DatabaseURL: s.databaseURL,
+		Directory:   s.migrationsDir,
+		LockTimeout: s.lockTimeout,
 		Progress: func(message string) {
 			_, _ = fmt.Fprintln(stderr, message)
 		},
 	}
+}
 
-	switch selected {
-	case modeStatus, modeDryRun:
-		status, err := storage.MigrationStatus(ctx, config)
-		if err != nil {
-			return exitError, timeoutHint(ctx, err, timeout)
-		}
-		if selected == modeDryRun {
-			renderDryRun(stdout, status)
-			return exitOK, nil
-		}
-		renderStatus(stdout, status)
-		return statusExitCode(status), nil
-	default:
+// runStatus prints the read-only status (or the dry-run plan) and maps it to
+// the documented exit code.
+func runStatus(ctx context.Context, config storage.MigrationConfig, selected mode, stdout io.Writer, timeout time.Duration) (int, error) {
+	status, err := storage.MigrationStatus(ctx, config)
+	if err != nil {
+		return exitError, timeoutHint(ctx, err, timeout)
 	}
+	if selected == modeDryRun {
+		renderDryRun(stdout, status)
+		return exitOK, nil
+	}
+	renderStatus(stdout, status)
+	return statusExitCode(status), nil
+}
 
+// runApply applies the pending migrations and reports each one.
+func runApply(ctx context.Context, config storage.MigrationConfig, stdout io.Writer, timeout time.Duration) (int, error) {
 	result, err := storage.RunMigrations(ctx, config)
 	if err != nil {
 		return exitError, timeoutHint(ctx, err, timeout)

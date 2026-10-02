@@ -76,24 +76,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(cfg.DatabaseURL) == "" {
-		return fmt.Errorf("LAYERLEAK_DATABASE_URL is required")
-	}
-	store, err := storage.NewPostgresStore(storage.PostgresConfig{
-		DatabaseURL:       cfg.DatabaseURL,
-		PersistRawSecrets: false,
-		MaxOpenConns:      cfg.DatabaseMaxOpenConns,
-		MaxIdleConns:      cfg.DatabaseMaxIdleConns,
-		ConnMaxLifetime:   cfg.DatabaseConnMaxLifetime,
-		ConnMaxIdleTime:   cfg.DatabaseConnMaxIdleTime,
-		QueryTimeout:      cfg.DatabaseQueryTimeout,
-		WriteTimeout:      cfg.DatabaseWriteTimeout,
-		RequireSchema:     true,
-	})
+	store, err := openPurgeStore()
 	if err != nil {
 		return err
 	}
@@ -105,21 +88,54 @@ func run(args []string, stdout, stderr io.Writer) error {
 	defer cancel()
 
 	if parsed.dryRun {
-		counts, err := store.CountRawSecrets(ctx)
-		if err != nil {
-			return err
-		}
-		_, _ = fmt.Fprintf(stdout,
-			"dry run: %d raw finding value(s) and %d raw occurrence snippet(s) would be purged in batches of %d rows; nothing was changed\n",
-			counts.FindingValues,
-			counts.OccurrenceSnippets,
-			parsed.batchSize,
-		)
-		return nil
+		return runDryRun(ctx, store, stdout, parsed.batchSize)
 	}
+	return runPurge(ctx, store, parsed.batchSize, timeout, stdout, stderr)
+}
 
+// openPurgeStore opens the store from the environment configuration. Raw
+// secret persistence is always off for this command.
+func openPurgeStore() (*storage.PostgresStore, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		return nil, fmt.Errorf("LAYERLEAK_DATABASE_URL is required")
+	}
+	return storage.NewPostgresStore(storage.PostgresConfig{
+		DatabaseURL:       cfg.DatabaseURL,
+		PersistRawSecrets: false,
+		MaxOpenConns:      cfg.DatabaseMaxOpenConns,
+		MaxIdleConns:      cfg.DatabaseMaxIdleConns,
+		ConnMaxLifetime:   cfg.DatabaseConnMaxLifetime,
+		ConnMaxIdleTime:   cfg.DatabaseConnMaxIdleTime,
+		QueryTimeout:      cfg.DatabaseQueryTimeout,
+		WriteTimeout:      cfg.DatabaseWriteTimeout,
+		RequireSchema:     true,
+	})
+}
+
+// runDryRun reports the counts a purge would clear without changing anything.
+func runDryRun(ctx context.Context, store *storage.PostgresStore, stdout io.Writer, batchSize int) error {
+	counts, err := store.CountRawSecrets(ctx)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stdout,
+		"dry run: %d raw finding value(s) and %d raw occurrence snippet(s) would be purged in batches of %d rows; nothing was changed\n",
+		counts.FindingValues,
+		counts.OccurrenceSnippets,
+		batchSize,
+	)
+	return nil
+}
+
+// runPurge clears the raw material in batches, reporting progress on stderr,
+// then recounts so residue left by a still-running writer is an error.
+func runPurge(ctx context.Context, store *storage.PostgresStore, batchSize int, timeout time.Duration, stdout, stderr io.Writer) error {
 	counts, err := store.PurgeRawSecrets(ctx, storage.PurgeOptions{
-		BatchSize: parsed.batchSize,
+		BatchSize: batchSize,
 		Progress: func(progress storage.PurgeProgress) {
 			_, _ = fmt.Fprintf(stderr,
 				"cleared %d %s row(s); running total %d raw finding value(s), %d raw occurrence snippet(s)\n",
@@ -131,19 +147,30 @@ func run(args []string, stdout, stderr io.Writer) error {
 		},
 	})
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0 {
-			return fmt.Errorf("%w (%s=%s elapsed after clearing %d finding value(s) and %d occurrence snippet(s); completed batches stay purged, rerun to continue)",
-				err, purgeTimeoutEnv, timeout, counts.FindingValues, counts.OccurrenceSnippets)
-		}
-		return fmt.Errorf("%w (cleared %d finding value(s) and %d occurrence snippet(s) before stopping; completed batches stay purged)", err, counts.FindingValues, counts.OccurrenceSnippets)
+		return purgeFailure(ctx, err, timeout, counts)
 	}
 	_, _ = fmt.Fprintf(stdout,
 		"purged %d raw finding value(s) and %d raw occurrence snippet(s)\n",
 		counts.FindingValues,
 		counts.OccurrenceSnippets,
 	)
-	// A writer that is still opted in can refill rows the batches already
-	// walked; recount so a "successful" purge never hides residue.
+	return checkPurgeResidue(ctx, store)
+}
+
+// purgeFailure reports how much was cleared before the purge stopped, naming
+// the run deadline when it was the cause.
+func purgeFailure(ctx context.Context, err error, timeout time.Duration, counts storage.RawSecretCounts) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) && timeout > 0 {
+		return fmt.Errorf("%w (%s=%s elapsed after clearing %d finding value(s) and %d occurrence snippet(s); completed batches stay purged, rerun to continue)",
+			err, purgeTimeoutEnv, timeout, counts.FindingValues, counts.OccurrenceSnippets)
+	}
+	return fmt.Errorf("%w (cleared %d finding value(s) and %d occurrence snippet(s) before stopping; completed batches stay purged)", err, counts.FindingValues, counts.OccurrenceSnippets)
+}
+
+// checkPurgeResidue recounts after a purge. A writer that is still opted in
+// can refill rows the batches already walked; recount so a "successful" purge
+// never hides residue.
+func checkPurgeResidue(ctx context.Context, store *storage.PostgresStore) error {
 	residue, err := store.CountRawSecrets(ctx)
 	if err != nil {
 		return fmt.Errorf("recount stored raw secrets after purge: %w", err)

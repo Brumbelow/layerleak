@@ -295,11 +295,33 @@ jobs:
     env:
       GOFLAGS: -mod=readonly
     steps:
-      - name: Checkout release source
+      # The checkout action fetches the workflow's own trusted commit; the
+      # release commit is selected only after this job has re-verified that it
+      # is reachable from origin/main, so nothing outside main is ever built
+      # here even if the validate job's output were altered.
+      - name: Checkout release workflow commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.validate.outputs.source_sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Select the validated release source
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The validated source SHA is not a full lowercase commit SHA." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${SOURCE_SHA}" origin/main; then
+            echo "The release commit is not reachable from origin/main." >&2
+            exit 1
+          fi
+          git checkout --quiet --detach "${SOURCE_SHA}"
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
 
       - name: Provision reviewed release tools
         shell: bash
@@ -1547,10 +1569,13 @@ jobs:
       packages: read
       attestations: read
     steps:
-      - name: Checkout released source
+      # Verification needs only the reviewed release scripts, so this job runs
+      # them from the workflow's own trusted commit, like supply-chain and
+      # registry-smoke, never from the release source.
+      - name: Checkout release workflow commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.validate.outputs.source_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Provision reviewed release tools

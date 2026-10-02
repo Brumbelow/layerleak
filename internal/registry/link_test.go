@@ -217,3 +217,33 @@ func TestListTagsFailsInsteadOfTruncatingOnMalformedLink(t *testing.T) {
 		t.Fatalf("requests = %d", requests)
 	}
 }
+
+func TestParseLinkHeaderParameterEdges(t *testing.T) {
+	links, err := parseLinkHeader(`</a>; rel; REL="next"; title=x,</b>;rel=prev`)
+	if err != nil {
+		t.Fatalf("parseLinkHeader() error = %v", err)
+	}
+	if len(links) != 2 || links[0].Target != "/a" || links[1].Target != "/b" {
+		t.Fatalf("links = %+v", links)
+	}
+	// A parameter without a value is recorded as empty, and the first
+	// occurrence of a (case-insensitive) name wins.
+	if value, ok := links[0].Params["rel"]; !ok || value != "" || links[0].Params["title"] != "x" {
+		t.Fatalf("first link params = %+v", links[0].Params)
+	}
+	if links[1].Params["rel"] != "prev" {
+		t.Fatalf("second link params = %+v", links[1].Params)
+	}
+
+	for header, want := range map[string]string{
+		`</a> rel="next"`:   "parse link header: unexpected character after link target",
+		`</a>; ="next"`:     "parse link header: missing parameter name",
+		`</a>;`:             "parse link header: missing parameter name",
+		`</a>; rel="next\`:  "parse link header: unterminated quoted value",
+		`</a>; rel=next, x`: "parse link header: missing link target",
+	} {
+		if _, err := parseLinkHeader(header); err == nil || err.Error() != want {
+			t.Fatalf("parseLinkHeader(%q) error = %v, want %q", header, err, want)
+		}
+	}
+}

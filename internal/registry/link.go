@@ -69,51 +69,79 @@ func parseLinkHeader(header string) ([]webLink, error) {
 		if rest == "" {
 			return links, nil
 		}
-		if rest[0] != '<' {
-			return nil, fmt.Errorf("parse link header: missing link target")
+		link, remaining, err := readLinkTarget(rest)
+		if err != nil {
+			return nil, err
 		}
-		end := strings.IndexByte(rest, '>')
-		if end < 0 {
-			return nil, fmt.Errorf("parse link header: unterminated link target")
-		}
-		link := webLink{Target: strings.TrimSpace(rest[1:end]), Params: make(map[string]string)}
-		if link.Target == "" {
-			return nil, fmt.Errorf("parse link header: missing url")
-		}
-		rest = rest[end+1:]
-
-		for {
-			rest = strings.TrimLeft(rest, " \t")
-			if rest == "" || rest[0] == ',' {
-				break
-			}
-			if rest[0] != ';' {
-				return nil, fmt.Errorf("parse link header: unexpected character after link target")
-			}
-			rest = strings.TrimLeft(rest[1:], " \t")
-			nameEnd := strings.IndexAny(rest, "=;, \t")
-			if nameEnd < 0 {
-				nameEnd = len(rest)
-			}
-			name := strings.ToLower(rest[:nameEnd])
-			if name == "" {
-				return nil, fmt.Errorf("parse link header: missing parameter name")
-			}
-			rest = strings.TrimLeft(rest[nameEnd:], " \t")
-			value := ""
-			if rest != "" && rest[0] == '=' {
-				var err error
-				value, rest, err = readParamValue(strings.TrimLeft(rest[1:], " \t"))
-				if err != nil {
-					return nil, err
-				}
-			}
-			if _, exists := link.Params[name]; !exists {
-				link.Params[name] = value
-			}
+		rest, err = readLinkParams(link.Params, remaining)
+		if err != nil {
+			return nil, err
 		}
 		links = append(links, link)
 	}
+}
+
+// readLinkTarget consumes the `<URI-Reference>` that starts a link-value and
+// returns the link with an empty parameter map and the remaining input.
+func readLinkTarget(rest string) (webLink, string, error) {
+	if rest[0] != '<' {
+		return webLink{}, "", fmt.Errorf("parse link header: missing link target")
+	}
+	end := strings.IndexByte(rest, '>')
+	if end < 0 {
+		return webLink{}, "", fmt.Errorf("parse link header: unterminated link target")
+	}
+	link := webLink{Target: strings.TrimSpace(rest[1:end]), Params: make(map[string]string)}
+	if link.Target == "" {
+		return webLink{}, "", fmt.Errorf("parse link header: missing url")
+	}
+	return link, rest[end+1:], nil
+}
+
+// readLinkParams consumes the `; name=value` parameters of one link-value up
+// to the next comma or the end of the input. The first occurrence of a
+// parameter name wins.
+func readLinkParams(params map[string]string, rest string) (string, error) {
+	for {
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" || rest[0] == ',' {
+			return rest, nil
+		}
+		if rest[0] != ';' {
+			return "", fmt.Errorf("parse link header: unexpected character after link target")
+		}
+		name, value, remaining, err := readLinkParam(strings.TrimLeft(rest[1:], " \t"))
+		if err != nil {
+			return "", err
+		}
+		rest = remaining
+		if _, exists := params[name]; !exists {
+			params[name] = value
+		}
+	}
+}
+
+// readLinkParam consumes one parameter after its `;`: a lower-cased name and,
+// when an `=` follows, its token or quoted-string value.
+func readLinkParam(rest string) (string, string, string, error) {
+	nameEnd := strings.IndexAny(rest, "=;, \t")
+	if nameEnd < 0 {
+		nameEnd = len(rest)
+	}
+	name := strings.ToLower(rest[:nameEnd])
+	if name == "" {
+		return "", "", "", fmt.Errorf("parse link header: missing parameter name")
+	}
+	rest = strings.TrimLeft(rest[nameEnd:], " \t")
+	value := ""
+	if rest != "" && rest[0] == '=' {
+		var err error
+		value, rest, err = readParamValue(strings.TrimLeft(rest[1:], " \t"))
+		if err != nil {
+			return "", "", "", err
+		}
+	}
+	return name, value, rest, nil
 }
 
 // readParamValue consumes a token or quoted-string (with backslash escapes)

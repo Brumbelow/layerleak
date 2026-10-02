@@ -2,21 +2,22 @@
    browser, and the page renders without waiting on a network fetch. */
 :root {
   color-scheme: light dark;
+
   --paper: #f4f5ef;
-  --paper-strong: #ffffff;
+  --paper-strong: #fff;
   --ink: #17202a;
   --ink-soft: #526071;
   --ink-muted: #566474;
-  --line: rgba(23, 32, 42, 0.14);
-  --line-strong: rgba(23, 32, 42, 0.22);
+  --line: rgb(23 32 42 / 14%);
+  --line-strong: rgb(23 32 42 / 22%);
   --accent: #b84625;
   --accent-deep: #762c18;
   --signal: #0b6f63;
-  --signal-soft: rgba(11, 111, 99, 0.12);
+  --signal-soft: rgb(11 111 99 / 12%);
   --warn: #a65a0a;
-  --warn-soft: rgba(166, 90, 10, 0.12);
+  --warn-soft: rgb(166 90 10 / 12%);
   --focus: #0b6f63;
-  --shadow: 0 18px 44px rgba(23, 32, 42, 0.1);
+  --shadow: 0 18px 44px rgb(23 32 42 / 10%);
   --radius-lg: 8px;
   --radius-md: 8px;
   --radius-sm: 6px;
@@ -36,7 +37,7 @@ html {
 body {
   margin: 0;
   background:
-    linear-gradient(90deg, rgba(23, 32, 42, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(23 32 42 / 3.5%) 1px, transparent 1px),
     linear-gradient(180deg, #fbfbf7 0%, var(--paper) 56%, #e7ece6 100%);
   background-size: 44px 44px, auto;
   color: var(--ink);
@@ -93,7 +94,7 @@ pre,
 .command-chip,
 .table-shell,
 .site-kicker {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .site-shell {
@@ -181,7 +182,7 @@ pre,
 .nav-link:focus-visible,
 .nav-link.is-active {
   color: var(--ink);
-  background: rgba(255, 250, 241, 0.76);
+  background: rgb(255 250 241 / 76%);
   border-color: var(--line);
   transform: translateY(-1px);
 }
@@ -202,9 +203,9 @@ pre,
 .doc-block,
 .callout,
 .stat-card {
-  background: rgba(255, 250, 241, 0.78);
+  background: rgb(255 250 241 / 78%);
   backdrop-filter: blur(10px);
-  border: 1px solid rgba(24, 34, 45, 0.09);
+  border: 1px solid rgb(24 34 45 / 9%);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
 }
@@ -221,7 +222,7 @@ pre,
   inset: auto -4rem -6rem auto;
   width: 16rem;
   height: 16rem;
-  background: radial-gradient(circle, rgba(15, 118, 110, 0.16), transparent 70%);
+  background: radial-gradient(circle, rgb(15 118 110 / 16%), transparent 70%);
 }
 
 .hero-copy h1 {
@@ -269,15 +270,21 @@ pre,
 .button-primary {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff8ef;
-  box-shadow: 0 14px 30px rgba(193, 79, 43, 0.28);
+  box-shadow: 0 14px 30px rgb(193 79 43 / 28%);
   text-decoration: none;
 }
 
 .button-secondary {
-  background: rgba(255, 250, 241, 0.9);
+  background: rgb(255 250 241 / 90%);
   color: var(--ink);
   border: 1px solid var(--line);
   text-decoration: none;
+}
+
+.tab-button {
+  background: rgb(24 34 45 / 5%);
+  color: var(--ink-soft);
+  border: 1px solid transparent;
 }
 
 .button-primary:hover,
@@ -305,8 +312,8 @@ pre,
   min-width: 10rem;
   padding: 0.9rem 1rem;
   border-radius: var(--radius-md);
-  background: rgba(24, 34, 45, 0.03);
-  border: 1px solid rgba(24, 34, 45, 0.06);
+  background: rgb(24 34 45 / 3%);
+  border: 1px solid rgb(24 34 45 / 6%);
 }
 
 .metric-label {
@@ -359,7 +366,7 @@ pre,
   content: "";
   width: 1.15rem;
   height: 1px;
-  background: currentColor;
+  background: currentcolor;
 }
 
 .page-section {
@@ -388,8 +395,8 @@ pre,
 .card {
   padding: 1.35rem;
   border-radius: var(--radius-md);
-  background: rgba(255, 250, 241, 0.74);
-  border: 1px solid rgba(24, 34, 45, 0.08);
+  background: rgb(255 250 241 / 74%);
+  border: 1px solid rgb(24 34 45 / 8%);
   box-shadow: var(--shadow);
 }
 
@@ -427,13 +434,14 @@ pre,
   align-self: start;
   padding: 1.1rem 1.2rem;
   border-radius: var(--radius-lg);
-  background: rgba(255, 250, 241, 0.74);
-  border: 1px solid rgba(24, 34, 45, 0.08);
+  background: rgb(255 250 241 / 74%);
+  border: 1px solid rgb(24 34 45 / 8%);
   box-shadow: var(--shadow);
 }
 
 .docs-content {
   display: grid;
+
   /* minmax(0, 1fr): a long code line scrolls inside its pre instead of
      widening the column past the viewport. */
   grid-template-columns: minmax(0, 1fr);
@@ -454,7 +462,11 @@ pre,
   padding: 1.05rem 1.15rem;
   line-height: 1.55;
   font-size: 0.88rem;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 5%);
+}
+
+.table-wrap td code {
+  border-radius: 0.55rem;
 }
 
 .doc-block pre code {
@@ -470,17 +482,17 @@ pre,
   display: inline-block;
   padding: 0.14rem 0.42rem;
   border-radius: 4px;
-  background: rgba(24, 34, 45, 0.07);
+  background: rgb(24 34 45 / 7%);
   color: var(--accent-deep);
   font-size: 0.88em;
-  border: 1px solid rgba(24, 34, 45, 0.05);
+  border: 1px solid rgb(24 34 45 / 5%);
 }
 
 .simulation-banner {
   padding: 1rem 1.2rem;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, rgba(193, 79, 43, 0.1), rgba(15, 118, 110, 0.08));
-  border: 1px solid rgba(193, 79, 43, 0.18);
+  background: linear-gradient(135deg, rgb(193 79 43 / 10%), rgb(15 118 110 / 8%));
+  border: 1px solid rgb(193 79 43 / 18%);
   display: grid;
   gap: 0.35rem;
 }
@@ -504,15 +516,15 @@ pre,
   justify-content: space-between;
   gap: 1rem;
   padding: 1rem 1.15rem;
-  border: 1px solid rgba(24, 34, 45, 0.08);
+  border: 1px solid rgb(24 34 45 / 8%);
   border-radius: var(--radius-md);
-  background: rgba(24, 34, 45, 0.03);
+  background: rgb(24 34 45 / 3%);
 }
 
 .command-chip {
   color: var(--ink);
-  background: rgba(255, 255, 255, 0.66);
-  border: 1px solid rgba(24, 34, 45, 0.07);
+  background: rgb(255 255 255 / 66%);
+  border: 1px solid rgb(24 34 45 / 7%);
 }
 
 .terminal-shell {
@@ -537,7 +549,7 @@ pre,
   width: 0.72rem;
   height: 0.72rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.28);
+  background: rgb(255 255 255 / 28%);
 }
 
 .terminal-screen {
@@ -588,23 +600,17 @@ pre,
   margin: 0.8rem 0 1rem;
 }
 
-.tab-button {
-  background: rgba(24, 34, 45, 0.05);
-  color: var(--ink-soft);
-  border: 1px solid transparent;
-}
-
 .tab-button.is-active {
-  background: rgba(193, 79, 43, 0.12);
+  background: rgb(193 79 43 / 12%);
   color: var(--accent-deep);
-  border-color: rgba(193, 79, 43, 0.18);
+  border-color: rgb(193 79 43 / 18%);
 }
 
 .table-wrap {
   overflow: auto;
   border-radius: var(--radius-md);
-  border: 1px solid rgba(24, 34, 45, 0.08);
-  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgb(24 34 45 / 8%);
+  background: rgb(255 255 255 / 86%);
 }
 
 .table-wrap table {
@@ -618,7 +624,7 @@ pre,
   padding: 0.8rem 0.75rem;
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid rgba(24, 34, 45, 0.08);
+  border-bottom: 1px solid rgb(24 34 45 / 8%);
   font-size: 0.92rem;
 }
 
@@ -632,10 +638,6 @@ pre,
 
 .table-wrap td {
   color: var(--ink-soft);
-}
-
-.table-wrap td code {
-  border-radius: 0.55rem;
 }
 
 .table-empty {
@@ -685,9 +687,9 @@ pre,
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background:
-    linear-gradient(90deg, rgba(23, 32, 42, 0.06) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(23, 32, 42, 0.04) 1px, transparent 1px),
-    rgba(255, 255, 255, 0.78);
+    linear-gradient(90deg, rgb(23 32 42 / 6%) 1px, transparent 1px),
+    linear-gradient(180deg, rgb(23 32 42 / 4%) 1px, transparent 1px),
+    rgb(255 255 255 / 78%);
   background-size: 22px 22px;
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -706,7 +708,7 @@ pre,
 .docs-status-strip span,
 .doc-heading span {
   display: block;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.76rem;
   text-transform: uppercase;
   letter-spacing: 0.12em;
@@ -727,7 +729,7 @@ pre,
 
 .layer-stack {
   position: absolute;
-  inset: 6.4rem 2rem 6.4rem;
+  inset: 6.4rem 2rem;
   display: grid;
   align-content: center;
   gap: 0.65rem;
@@ -737,11 +739,11 @@ pre,
   width: min(100%, calc(72% + (var(--i) * 5%)));
   margin-left: calc(var(--i) * 1.2rem);
   padding: 0.78rem 0.9rem;
-  border: 1px solid rgba(23, 32, 42, 0.18);
-  background: rgba(244, 245, 239, 0.9);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  border: 1px solid rgb(23 32 42 / 18%);
+  background: rgb(244 245 239 / 90%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.86rem;
-  box-shadow: 7px 7px 0 rgba(11, 111, 99, 0.1);
+  box-shadow: 7px 7px 0 rgb(11 111 99 / 10%);
 }
 
 .docs-status-strip {
@@ -751,7 +753,7 @@ pre,
   grid-template-columns: repeat(4, minmax(0, 1fr));
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.78);
+  background: rgb(255 255 255 / 78%);
   overflow: hidden;
 }
 
@@ -768,7 +770,7 @@ pre,
 .docs-status-strip strong {
   display: block;
   margin-top: 0.3rem;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.92rem;
   overflow-wrap: anywhere;
   color: var(--ink);
@@ -780,7 +782,7 @@ pre,
 
 .docs-page .docs-nav,
 .docs-page .doc-block {
-  background: rgba(255, 255, 255, 0.82);
+  background: rgb(255 255 255 / 82%);
   border: 1px solid var(--line);
   box-shadow: none;
 }
@@ -791,6 +793,10 @@ pre,
 
 .docs-page .doc-block + .doc-block {
   border-top: 0;
+}
+
+.docs-grid article > * {
+  margin: 0;
 }
 
 .docs-page .doc-block > * + * {
@@ -826,7 +832,7 @@ pre,
 .docs-nav a:hover,
 .docs-nav a:focus-visible {
   color: var(--accent-deep);
-  background: rgba(193, 79, 43, 0.07);
+  background: rgb(193 79 43 / 7%);
 }
 
 .doc-heading {
@@ -843,8 +849,8 @@ pre,
   padding: 0.18rem 0.5rem;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
-  background: rgba(24, 34, 45, 0.04);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  background: rgb(24 34 45 / 4%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.78rem;
   letter-spacing: 0.06em;
   color: var(--ink);
@@ -867,13 +873,9 @@ pre,
   padding: 1.1rem;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: rgba(244, 245, 239, 0.75);
+  background: rgb(244 245 239 / 75%);
   display: grid;
   gap: 0.6rem;
-}
-
-.docs-grid article > * {
-  margin: 0;
 }
 
 .docs-grid h3 {
@@ -897,10 +899,10 @@ pre,
 
 .result-schema span {
   padding: 0.36rem 0.6rem;
-  border: 1px solid rgba(11, 111, 99, 0.22);
+  border: 1px solid rgb(11 111 99 / 22%);
   border-radius: 4px;
   background: var(--signal-soft);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.82rem;
   color: var(--ink);
 }
@@ -918,7 +920,7 @@ pre,
   padding: 0.55rem 0.85rem 0.55rem 1.5rem;
   border-left: 3px solid var(--signal);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  background: rgba(11, 111, 99, 0.06);
+  background: rgb(11 111 99 / 6%);
   color: var(--ink-soft);
   font-size: 0.94rem;
 }
@@ -954,11 +956,12 @@ pre,
   padding: 0.55rem 0.8rem;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  background: rgba(244, 245, 239, 0.65);
+  background: rgb(244 245 239 / 65%);
 }
 
+/* stylelint-disable-next-line no-descending-specificity -- these elements also match .doc-block code:not(pre code), which wins on specificity, not on source order */
 .api-list code {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.92rem;
   color: var(--ink);
   background: transparent;
@@ -975,7 +978,7 @@ pre,
   min-width: 3.4rem;
   padding: 0.18rem 0.55rem;
   border-radius: 4px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 0.72rem;
   letter-spacing: 0.06em;
   font-weight: 600;
@@ -985,13 +988,13 @@ pre,
 .verb-get {
   background: var(--signal-soft);
   color: var(--signal);
-  border: 1px solid rgba(11, 111, 99, 0.25);
+  border: 1px solid rgb(11 111 99 / 25%);
 }
 
 .verb-post {
-  background: rgba(193, 79, 43, 0.1);
+  background: rgb(193 79 43 / 10%);
   color: var(--accent-deep);
-  border: 1px solid rgba(193, 79, 43, 0.25);
+  border: 1px solid rgb(193 79 43 / 25%);
 }
 
 /* Reference tables scroll inside their own frame on narrow screens, so the
@@ -1043,7 +1046,7 @@ pre,
 
 /* On a phone the variable names wrap so the purpose column keeps a
    readable width inside the scrolling frame. */
-@media (max-width: 720px) {
+@media (width <= 720px) {
   .docs-page .table-shell table {
     min-width: 0;
   }
@@ -1067,7 +1070,7 @@ pre,
 .docs-page .callout {
   margin: 0.4rem 0 0;
   padding: 0.95rem 1.1rem;
-  background: rgba(244, 245, 239, 0.85);
+  background: rgb(244 245 239 / 85%);
   border: 1px solid var(--line);
   border-left: 3px solid var(--signal);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
@@ -1101,21 +1104,21 @@ pre,
     --ink: #e8edf2;
     --ink-soft: #b7c2cd;
     --ink-muted: #9aa7b4;
-    --line: rgba(232, 237, 242, 0.16);
-    --line-strong: rgba(232, 237, 242, 0.28);
+    --line: rgb(232 237 242 / 16%);
+    --line-strong: rgb(232 237 242 / 28%);
     --accent: #e8825f;
     --accent-deep: #b84625;
     --signal: #4fb8a8;
-    --signal-soft: rgba(79, 184, 168, 0.18);
+    --signal-soft: rgb(79 184 168 / 18%);
     --warn: #e0a24a;
-    --warn-soft: rgba(224, 162, 74, 0.18);
+    --warn-soft: rgb(224 162 74 / 18%);
     --focus: #4fb8a8;
-    --shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+    --shadow: 0 18px 44px rgb(0 0 0 / 45%);
   }
 
   body {
     background:
-      linear-gradient(90deg, rgba(232, 237, 242, 0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(232 237 242 / 4%) 1px, transparent 1px),
       linear-gradient(180deg, #0e1319 0%, var(--paper) 56%, #0b0f14 100%);
     background-size: 44px 44px, auto;
   }
@@ -1155,7 +1158,7 @@ pre,
   }
 
   .docs-page .callout {
-    background: rgba(79, 184, 168, 0.1);
+    background: rgb(79 184 168 / 10%);
   }
 
   .docs-page .callout.callout-warn {
@@ -1163,7 +1166,7 @@ pre,
   }
 }
 
-@media (max-width: 1024px) {
+@media (width <= 1024px) {
   .hero,
   .docs-shell,
   .docs-hero {
@@ -1191,7 +1194,7 @@ pre,
   }
 }
 
-@media (max-width: 720px) {
+@media (width <= 720px) {
   .site-header,
   .hero,
   .docs-hero,
@@ -1252,7 +1255,7 @@ pre,
   .layer-stack span {
     margin-left: 0;
     width: 100%;
-    box-shadow: 5px 5px 0 rgba(11, 111, 99, 0.08);
+    box-shadow: 5px 5px 0 rgb(11 111 99 / 8%);
   }
 
   .docs-status-strip div,

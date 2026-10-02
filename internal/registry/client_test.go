@@ -1084,3 +1084,65 @@ func (b *delayedBody) Close() error {
 	b.closed = true
 	return nil
 }
+
+func TestFetchTokenReportsMalformedRealmsAndResponses(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		realm   string
+		status  int
+		body    string
+		wantErr string
+	}{
+		{name: "missing realm", realm: "  ", wantErr: "bearer auth challenge is missing realm"},
+		{name: "unparsable realm", realm: "https://auth.test/%zz", wantErr: "auth realm is invalid"},
+		{name: "non-json body", realm: "https://auth.test/token", status: http.StatusOK, body: "not json", wantErr: "decode auth token response: "},
+		{name: "no token", realm: "https://auth.test/token", status: http.StatusOK, body: `{"expires_in":60}`, wantErr: "auth token response did not include a token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				return jsonResponse(test.status, "application/json", []byte(test.body), nil), nil
+			})
+			client := MustNewClient(Options{
+				BaseURL:           "https://registry.test",
+				AllowPrivateHosts: true,
+				RequestAttempts:   1,
+				HTTPClient:        &http.Client{Transport: transport},
+			})
+			_, err := client.fetchToken(context.Background(), bearerChallenge{Realm: test.realm}, Credential{}, true)
+			if err == nil || !strings.HasPrefix(err.Error(), test.wantErr) {
+				t.Fatalf("fetchToken() error = %v, want prefix %q", err, test.wantErr)
+			}
+			if test.status == 0 && requests != 0 {
+				t.Fatalf("requests = %d for a rejected realm", requests)
+			}
+			if len(client.tokenCache) != 0 {
+				t.Fatalf("token cache entries = %d after a failed fetch", len(client.tokenCache))
+			}
+		})
+	}
+}
+
+func TestFetchTokenReportsAuthStatusErrorWithRedactedRealm(t *testing.T) {
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusForbidden, "text/plain", []byte("denied"), nil), nil
+	})
+	client := MustNewClient(Options{
+		BaseURL:           "https://registry.test",
+		AllowPrivateHosts: true,
+		RequestAttempts:   1,
+		HTTPClient:        &http.Client{Transport: transport},
+	})
+	_, err := client.fetchToken(context.Background(), bearerChallenge{Realm: "https://auth.test/token", Service: "registry.test", Scope: "repository:library/app:pull"}, Credential{}, true)
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("fetchToken() error = %v, want *StatusError", err)
+	}
+	if statusErr.StatusCode != http.StatusForbidden || statusErr.Method != http.MethodGet || !statusErr.Auth {
+		t.Fatalf("StatusError = %+v", statusErr)
+	}
+	if statusErr.URL != redactURL("https://auth.test/token?scope=repository%3Alibrary%2Fapp%3Apull&service=registry.test") {
+		t.Fatalf("StatusError.URL = %q", statusErr.URL)
+	}
+}

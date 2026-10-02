@@ -119,50 +119,24 @@ func DefaultUserAgent() string {
 // are returned here rather than at the first request, so a misconfigured
 // deployment fails at startup instead of failing every scan.
 func NewClient(options Options) (*Client, error) {
-	registryAllowlist, registryAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateRegistryHosts)
-	authAllowlist, authAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateAuthHosts)
-	allowConfiguredHTTP := len(registryAllowlist) > 0 || len(authAllowlist) > 0
-	baseURL, baseErr := parseConfiguredEndpointURL(defaultString(options.BaseURL, "https://registry-1.docker.io"), allowConfiguredHTTP)
-	if baseErr != nil {
-		baseErr = fmt.Errorf("registry base url: %w", baseErr)
-	}
-	authURL, authErr := parseConfiguredEndpointURL(defaultString(options.AuthURL, "https://auth.docker.io/token"), allowConfiguredHTTP)
-	if authErr != nil {
-		authErr = fmt.Errorf("registry auth url: %w", authErr)
-	}
-	if err := errors.Join(baseErr, authErr, registryAllowlistErr, authAllowlistErr); err != nil {
+	endpoints, err := resolveClientEndpoints(options)
+	if err != nil {
 		return nil, err
 	}
-	httpClient := options.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
-	lookupIP := options.LookupIP
-	if lookupIP == nil {
-		lookupIP = net.DefaultResolver.LookupIPAddr
-	}
-	requestAttempts := options.RequestAttempts
-	if requestAttempts <= 0 {
-		requestAttempts = 2
-	}
-	maxRedirects := options.MaxRedirects
-	if maxRedirects <= 0 {
-		maxRedirects = 3
-	}
 	client := &Client{
-		baseURL:                     baseURL,
-		authURL:                     authURL,
-		httpClient:                  httpClient,
+		baseURL:                     endpoints.baseURL,
+		authURL:                     endpoints.authURL,
+		httpClient:                  httpClientOrDefault(options.HTTPClient),
 		requestTimeout:              options.RequestTimeout,
-		requestAttempts:             requestAttempts,
+		requestAttempts:             positiveOrDefault(options.RequestAttempts, 2),
 		maxManifestBytes:            options.MaxManifestBytes,
 		maxTagResponseBytes:         options.MaxTagResponseBytes,
 		maxAuthResponseBytes:        options.MaxAuthResponseBytes,
-		maxRedirects:                maxRedirects,
-		allowedPrivateRegistryHosts: registryAllowlist,
-		allowedPrivateAuthHosts:     authAllowlist,
+		maxRedirects:                positiveOrDefault(options.MaxRedirects, 3),
+		allowedPrivateRegistryHosts: endpoints.registryAllowlist,
+		allowedPrivateAuthHosts:     endpoints.authAllowlist,
 		allowPrivateHosts:           options.AllowPrivateHosts,
-		lookupIP:                    lookupIP,
+		lookupIP:                    lookupIPOrDefault(options.LookupIP),
 		userAgent:                   defaultString(strings.TrimSpace(options.UserAgent), DefaultUserAgent()),
 		credentials:                 options.Credentials,
 		now:                         time.Now,
@@ -176,6 +150,56 @@ func NewClient(options Options) (*Client, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+// clientEndpoints is the validated endpoint configuration of NewClient.
+type clientEndpoints struct {
+	baseURL           *url.URL
+	authURL           *url.URL
+	registryAllowlist map[string]struct{}
+	authAllowlist     map[string]struct{}
+}
+
+// resolveClientEndpoints parses the endpoint URLs and the private-host
+// allowlists. Every problem is reported at once, joined in the order base
+// url, auth url, registry allowlist, auth allowlist.
+func resolveClientEndpoints(options Options) (clientEndpoints, error) {
+	registryAllowlist, registryAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateRegistryHosts)
+	authAllowlist, authAllowlistErr := normalizeHostAllowlist(options.AllowedPrivateAuthHosts)
+	allowConfiguredHTTP := len(registryAllowlist) > 0 || len(authAllowlist) > 0
+	baseURL, baseErr := parseConfiguredEndpointURL(defaultString(options.BaseURL, "https://registry-1.docker.io"), allowConfiguredHTTP)
+	if baseErr != nil {
+		baseErr = fmt.Errorf("registry base url: %w", baseErr)
+	}
+	authURL, authErr := parseConfiguredEndpointURL(defaultString(options.AuthURL, "https://auth.docker.io/token"), allowConfiguredHTTP)
+	if authErr != nil {
+		authErr = fmt.Errorf("registry auth url: %w", authErr)
+	}
+	if err := errors.Join(baseErr, authErr, registryAllowlistErr, authAllowlistErr); err != nil {
+		return clientEndpoints{}, err
+	}
+	return clientEndpoints{baseURL: baseURL, authURL: authURL, registryAllowlist: registryAllowlist, authAllowlist: authAllowlist}, nil
+}
+
+func httpClientOrDefault(client *http.Client) *http.Client {
+	if client == nil {
+		return &http.Client{}
+	}
+	return client
+}
+
+func lookupIPOrDefault(lookupIP func(context.Context, string) ([]net.IPAddr, error)) func(context.Context, string) ([]net.IPAddr, error) {
+	if lookupIP == nil {
+		return net.DefaultResolver.LookupIPAddr
+	}
+	return lookupIP
+}
+
+func positiveOrDefault(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 // MustNewClient is NewClient for static configurations and tests: it panics
@@ -534,50 +558,85 @@ func (c *Client) executeRequest(ctx context.Context, method, targetURL, accept, 
 	var lastErr error
 	var delay time.Duration
 	for attempt := 0; attempt < c.requestAttempts; attempt++ {
-		if attempt > 0 {
-			if err := c.sleep(ctx, delay); err != nil {
-				return nil, fmt.Errorf("retry aborted: %w", errors.Join(err, lastErr))
-			}
+		if err := c.waitBeforeAttempt(ctx, attempt, delay, lastErr); err != nil {
+			return nil, err
 		}
+		canRetry := c.canRetryAttempt(retryable, attempt)
 		attemptCtx := newAttemptContext(ctx, c.requestTimeout)
-		request, err := http.NewRequestWithContext(attemptCtx, method, targetURL, nil)
+		request, err := c.newAttemptRequest(attemptCtx, method, targetURL, accept, authorization)
 		if err != nil {
 			attemptCtx.cancel()
-			return nil, fmt.Errorf("create registry request: %w", err)
-		}
-		request.Header.Set("User-Agent", c.userAgent)
-		if accept != "" {
-			request.Header.Set("Accept", accept)
-		}
-		if strings.TrimSpace(authorization) != "" {
-			request.Header.Set("Authorization", strings.TrimSpace(authorization))
+			return nil, err
 		}
 
 		response, err := c.doHTTP(request)
 		if err != nil {
 			attemptCtx.cancel()
 			lastErr = err
-			if retryable && attempt+1 < c.requestAttempts && isRetryableRequestError(ctx, err) {
+			if canRetry && isRetryableRequestError(ctx, err) {
 				delay = c.retryDelay(attempt, nil)
 				continue
 			}
 			return nil, err
 		}
-		if retryable && attempt+1 < c.requestAttempts && isRetryableStatus(response.StatusCode) {
+		if canRetry && isRetryableStatus(response.StatusCode) {
 			delay = c.retryDelay(attempt, response)
 			lastErr = &StatusError{StatusCode: response.StatusCode, Method: method, URL: redactURL(targetURL)}
 			_ = response.Body.Close()
 			attemptCtx.cancel()
 			continue
 		}
-		if streaming {
-			attemptCtx.detach()
-		}
-		response.Body = &attemptBody{ReadCloser: response.Body, cancel: attemptCtx.cancel}
-		return response, nil
+		return finishAttempt(response, attemptCtx, streaming), nil
 	}
 
 	return nil, lastErr
+}
+
+// waitBeforeAttempt sleeps the backoff delay before every attempt but the
+// first. An interrupted wait reports the cancellation joined with the error of
+// the previous attempt.
+func (c *Client) waitBeforeAttempt(ctx context.Context, attempt int, delay time.Duration, lastErr error) error {
+	if attempt == 0 {
+		return nil
+	}
+	if err := c.sleep(ctx, delay); err != nil {
+		return fmt.Errorf("retry aborted: %w", errors.Join(err, lastErr))
+	}
+	return nil
+}
+
+// canRetryAttempt reports whether a failed attempt may be followed by another:
+// the request must be idempotent and attempts must remain.
+func (c *Client) canRetryAttempt(retryable bool, attempt int) bool {
+	return retryable && attempt+1 < c.requestAttempts
+}
+
+// newAttemptRequest builds the request of one attempt with the User-Agent,
+// Accept and Authorization headers.
+func (c *Client) newAttemptRequest(attemptCtx *attemptContext, method, targetURL, accept, authorization string) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(attemptCtx, method, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create registry request: %w", err)
+	}
+	request.Header.Set("User-Agent", c.userAgent)
+	if accept != "" {
+		request.Header.Set("Accept", accept)
+	}
+	if strings.TrimSpace(authorization) != "" {
+		request.Header.Set("Authorization", strings.TrimSpace(authorization))
+	}
+	return request, nil
+}
+
+// finishAttempt hands the response of the final attempt to the caller: its
+// body releases the attempt deadline when closed, and a streaming body is
+// detached from that deadline first.
+func finishAttempt(response *http.Response, attemptCtx *attemptContext, streaming bool) *http.Response {
+	if streaming {
+		attemptCtx.detach()
+	}
+	response.Body = &attemptBody{ReadCloser: response.Body, cancel: attemptCtx.cancel}
+	return response
 }
 
 // fetchToken obtains a bearer token for the challenge, from the cache when
@@ -595,17 +654,49 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, cred
 		return "", err
 	}
 
-	realmURL := strings.TrimSpace(challenge.Realm)
-	if realmURL == "" {
-		return "", fmt.Errorf("bearer auth challenge is missing realm")
+	parsedRealm, err := c.tokenRequestURL(challenge)
+	if err != nil {
+		return "", err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	requestCtx := context.WithValue(ctx, requestKindContextKey{}, requestKindAuth)
+	authorization, err := tokenRequestAuthorization(parsedRealm, credential)
+	if err != nil {
+		return "", err
+	}
+
+	response, err := c.executeRequest(requestCtx, http.MethodGet, parsedRealm.String(), "", authorization)
+	if err != nil {
+		return "", fmt.Errorf("perform auth request: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	token, expiresIn, err := c.readTokenResponse(response, parsedRealm)
+	if err != nil {
+		return "", err
+	}
+
+	if err := c.cacheToken(cacheKey, token, c.tokenExpiry(expiresIn)); err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+// tokenRequestURL builds the token request URL from the challenge realm, with
+// the service and scope added to its query, and checks it against the auth
+// realm policy.
+func (c *Client) tokenRequestURL(challenge bearerChallenge) (*url.URL, error) {
+	realmURL := strings.TrimSpace(challenge.Realm)
+	if realmURL == "" {
+		return nil, fmt.Errorf("bearer auth challenge is missing realm")
+	}
 
 	parsedRealm, err := url.Parse(realmURL)
 	if err != nil {
-		return "", fmt.Errorf("auth realm is invalid")
+		return nil, fmt.Errorf("auth realm is invalid")
 	}
 	query := parsedRealm.Query()
 	if strings.TrimSpace(challenge.Service) != "" {
@@ -616,25 +707,29 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, cred
 	}
 	parsedRealm.RawQuery = query.Encode()
 	if err := c.validateAuthRealm(parsedRealm.String()); err != nil {
-		return "", fmt.Errorf("reject auth realm: %w", err)
+		return nil, fmt.Errorf("reject auth realm: %w", err)
 	}
-	requestCtx := context.WithValue(ctx, requestKindContextKey{}, requestKindAuth)
-	authorization := ""
-	if !credential.IsZero() {
-		if parsedRealm.Scheme != "https" {
-			return "", fmt.Errorf("auth realm %s: %w", canonicalURLHost(parsedRealm), ErrCredentialsRequireHTTPS)
-		}
-		authorization = credential.basicAuthorization()
-	}
+	return parsedRealm, nil
+}
 
-	response, err := c.executeRequest(requestCtx, http.MethodGet, parsedRealm.String(), "", authorization)
-	if err != nil {
-		return "", fmt.Errorf("perform auth request: %w", err)
+// tokenRequestAuthorization returns the Authorization header of the token
+// request: empty for the anonymous flow, otherwise the credential as Basic
+// authentication, which is only ever sent to an https realm.
+func tokenRequestAuthorization(parsedRealm *url.URL, credential Credential) (string, error) {
+	if credential.IsZero() {
+		return "", nil
 	}
-	defer func() { _ = response.Body.Close() }()
+	if parsedRealm.Scheme != "https" {
+		return "", fmt.Errorf("auth realm %s: %w", canonicalURLHost(parsedRealm), ErrCredentialsRequireHTTPS)
+	}
+	return credential.basicAuthorization(), nil
+}
 
+// readTokenResponse checks the token response status, reads the body within
+// the auth response limit and decodes the token and its lifetime.
+func (c *Client) readTokenResponse(response *http.Response, parsedRealm *url.URL) (string, int64, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", &StatusError{StatusCode: response.StatusCode, Method: http.MethodGet, URL: redactURL(parsedRealm.String()), Auth: true}
+		return "", 0, &StatusError{StatusCode: response.StatusCode, Method: http.MethodGet, URL: redactURL(parsedRealm.String()), Auth: true}
 	}
 
 	maxAuthResponseBytes := c.maxAuthResponseBytes
@@ -643,10 +738,10 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, cred
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, limits.OverflowProbeLimit(maxAuthResponseBytes)))
 	if err != nil {
-		return "", fmt.Errorf("read auth token response: %w", err)
+		return "", 0, fmt.Errorf("read auth token response: %w", err)
 	}
 	if int64(len(body)) > maxAuthResponseBytes {
-		return "", limits.NewExceeded(limits.Kind("auth_response_bytes"), maxAuthResponseBytes, "auth token response")
+		return "", 0, limits.NewExceeded(limits.Kind("auth_response_bytes"), maxAuthResponseBytes, "auth token response")
 	}
 	var payload struct {
 		Token       string `json:"token"`
@@ -654,19 +749,14 @@ func (c *Client) fetchToken(ctx context.Context, challenge bearerChallenge, cred
 		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("decode auth token response: %w", err)
+		return "", 0, fmt.Errorf("decode auth token response: %w", err)
 	}
 
 	token := firstNonEmpty(payload.Token, payload.AccessToken)
 	if token == "" {
-		return "", fmt.Errorf("auth token response did not include a token")
+		return "", 0, fmt.Errorf("auth token response did not include a token")
 	}
-
-	if err := c.cacheToken(cacheKey, token, c.tokenExpiry(payload.ExpiresIn)); err != nil {
-		return "", err
-	}
-
-	return token, nil
+	return token, payload.ExpiresIn, nil
 }
 
 func (c *Client) join(parts ...string) string {

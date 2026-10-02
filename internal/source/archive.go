@@ -51,14 +51,10 @@ func openTarIndex(archivePath string, maxEntries int) (*tarIndex, error) {
 }
 
 func indexTar(file *os.File, archivePath string, maxEntries int) (*tarIndex, error) {
-	info, err := file.Stat()
+	archiveSize, err := regularArchiveSize(file, archivePath)
 	if err != nil {
-		return nil, fmt.Errorf("stat archive: %w", err)
+		return nil, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("archive %s is not a regular file", archivePath)
-	}
-	archiveSize := info.Size()
 
 	index := &tarIndex{path: archivePath, file: file, entries: make(map[string]tarEntry)}
 	reader := tar.NewReader(file)
@@ -75,29 +71,52 @@ func indexTar(file *os.File, archivePath string, maxEntries int) (*tarIndex, err
 		if count > maxEntries {
 			return nil, limits.NewExceeded(limits.KindLayerEntries, int64(maxEntries), "archive "+archivePath)
 		}
-		name, err := cleanArchivePath(header.Name)
-		if err != nil {
-			return nil, fmt.Errorf("archive %s: %w", archivePath, err)
+		if err := index.addEntry(header, archiveSize); err != nil {
+			return nil, err
 		}
-		if header.Typeflag != tar.TypeReg {
-			// Links, directories, devices and sparse files are never served.
-			continue
-		}
-		if header.Size < 0 {
-			return nil, fmt.Errorf("archive %s: entry %s has a negative size", archivePath, name)
-		}
-		// The tar reader consumed exactly the header blocks, so the file is
-		// positioned at the first data byte of this entry.
-		offset, err := file.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return nil, fmt.Errorf("archive %s: locate entry %s: %w", archivePath, name, err)
-		}
-		if offset < 0 || header.Size > archiveSize-offset {
-			return nil, fmt.Errorf("archive %s: entry %s extends past the end of the file", archivePath, name)
-		}
-		index.entries[name] = tarEntry{offset: offset, size: header.Size}
 	}
 	return index, nil
+}
+
+// regularArchiveSize returns the size of the archive file, which must be a
+// regular file.
+func regularArchiveSize(file *os.File, archivePath string) (int64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat archive: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("archive %s is not a regular file", archivePath)
+	}
+	return info.Size(), nil
+}
+
+// addEntry validates the name of the entry the tar reader just returned and,
+// for a regular file, records the offset and size of its data. The name is
+// validated for every entry type, so one unsafe name refuses the archive.
+func (t *tarIndex) addEntry(header *tar.Header, archiveSize int64) error {
+	name, err := cleanArchivePath(header.Name)
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", t.path, err)
+	}
+	if header.Typeflag != tar.TypeReg {
+		// Links, directories, devices and sparse files are never served.
+		return nil
+	}
+	if header.Size < 0 {
+		return fmt.Errorf("archive %s: entry %s has a negative size", t.path, name)
+	}
+	// The tar reader consumed exactly the header blocks, so the file is
+	// positioned at the first data byte of this entry.
+	offset, err := t.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("archive %s: locate entry %s: %w", t.path, name, err)
+	}
+	if offset < 0 || header.Size > archiveSize-offset {
+		return fmt.Errorf("archive %s: entry %s extends past the end of the file", t.path, name)
+	}
+	t.entries[name] = tarEntry{offset: offset, size: header.Size}
+	return nil
 }
 
 // cleanArchivePath validates an archive entry name and returns it as a clean

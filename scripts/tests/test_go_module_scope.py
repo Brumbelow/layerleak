@@ -11,12 +11,11 @@ MODULE_PATH = 'github.com/brumbelow/layerleak/v3'
 
 @unittest.skipIf(shutil.which('go') is None, 'the go command is not installed')
 class GoModuleScopeTests(unittest.TestCase):
-    """npm packages installed for the browser tests must stay outside ./...
+    """Go sources shipped inside npm packages must stay outside ./..."""
 
-    Some npm packages ship Go sources without a go.mod. Without an ignore
-    directive, `go vet ./...`, golangci-lint, `go test ./...` and govulncheck
-    would build and lint that third-party code as part of layerleak.
-    """
+    # Some npm packages ship Go sources without a go.mod. Without an ignore
+    # directive, `go vet ./...`, golangci-lint, `go test ./...` and govulncheck
+    # would build and lint that third-party code as part of layerleak.
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

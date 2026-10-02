@@ -342,19 +342,31 @@ func (s *State) applyLayer(ctx context.Context, descriptor manifest.Descriptor, 
 		return err
 	}
 	if source.layer != nil {
-		if nested != nil && (nested.archivesExpanded > 0 || len(nested.skips) > 0 || nested.skipsDropped > 0) {
-			// Nested expansion is bounded by budgets that depend on the layer
-			// stack, so its outcome cannot be replayed from metadata.
-			source.layer.markUncacheable()
-		}
-		if source.layer.cacheable && (source.layer.maxBytes <= 0 || s.recordBytes+source.layer.size <= source.layer.maxBytes) {
-			// The records a manifest holds until the scanner stores them are
-			// bounded together by the cache's size, which is all it could keep.
-			s.records = append(s.records, source.layer)
-			s.recordBytes += source.layer.size
-		}
+		s.keepLayerRecord(source.layer, nested)
 	}
 	return nil
+}
+
+// keepLayerRecord keeps the cache record of a committed layer when the layer
+// is cacheable and the record fits the cache.
+func (s *State) keepLayerRecord(layer *LayerRecord, nested *nestedExpander) {
+	if nested.expandedAny() {
+		// Nested expansion is bounded by budgets that depend on the layer
+		// stack, so its outcome cannot be replayed from metadata.
+		layer.markUncacheable()
+	}
+	if layer.cacheable && (layer.maxBytes <= 0 || s.recordBytes+layer.size <= layer.maxBytes) {
+		// The records a manifest holds until the scanner stores them are
+		// bounded together by the cache's size, which is all it could keep.
+		s.records = append(s.records, layer)
+		s.recordBytes += layer.size
+	}
+}
+
+// expandedAny reports whether the expander opened an archive or recorded a
+// skip in this layer.
+func (e *nestedExpander) expandedAny() bool {
+	return e != nil && (e.archivesExpanded > 0 || len(e.skips) > 0 || e.skipsDropped > 0)
 }
 
 // applyCachedLayer replays a layer from its cache record through the same
@@ -370,10 +382,27 @@ func (s *State) applyCachedLayer(ctx context.Context, descriptor manifest.Descri
 	return s.applyEntries(ctx, descriptor, source, nil, options)
 }
 
+// layerApplier carries the state of one applyEntries pass: the layer's
+// budgets, its journal, the whiteouts deferred to the end of the layer and
+// the number of entries seen.
+type layerApplier struct {
+	state             *State
+	descriptor        manifest.Descriptor
+	source            entrySource
+	nested            *nestedExpander
+	options           ReplayOptions
+	logicalBudget     *logicalLayerBudget
+	retention         retentionBudget
+	journal           *layerJournal
+	whiteouts         []string
+	opaqueDirectories []string
+	entryCount        int
+}
+
 // applyEntries is the transactional layer state machine. It consumes entries
 // from source (the tar stream or a cache record), applies them to s under a
 // journal and commits at the end; any error rolls the layer back.
-func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor, source entrySource, nested *nestedExpander, options ReplayOptions) (returnErr error) {
+func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor, source entrySource, nested *nestedExpander, options ReplayOptions) error {
 	logicalBudget := newLogicalLayerBudget(
 		descriptor.Digest,
 		options.MaxLayerBytes,
@@ -382,292 +411,363 @@ func (s *State) applyEntries(ctx context.Context, descriptor manifest.Descriptor
 	)
 	retention := retentionBudget{maxBytes: options.MaxRetainedBytes}
 	journal := s.beginLayer()
+	applier := &layerApplier{
+		state:             s,
+		descriptor:        descriptor,
+		source:            source,
+		nested:            nested,
+		options:           options,
+		logicalBudget:     logicalBudget,
+		retention:         retention,
+		journal:           journal,
+		whiteouts:         make([]string, 0),
+		opaqueDirectories: make([]string, 0),
+	}
 	committed := false
 	defer func() {
-		if committed {
-			return
+		if !committed {
+			applier.rollback()
 		}
-		// A failed layer leaves the state exactly as it was before it: every
-		// mutation is undone in reverse order and the retained-byte counter is
-		// restored. The file, entry and nested-expansion counters are
-		// observations of the failed layer and are kept.
-		nested.flush(s)
-		s.rollback(journal)
-		s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, source.physical(), logicalBudget.bytes)
 	}()
-	currentPaths := journal.currentPaths
-	whiteouts := make([]string, 0)
-	opaqueDirectories := make([]string, 0)
-	entryCount := 0
-	for {
-		if err := contextError(ctx); err != nil {
-			return err
-		}
-		header, err := source.next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read tar entry: %w", err)
-		}
-		if header.typeflag == tar.TypeXGlobalHeader {
-			// PAX global headers (git archive, tar --pax-option) describe the
-			// entries that follow; they are never content and runtimes skip them.
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			continue
-		}
-		entryCount++
-		if err := logicalBudget.add(header.size); err != nil {
-			return err
-		}
-		if options.MaxTotalEntries > 0 && s.entries+entryCount > options.MaxTotalEntries {
-			return limits.NewExceeded(limits.Kind("image_entries"), int64(options.MaxTotalEntries), "image")
-		}
-		if options.MaxLayerEntries > 0 && entryCount > options.MaxLayerEntries {
-			return limits.NewExceeded(limits.KindLayerEntries, int64(options.MaxLayerEntries), "layer "+descriptor.Digest)
-		}
-
-		entryPath, err := normalizePath(header.name)
-		if err != nil {
-			if !errors.Is(err, errRootEntry) {
-				// A `./` or `.` entry names the layer root itself (tar -C rootfs -c .
-				// always emits one); it carries nothing to record and is not unsafe.
-				s.coverage.EntriesSkippedUnsafe++
-			}
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := validateLinkname(header.linkname); err != nil {
-			s.coverage.EntriesSkippedUnsafe++
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if isOpaqueWhiteout(entryPath) {
-			directory := path.Dir(entryPath)
-			if err := retention.retainTemporary(s, retainedSliceStringBytes(directory)); err != nil {
-				return err
-			}
-			opaqueDirectories = append(opaqueDirectories, directory)
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			continue
-		}
-		if isWhiteout(entryPath) {
-			target, targetErr := whiteoutTarget(entryPath)
-			if targetErr != nil {
-				s.coverage.EntriesSkippedUnsafe++
-			} else {
-				if err := retention.retainTemporary(s, retainedSliceStringBytes(target)); err != nil {
-					return err
-				}
-				whiteouts = append(whiteouts, target)
-			}
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			continue
-		}
-
-		switch header.typeflag {
-		case tar.TypeDir:
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			if err := s.preparePath(entryPath, true, descriptor.Digest, &retention); err != nil {
-				return err
-			}
-			if err := s.addDirectory(entryPath, &retention); err != nil {
-				return err
-			}
-			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
-				return err
-			}
-			if err := s.put(Artifact{
-				Path:         entryPath,
-				LayerDigest:  descriptor.Digest,
-				Type:         ArtifactTypeSymlink,
-				Linkname:     header.linkname,
-				ContentClass: "",
-				Scannable:    false,
-			}, &retention); err != nil {
-				return err
-			}
-			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
-				return err
-			}
-		case tar.TypeLink:
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			linkTarget, err := normalizePath(header.linkname)
-			if err != nil {
-				if !errors.Is(err, errRootEntry) {
-					s.coverage.EntriesSkippedUnsafe++
-				}
-				continue
-			}
-			target, ok := s.final[linkTarget]
-			if !ok {
-				// Without a target here (missing, or a directory) the hardlink
-				// resolves against whatever the layers below hold in another
-				// stack, so this layer's outcome is not a property of the layer.
-				source.record().markUncacheable()
-				// A hardlink to a directory is invalid but harmless: runtimes
-				// refuse it without failing the layer, so it is ignored rather
-				// than counted as an unsafe entry that forces partial coverage.
-				if _, isDirectory := s.dirs[linkTarget]; !isDirectory {
-					s.coverage.EntriesSkippedUnsafe++
-				}
-				continue
-			}
-			if target.KnownClean && (!source.fromCache() || target.LayerDigest != descriptor.Digest) {
-				// Detectors judge content by path, so the hardlink's own path
-				// must be scanned with the target's content, which a cached
-				// layer does not hold: this manifest needs the real stream. A
-				// cached layer may only resolve a hardlink to clean content of
-				// its own layer, whose scan under this path was recorded.
-				return ErrCacheUnusable
-			}
-			if target.LayerDigest != descriptor.Digest {
-				// The content behind the hardlink depends on the layers below,
-				// so this layer's scan outcome is not a property of the layer.
-				source.record().markUncacheable()
-			}
-			// A hardlink is another name for its target. Links to regular files
-			// become hardlink artifacts sharing the target's content and class;
-			// links to symlinks or other artifacts take the target's type and are
-			// neither files seen nor binary exclusions.
-			linked := target
-			linked.Path = entryPath
-			linked.LayerDigest = descriptor.Digest
-			isFile := target.Type == ArtifactTypeRegularFile || target.Type == ArtifactTypeHardlink
-			if isFile {
-				linked.Type = ArtifactTypeHardlink
-				// Linkname names the regular file whose content (and nested
-				// entries, which keep that file's provenance paths) the
-				// hardlink shares, even through a chain of hardlinks.
-				linked.Linkname = linkTarget
-				if target.Type == ArtifactTypeHardlink {
-					linked.Linkname = target.Linkname
-				}
-				s.coverage.FilesSeen++
-			}
-			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
-				return err
-			}
-			if err := s.put(linked, &retention); err != nil {
-				return err
-			}
-			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
-				return err
-			}
-			if !isFile {
-				continue
-			}
-			if target.Scannable {
-				s.coverage.FilesScanned++
-				if target.SourceEncoding != "" {
-					s.coverage.FilesTranscodedUTF16++
-				}
-			} else if target.ContentClass == ContentClassOversize {
-				s.coverage.FilesSkippedOversize++
-			} else {
-				s.coverage.FilesExcludedBinary++
-			}
-		case tar.TypeReg, tar.TypeGNUSparse, tar.TypeCont:
-			// archive/tar normalizes the legacy TypeRegA flag to TypeReg but keeps
-			// the old-GNU sparse ('S') and GNU contiguous ('7') flags on regular
-			// files; the entry reader already presents their logical content.
-			s.coverage.FilesSeen++
-			if header.size <= options.MaxFileBytes {
-				prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.size
-				if err := retention.ensure(s, prospective); err != nil {
-					return err
-				}
-			}
-			artifact, err := source.regular(header, entryPath, nested)
-			if err != nil {
-				return err
-			}
-			if len(artifact.Nested) > 0 {
-				// Nested entries never fail a layer: when retaining them would
-				// exceed the retained-bytes limit they are dropped and reported.
-				if err := retention.ensure(s, retainedFinalArtifactBytes(artifact)); err != nil {
-					nested.skip(entryPath, NestedSkipRetainedBytes, int64(len(artifact.Nested)), options.MaxRetainedBytes)
-					artifact.Nested = nil
-				}
-			}
-			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
-				return err
-			}
-			if err := s.put(artifact, &retention); err != nil {
-				return err
-			}
-			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
-				return err
-			}
-			if artifact.Scannable {
-				s.coverage.FilesScanned++
-				if artifact.SourceEncoding != "" {
-					s.coverage.FilesTranscodedUTF16++
-				}
-			} else if artifact.ContentClass == ContentClassOversize {
-				s.coverage.FilesSkippedOversize++
-			} else {
-				s.coverage.FilesExcludedBinary++
-			}
-		default:
-			if err := source.drain(header); err != nil {
-				return err
-			}
-			if err := s.preparePath(entryPath, false, descriptor.Digest, &retention); err != nil {
-				return err
-			}
-			if err := s.put(Artifact{
-				Path:         entryPath,
-				LayerDigest:  descriptor.Digest,
-				Type:         ArtifactTypeOther,
-				ContentClass: "",
-				Scannable:    false,
-			}, &retention); err != nil {
-				return err
-			}
-			if err := retainCurrentPath(s, currentPaths, entryPath, &retention); err != nil {
-				return err
-			}
-		}
+	if err := applier.consume(ctx); err != nil {
+		return err
 	}
 	if err := source.finish(); err != nil {
 		return err
 	}
-
-	for _, directory := range opaqueDirectories {
-		s.deleteLowerPrefix(directory, descriptor.Digest, journal)
-	}
-	for _, target := range whiteouts {
-		s.deleteLowerPath(target, descriptor.Digest, journal)
-	}
-	s.coverage.ExpandedBytes = expandedBytesAfterLayer(journal.coverage.ExpandedBytes, source.physical(), logicalBudget.bytes)
-	nested.flush(s)
-	s.entries += entryCount
-	s.endLayer()
+	applier.commit()
 	committed = true
 	return nil
+}
+
+// rollback leaves the state exactly as it was before a failed layer: every
+// mutation is undone in reverse order and the retained-byte counter is
+// restored. The file, entry and nested-expansion counters are observations of
+// the failed layer and are kept.
+func (a *layerApplier) rollback() {
+	a.nested.flush(a.state)
+	a.state.rollback(a.journal)
+	a.state.coverage.ExpandedBytes = expandedBytesAfterLayer(a.journal.coverage.ExpandedBytes, a.source.physical(), a.logicalBudget.bytes)
+}
+
+// commit applies the layer's deferred whiteouts and folds its accounting
+// into the state once every entry has been applied.
+func (a *layerApplier) commit() {
+	s := a.state
+	for _, directory := range a.opaqueDirectories {
+		s.deleteLowerPrefix(directory, a.descriptor.Digest, a.journal)
+	}
+	for _, target := range a.whiteouts {
+		s.deleteLowerPath(target, a.descriptor.Digest, a.journal)
+	}
+	s.coverage.ExpandedBytes = expandedBytesAfterLayer(a.journal.coverage.ExpandedBytes, a.source.physical(), a.logicalBudget.bytes)
+	a.nested.flush(s)
+	s.entries += a.entryCount
+	s.endLayer()
+}
+
+// consume applies every entry of the source until its end.
+func (a *layerApplier) consume(ctx context.Context) error {
+	for {
+		if err := contextError(ctx); err != nil {
+			return err
+		}
+		header, err := a.source.next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read tar entry: %w", err)
+		}
+		if err := a.applyEntry(header); err != nil {
+			return err
+		}
+	}
+}
+
+// applyEntry charges one entry against the budgets, skips it when its path
+// or link name is unsafe, records it when it is a whiteout and otherwise
+// applies it by type.
+func (a *layerApplier) applyEntry(header layerEntry) error {
+	if header.typeflag == tar.TypeXGlobalHeader {
+		// PAX global headers (git archive, tar --pax-option) describe the
+		// entries that follow; they are never content and runtimes skip them.
+		return a.source.drain(header)
+	}
+	if err := a.countEntry(header); err != nil {
+		return err
+	}
+	entryPath, skipped, err := a.entryPath(header)
+	if skipped || err != nil {
+		return err
+	}
+	if isOpaqueWhiteout(entryPath) {
+		return a.recordOpaqueWhiteout(header, entryPath)
+	}
+	if isWhiteout(entryPath) {
+		return a.recordWhiteout(header, entryPath)
+	}
+	return a.applyTyped(header, entryPath)
+}
+
+// countEntry charges one entry against the layer's logical byte budget and
+// the image and layer entry limits.
+func (a *layerApplier) countEntry(header layerEntry) error {
+	a.entryCount++
+	if err := a.logicalBudget.add(header.size); err != nil {
+		return err
+	}
+	if a.options.MaxTotalEntries > 0 && a.state.entries+a.entryCount > a.options.MaxTotalEntries {
+		return limits.NewExceeded(limits.Kind("image_entries"), int64(a.options.MaxTotalEntries), "image")
+	}
+	if a.options.MaxLayerEntries > 0 && a.entryCount > a.options.MaxLayerEntries {
+		return limits.NewExceeded(limits.KindLayerEntries, int64(a.options.MaxLayerEntries), "layer "+a.descriptor.Digest)
+	}
+	return nil
+}
+
+// entryPath normalises the entry's path and validates its link name. When
+// either is unsafe, or the entry names the layer root, the entry is drained
+// and skipped is true.
+func (a *layerApplier) entryPath(header layerEntry) (entryPath string, skipped bool, err error) {
+	entryPath, err = normalizePath(header.name)
+	if err != nil {
+		if !errors.Is(err, errRootEntry) {
+			// A `./` or `.` entry names the layer root itself (tar -C rootfs -c .
+			// always emits one); it carries nothing to record and is not unsafe.
+			a.state.coverage.EntriesSkippedUnsafe++
+		}
+		return "", true, a.source.drain(header)
+	}
+	if err := validateLinkname(header.linkname); err != nil {
+		a.state.coverage.EntriesSkippedUnsafe++
+		return "", true, a.source.drain(header)
+	}
+	return entryPath, false, nil
+}
+
+// recordOpaqueWhiteout defers the removal of the lower layers' content of
+// the opaque directory to the end of the layer.
+func (a *layerApplier) recordOpaqueWhiteout(header layerEntry, entryPath string) error {
+	directory := path.Dir(entryPath)
+	if err := a.retention.retainTemporary(a.state, retainedSliceStringBytes(directory)); err != nil {
+		return err
+	}
+	a.opaqueDirectories = append(a.opaqueDirectories, directory)
+	return a.source.drain(header)
+}
+
+// recordWhiteout defers the removal of the whiteout's lower-layer target to
+// the end of the layer; an unsafe target is counted and skipped.
+func (a *layerApplier) recordWhiteout(header layerEntry, entryPath string) error {
+	target, targetErr := whiteoutTarget(entryPath)
+	if targetErr != nil {
+		a.state.coverage.EntriesSkippedUnsafe++
+	} else {
+		if err := a.retention.retainTemporary(a.state, retainedSliceStringBytes(target)); err != nil {
+			return err
+		}
+		a.whiteouts = append(a.whiteouts, target)
+	}
+	return a.source.drain(header)
+}
+
+// applyTyped applies an entry with a safe path according to its type flag.
+func (a *layerApplier) applyTyped(header layerEntry, entryPath string) error {
+	switch header.typeflag {
+	case tar.TypeDir:
+		return a.applyDirectory(header, entryPath)
+	case tar.TypeSymlink:
+		return a.applyBodiless(header, Artifact{
+			Path:         entryPath,
+			LayerDigest:  a.descriptor.Digest,
+			Type:         ArtifactTypeSymlink,
+			Linkname:     header.linkname,
+			ContentClass: "",
+			Scannable:    false,
+		})
+	case tar.TypeLink:
+		return a.applyHardlink(header, entryPath)
+	case tar.TypeReg, tar.TypeGNUSparse, tar.TypeCont:
+		// archive/tar normalizes the legacy TypeRegA flag to TypeReg but keeps
+		// the old-GNU sparse ('S') and GNU contiguous ('7') flags on regular
+		// files; the entry reader already presents their logical content.
+		return a.applyRegular(header, entryPath)
+	default:
+		return a.applyBodiless(header, Artifact{
+			Path:         entryPath,
+			LayerDigest:  a.descriptor.Digest,
+			Type:         ArtifactTypeOther,
+			ContentClass: "",
+			Scannable:    false,
+		})
+	}
+}
+
+func (a *layerApplier) applyDirectory(header layerEntry, entryPath string) error {
+	if err := a.source.drain(header); err != nil {
+		return err
+	}
+	if err := a.state.preparePath(entryPath, true, a.descriptor.Digest, &a.retention); err != nil {
+		return err
+	}
+	if err := a.state.addDirectory(entryPath, &a.retention); err != nil {
+		return err
+	}
+	return retainCurrentPath(a.state, a.journal.currentPaths, entryPath, &a.retention)
+}
+
+// applyBodiless drains a symlink or special-file entry, whose body carries
+// nothing to scan, and records its artifact at the artifact's path.
+func (a *layerApplier) applyBodiless(header layerEntry, artifact Artifact) error {
+	if err := a.source.drain(header); err != nil {
+		return err
+	}
+	return a.place(artifact.Path, artifact)
+}
+
+// place records artifact at entryPath, replacing whatever the path held.
+func (a *layerApplier) place(entryPath string, artifact Artifact) error {
+	if err := a.state.preparePath(entryPath, false, a.descriptor.Digest, &a.retention); err != nil {
+		return err
+	}
+	if err := a.state.put(artifact, &a.retention); err != nil {
+		return err
+	}
+	return retainCurrentPath(a.state, a.journal.currentPaths, entryPath, &a.retention)
+}
+
+func (a *layerApplier) applyHardlink(header layerEntry, entryPath string) error {
+	if err := a.source.drain(header); err != nil {
+		return err
+	}
+	linkTarget, target, ok := a.resolveHardlink(header)
+	if !ok {
+		return nil
+	}
+	if err := a.checkHardlinkCacheability(target); err != nil {
+		return err
+	}
+	linked, isFile := a.hardlinkArtifact(entryPath, linkTarget, target)
+	if err := a.place(entryPath, linked); err != nil {
+		return err
+	}
+	if isFile {
+		a.state.countFileClass(target)
+	}
+	return nil
+}
+
+// resolveHardlink finds the artifact a hardlink names. ok is false when the
+// link name is unsafe or names no artifact; the entry is then skipped.
+func (a *layerApplier) resolveHardlink(header layerEntry) (linkTarget string, target Artifact, ok bool) {
+	linkTarget, err := normalizePath(header.linkname)
+	if err != nil {
+		if !errors.Is(err, errRootEntry) {
+			a.state.coverage.EntriesSkippedUnsafe++
+		}
+		return "", Artifact{}, false
+	}
+	target, ok = a.state.final[linkTarget]
+	if !ok {
+		// Without a target here (missing, or a directory) the hardlink
+		// resolves against whatever the layers below hold in another
+		// stack, so this layer's outcome is not a property of the layer.
+		a.source.record().markUncacheable()
+		// A hardlink to a directory is invalid but harmless: runtimes
+		// refuse it without failing the layer, so it is ignored rather
+		// than counted as an unsafe entry that forces partial coverage.
+		if _, isDirectory := a.state.dirs[linkTarget]; !isDirectory {
+			a.state.coverage.EntriesSkippedUnsafe++
+		}
+		return "", Artifact{}, false
+	}
+	return linkTarget, target, true
+}
+
+// checkHardlinkCacheability refuses a cached replay that cannot resolve the
+// hardlink and marks the layer uncacheable when the target is another layer's.
+func (a *layerApplier) checkHardlinkCacheability(target Artifact) error {
+	if target.KnownClean && (!a.source.fromCache() || target.LayerDigest != a.descriptor.Digest) {
+		// Detectors judge content by path, so the hardlink's own path
+		// must be scanned with the target's content, which a cached
+		// layer does not hold: this manifest needs the real stream. A
+		// cached layer may only resolve a hardlink to clean content of
+		// its own layer, whose scan under this path was recorded.
+		return ErrCacheUnusable
+	}
+	if target.LayerDigest != a.descriptor.Digest {
+		// The content behind the hardlink depends on the layers below,
+		// so this layer's scan outcome is not a property of the layer.
+		a.source.record().markUncacheable()
+	}
+	return nil
+}
+
+// hardlinkArtifact builds the artifact a hardlink records. A hardlink is
+// another name for its target. Links to regular files become hardlink
+// artifacts sharing the target's content and class (isFile is true and the
+// file is counted as seen); links to symlinks or other artifacts take the
+// target's type and are neither files seen nor binary exclusions.
+func (a *layerApplier) hardlinkArtifact(entryPath, linkTarget string, target Artifact) (linked Artifact, isFile bool) {
+	linked = target
+	linked.Path = entryPath
+	linked.LayerDigest = a.descriptor.Digest
+	isFile = target.Type == ArtifactTypeRegularFile || target.Type == ArtifactTypeHardlink
+	if isFile {
+		linked.Type = ArtifactTypeHardlink
+		// Linkname names the regular file whose content (and nested
+		// entries, which keep that file's provenance paths) the
+		// hardlink shares, even through a chain of hardlinks.
+		linked.Linkname = linkTarget
+		if target.Type == ArtifactTypeHardlink {
+			linked.Linkname = target.Linkname
+		}
+		a.state.coverage.FilesSeen++
+	}
+	return linked, isFile
+}
+
+func (a *layerApplier) applyRegular(header layerEntry, entryPath string) error {
+	a.state.coverage.FilesSeen++
+	if header.size <= a.options.MaxFileBytes {
+		prospective := retainedFinalArtifactBaseBytes(entryPath, "") + header.size
+		if err := a.retention.ensure(a.state, prospective); err != nil {
+			return err
+		}
+	}
+	artifact, err := a.source.regular(header, entryPath, a.nested)
+	if err != nil {
+		return err
+	}
+	if len(artifact.Nested) > 0 {
+		// Nested entries never fail a layer: when retaining them would
+		// exceed the retained-bytes limit they are dropped and reported.
+		if err := a.retention.ensure(a.state, retainedFinalArtifactBytes(artifact)); err != nil {
+			a.nested.skip(entryPath, NestedSkipRetainedBytes, int64(len(artifact.Nested)), a.options.MaxRetainedBytes)
+			artifact.Nested = nil
+		}
+	}
+	if err := a.place(entryPath, artifact); err != nil {
+		return err
+	}
+	a.state.countFileClass(artifact)
+	return nil
+}
+
+// countFileClass counts a regular file (or a hardlink to one) as scanned,
+// skipped as oversize or excluded as binary, by its classification.
+func (s *State) countFileClass(artifact Artifact) {
+	if artifact.Scannable {
+		s.coverage.FilesScanned++
+		if artifact.SourceEncoding != "" {
+			s.coverage.FilesTranscodedUTF16++
+		}
+	} else if artifact.ContentClass == ContentClassOversize {
+		s.coverage.FilesSkippedOversize++
+	} else {
+		s.coverage.FilesExcludedBinary++
+	}
 }
 
 // flush adds the expander's observations to the state's coverage and skip

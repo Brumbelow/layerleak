@@ -228,6 +228,37 @@ func TestValidatePlatformBoundsEveryComponent(t *testing.T) {
 	}
 }
 
+func TestValidatePlatformSelectorRulesAndCharacters(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		platform Platform
+		selector bool
+		want     string
+	}{
+		{name: "empty descriptor platform", platform: Platform{}},
+		{name: "variant without architecture on a descriptor", platform: Platform{OS: "linux", Variant: "v8"}},
+		{name: "selector without os", platform: Platform{Architecture: "amd64"}, selector: true, want: "platform selector must include an operating system"},
+		{name: "selector variant without architecture", platform: Platform{OS: "linux", Variant: "v8"}, selector: true, want: "platform selector variant requires an architecture"},
+		{name: "selector rules before component checks", platform: Platform{Variant: " bad"}, selector: true, want: "platform selector must include an operating system"},
+		{name: "surrounding whitespace", platform: Platform{OS: "linux", Architecture: " amd64"}, want: "platform architecture contains invalid characters"},
+		{name: "invalid character", platform: Platform{OS: "linux", Architecture: "arm64", Variant: "v8/x"}, want: "platform variant contains invalid characters"},
+		{name: "first invalid component wins", platform: Platform{OS: "li nux", Architecture: "a\tb"}, want: "platform os contains invalid characters"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidatePlatform(test.platform, test.selector)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("ValidatePlatform() error = %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("ValidatePlatform() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestConfigFields(t *testing.T) {
 	fields := ConfigFields(ImageConfig{
 		Author: "builder",

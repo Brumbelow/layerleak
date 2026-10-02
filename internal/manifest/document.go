@@ -233,16 +233,24 @@ func ValidatePlatform(platform Platform, selector bool) error {
 		{name: "architecture", value: platform.Architecture},
 		{name: "variant", value: platform.Variant},
 	} {
-		name, value := field.name, field.value
-		if value == "" {
-			continue
+		if err := validatePlatformComponent(field.name, field.value); err != nil {
+			return err
 		}
-		if len(value) > MaxPlatformComponentBytes {
-			return fmt.Errorf("platform %s exceeds %d bytes", name, MaxPlatformComponentBytes)
-		}
-		if value != strings.TrimSpace(value) || !platformComponentPattern.MatchString(value) {
-			return fmt.Errorf("platform %s contains invalid characters", name)
-		}
+	}
+	return nil
+}
+
+// validatePlatformComponent checks the length and characters of one platform
+// component; an empty component is valid.
+func validatePlatformComponent(name, value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > MaxPlatformComponentBytes {
+		return fmt.Errorf("platform %s exceeds %d bytes", name, MaxPlatformComponentBytes)
+	}
+	if value != strings.TrimSpace(value) || !platformComponentPattern.MatchString(value) {
+		return fmt.Errorf("platform %s contains invalid characters", name)
 	}
 	return nil
 }
@@ -297,40 +305,15 @@ func SelectManifests(index ImageIndex, selector string) (Selection, error) {
 		Selected: make([]Descriptor, 0, len(index.Manifests)),
 		Skipped:  make([]SkippedDescriptor, 0),
 	}
-	skip := func(descriptor Descriptor, reason SkipReason, detail string) {
-		selection.Skipped = append(selection.Skipped, SkippedDescriptor{Descriptor: descriptor, Reason: reason, Detail: detail})
-	}
 	scannable := 0
 	for _, candidate := range index.Manifests {
-		if detail, ok := unsupportedIndexEntryDetail(candidate); ok {
-			if !explicit || candidate.Platform.Matches(want) {
-				skip(candidate, SkipReasonUnsupportedManifest, detail)
-			}
-			continue
+		if selection.consider(candidate, explicit, want) {
+			scannable++
 		}
-		scannable++
-		if explicit {
-			if candidate.Platform.Matches(want) {
-				selection.Selected = append(selection.Selected, candidate)
-			}
-			continue
-		}
-		if isDefaultPlatform(candidate.Platform) {
-			selection.Selected = append(selection.Selected, candidate)
-			continue
-		}
-		skip(candidate, SkipReasonPlatform, fmt.Sprintf("skipped platform %s: only %s manifests are selected without a platform selector", candidate.Platform.String(), DefaultPlatformOS))
 	}
 
 	if len(selection.Selected) == 0 {
-		switch {
-		case scannable == 0:
-			return Selection{}, fmt.Errorf("image index does not contain supported image manifests")
-		case explicit:
-			return Selection{}, fmt.Errorf("platform %s not found in manifest index", want.String())
-		default:
-			return Selection{}, fmt.Errorf("image index does not contain %s image manifests; select another platform explicitly", DefaultPlatformOS)
-		}
+		return Selection{}, emptySelectionError(scannable, explicit, want)
 	}
 
 	unique, err := uniqueDescriptors(selection.Selected)
@@ -339,6 +322,44 @@ func SelectManifests(index ImageIndex, selector string) (Selection, error) {
 	}
 	selection.Selected = unique
 	return selection, nil
+}
+
+// consider applies the platform policy to one index entry, appending it to
+// Selected or Skipped, and reports whether it is a scannable image manifest.
+func (s *Selection) consider(candidate Descriptor, explicit bool, want Platform) bool {
+	if detail, ok := unsupportedIndexEntryDetail(candidate); ok {
+		if !explicit || candidate.Platform.Matches(want) {
+			s.skip(candidate, SkipReasonUnsupportedManifest, detail)
+		}
+		return false
+	}
+	switch {
+	case explicit:
+		if candidate.Platform.Matches(want) {
+			s.Selected = append(s.Selected, candidate)
+		}
+	case isDefaultPlatform(candidate.Platform):
+		s.Selected = append(s.Selected, candidate)
+	default:
+		s.skip(candidate, SkipReasonPlatform, fmt.Sprintf("skipped platform %s: only %s manifests are selected without a platform selector", candidate.Platform.String(), DefaultPlatformOS))
+	}
+	return true
+}
+
+func (s *Selection) skip(descriptor Descriptor, reason SkipReason, detail string) {
+	s.Skipped = append(s.Skipped, SkippedDescriptor{Descriptor: descriptor, Reason: reason, Detail: detail})
+}
+
+// emptySelectionError explains why no image manifest was selected.
+func emptySelectionError(scannable int, explicit bool, want Platform) error {
+	switch {
+	case scannable == 0:
+		return fmt.Errorf("image index does not contain supported image manifests")
+	case explicit:
+		return fmt.Errorf("platform %s not found in manifest index", want.String())
+	default:
+		return fmt.Errorf("image index does not contain %s image manifests; select another platform explicitly", DefaultPlatformOS)
+	}
 }
 
 // SelectDescriptors returns only the selected descriptors of SelectManifests.

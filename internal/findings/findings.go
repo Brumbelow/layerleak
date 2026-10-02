@@ -598,6 +598,18 @@ func detailedFindingSnippetDedupKey(item DetailedFinding) snippetDedupKey {
 }
 
 func compareFindings(left, right Finding) int {
+	if value := compareFindingOrigin(left, right); value != 0 {
+		return value
+	}
+	if value := compareFindingPosition(left, right); value != 0 {
+		return value
+	}
+	return compareFindingContent(left, right)
+}
+
+// compareFindingOrigin orders by where a finding was reported: image,
+// platform, source, disposition, file, layer and detector.
+func compareFindingOrigin(left, right Finding) int {
 	if value := strings.Compare(left.ManifestDigest, right.ManifestDigest); value != 0 {
 		return value
 	}
@@ -616,9 +628,11 @@ func compareFindings(left, right Finding) int {
 	if value := strings.Compare(left.LayerDigest, right.LayerDigest); value != 0 {
 		return value
 	}
-	if value := strings.Compare(left.DetectorName, right.DetectorName); value != 0 {
-		return value
-	}
+	return strings.Compare(left.DetectorName, right.DetectorName)
+}
+
+// compareFindingPosition orders by line, fingerprint and match offsets.
+func compareFindingPosition(left, right Finding) int {
 	if left.LineNumber != right.LineNumber {
 		return left.LineNumber - right.LineNumber
 	}
@@ -630,9 +644,11 @@ func compareFindings(left, right Finding) int {
 	if left.MatchStart != right.MatchStart {
 		return left.MatchStart - right.MatchStart
 	}
-	if left.MatchEnd != right.MatchEnd {
-		return left.MatchEnd - right.MatchEnd
-	}
+	return left.MatchEnd - right.MatchEnd
+}
+
+// compareFindingContent breaks the remaining ties on the reported content.
+func compareFindingContent(left, right Finding) int {
 	if value := strings.Compare(left.Key, right.Key); value != 0 {
 		return value
 	}

@@ -108,3 +108,64 @@ func TestPublicFindingsNeverCarryTheRawValue(t *testing.T) {
 		t.Fatalf("only %d findings checked", checked)
 	}
 }
+
+// compareFindings orders by a fixed key sequence. For each key, two findings
+// that tie on every earlier key and differ on it must follow that key alone,
+// even when every later key points the other way.
+func TestCompareFindingsKeyPrecedence(t *testing.T) {
+	keys := []struct {
+		name string
+		set  func(item *Finding, high bool)
+	}{
+		{"manifest_digest", func(item *Finding, high bool) { item.ManifestDigest = pickOrder(high, "sha256:a", "sha256:b") }},
+		{"platform", func(item *Finding, high bool) {
+			item.Platform = manifest.Platform{OS: "linux", Architecture: pickOrder(high, "amd64", "arm64")}
+		}},
+		{"source_type", func(item *Finding, high bool) { item.SourceType = SourceType(pickOrder(high, "a", "b")) }},
+		{"disposition", func(item *Finding, high bool) { item.Disposition = Disposition(pickOrder(high, "a", "b")) }},
+		{"file_path", func(item *Finding, high bool) { item.FilePath = pickOrder(high, "a", "b") }},
+		{"layer_digest", func(item *Finding, high bool) { item.LayerDigest = pickOrder(high, "a", "b") }},
+		{"detector_name", func(item *Finding, high bool) { item.DetectorName = pickOrder(high, "a", "b") }},
+		{"line_number", func(item *Finding, high bool) { item.LineNumber = pickOrder(high, 1, 2) }},
+		{"fingerprint", func(item *Finding, high bool) { item.Fingerprint = pickOrder(high, "a", "b") }},
+		{"match_start", func(item *Finding, high bool) { item.MatchStart = pickOrder(high, 1, 2) }},
+		{"match_end", func(item *Finding, high bool) { item.MatchEnd = pickOrder(high, 1, 2) }},
+		{"key", func(item *Finding, high bool) { item.Key = pickOrder(high, "a", "b") }},
+		{"confidence", func(item *Finding, high bool) { item.Confidence = pickOrder(high, "a", "b") }},
+		{"disposition_reason", func(item *Finding, high bool) {
+			item.DispositionReason = DispositionReason(pickOrder(high, "a", "b"))
+		}},
+		{"redacted_value", func(item *Finding, high bool) { item.RedactedValue = pickOrder(high, "a", "b") }},
+		{"context_snippet", func(item *Finding, high bool) { item.ContextSnippet = pickOrder(high, "a", "b") }},
+		{"present_in_final_image", func(item *Finding, high bool) { item.PresentInFinalImage = high }},
+	}
+	for index, key := range keys {
+		var low, high Finding
+		for _, earlier := range keys[:index] {
+			earlier.set(&low, false)
+			earlier.set(&high, false)
+		}
+		key.set(&low, false)
+		key.set(&high, true)
+		for _, later := range keys[index+1:] {
+			later.set(&low, true)
+			later.set(&high, false)
+		}
+		if got := compareFindings(low, high); got >= 0 {
+			t.Errorf("%s: compareFindings(low, high) = %d, want < 0", key.name, got)
+		}
+		if got := compareFindings(high, low); got <= 0 {
+			t.Errorf("%s: compareFindings(high, low) = %d, want > 0", key.name, got)
+		}
+		if got := compareFindings(low, low); got != 0 {
+			t.Errorf("%s: compareFindings(low, low) = %d, want 0", key.name, got)
+		}
+	}
+}
+
+func pickOrder[T any](high bool, low, highValue T) T {
+	if high {
+		return highValue
+	}
+	return low
+}

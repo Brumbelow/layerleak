@@ -99,25 +99,48 @@ func classifySensitiveFile(filePath string) (string, Confidence, bool) {
 		return "", "", false
 	}
 	base := path.Base(normalized)
-	switch {
-	case sshPrivateKeyNameExpression.MatchString(base) && !strings.HasSuffix(base, ".pub"):
-		return sensitiveFilePrivateKey, ConfidenceMedium, true
-	case base == "secring.gpg", path.Base(path.Dir(normalized)) == "private-keys-v1.d" && strings.HasSuffix(base, ".key"):
-		return sensitiveFileGPGKeyring, ConfidenceMedium, true
-	case strings.HasSuffix(base, ".kdbx"):
-		return sensitiveFileKeePassVault, ConfidenceMedium, true
+	if kind, ok := classifyKeyMaterialFile(normalized, base); ok {
+		return kind, ConfidenceMedium, true
 	}
-	if _, ok := credentialStoreNames[base]; ok {
+	if isCredentialStoreFile(normalized, base) {
 		return sensitiveFileCredentialStore, ConfidenceMedium, true
-	}
-	for _, suffix := range credentialStoreSuffixes {
-		if normalized == suffix || strings.HasSuffix(normalized, "/"+suffix) {
-			return sensitiveFileCredentialStore, ConfidenceMedium, true
-		}
 	}
 	if strings.Contains(base, "trust") || base == "cacerts" {
 		return "", "", false
 	}
+	return classifyKeystoreFile(base)
+}
+
+// classifyKeyMaterialFile recognises private keys, GnuPG secret keyrings and
+// KeePass databases by name.
+func classifyKeyMaterialFile(normalized, base string) (string, bool) {
+	switch {
+	case sshPrivateKeyNameExpression.MatchString(base) && !strings.HasSuffix(base, ".pub"):
+		return sensitiveFilePrivateKey, true
+	case base == "secring.gpg", path.Base(path.Dir(normalized)) == "private-keys-v1.d" && strings.HasSuffix(base, ".key"):
+		return sensitiveFileGPGKeyring, true
+	case strings.HasSuffix(base, ".kdbx"):
+		return sensitiveFileKeePassVault, true
+	}
+	return "", false
+}
+
+// isCredentialStoreFile matches the credential store names and path suffixes.
+func isCredentialStoreFile(normalized, base string) bool {
+	if _, ok := credentialStoreNames[base]; ok {
+		return true
+	}
+	for _, suffix := range credentialStoreSuffixes {
+		if normalized == suffix || strings.HasSuffix(normalized, "/"+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyKeystoreFile rates PKCS#12 bundles medium and Java keystores low,
+// since the latter are as often truststores.
+func classifyKeystoreFile(base string) (string, Confidence, bool) {
 	switch path.Ext(base) {
 	case ".p12", ".pfx":
 		return sensitiveFileKeystore, ConfidenceMedium, true

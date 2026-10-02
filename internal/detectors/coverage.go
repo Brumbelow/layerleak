@@ -152,22 +152,11 @@ func (d pgpassDetector) Scan(input ScanInput) []Match {
 	}
 	matches := make([]Match, 0)
 	for _, line := range splitLinesWithOffsets(input.Content) {
-		trimmed := strings.TrimSpace(line.Value)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		start, ok := pgpassPasswordStart(line.Value)
+		start, end, ok := pgpassLinePasswordSpan(line.Value)
 		if !ok {
 			continue
 		}
-		end := len(strings.TrimRightFunc(line.Value, func(r rune) bool { return r == ' ' || r == '\t' || r == '\r' }))
-		if end <= start {
-			continue
-		}
 		password := line.Value[start:end]
-		if password == "*" || len(password) < 4 || !isPrintableText(password) {
-			continue
-		}
 		matches = append(matches, Match{
 			Detector:   d.Name(),
 			Value:      password,
@@ -178,6 +167,34 @@ func (d pgpassDetector) Scan(input ScanInput) []Match {
 		})
 	}
 	return matches
+}
+
+// pgpassLinePasswordSpan returns the password span within one pgpass line. It
+// skips blank lines and comments, the '*' wildcard and values too short or
+// not printable to be a literal password.
+func pgpassLinePasswordSpan(line string) (int, int, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return 0, 0, false
+	}
+	start, ok := pgpassPasswordStart(line)
+	if !ok {
+		return 0, 0, false
+	}
+	end := len(strings.TrimRightFunc(line, isPgpassTrailingSpace))
+	if end <= start {
+		return 0, 0, false
+	}
+	password := line[start:end]
+	if password == "*" || len(password) < 4 || !isPrintableText(password) {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// isPgpassTrailingSpace is the trailing whitespace trimmed from a password.
+func isPgpassTrailingSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\r'
 }
 
 // pgpassPasswordStart returns the offset of the fifth field, honouring

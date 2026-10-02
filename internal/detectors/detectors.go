@@ -294,11 +294,25 @@ func dropNestedLowerPriorityMatches(matches []Match) []Match {
 	if len(matches) < 2 {
 		return matches
 	}
+	dropped := make([]bool, len(matches))
+	markNestedLowerPriorityMatches(matches, outerSpansFirstOrder(matches), dropped)
+
+	result := make([]Match, 0, len(matches))
+	for index, match := range matches {
+		if !dropped[index] {
+			result = append(result, match)
+		}
+	}
+	return result
+}
+
+// outerSpansFirstOrder returns the match indexes ordered outer spans first: by
+// start, then by the longest end, then by priority.
+func outerSpansFirstOrder(matches []Match) []int {
 	order := make([]int, len(matches))
 	for index := range order {
 		order[index] = index
 	}
-	// Outer spans first: by start, then by the longest end, then by priority.
 	sort.SliceStable(order, func(i, j int) bool {
 		left, right := matches[order[i]], matches[order[j]]
 		if left.Start != right.Start {
@@ -309,37 +323,45 @@ func dropNestedLowerPriorityMatches(matches []Match) []Match {
 		}
 		return left.Priority > right.Priority
 	})
+	return order
+}
 
-	dropped := make([]bool, len(matches))
+// markNestedLowerPriorityMatches walks matches in order and sets dropped for
+// each match index that lies inside a still-open match of higher priority.
+func markNestedLowerPriorityMatches(matches []Match, order []int, dropped []bool) {
 	active := make([]int, 0, 4)
 	for _, index := range order {
 		match := matches[index]
-		kept := active[:0]
-		for _, candidate := range active {
-			if matches[candidate].End > match.Start {
-				kept = append(kept, candidate)
-			}
-		}
-		active = kept
-		for _, candidate := range active {
-			outer := matches[candidate]
-			if outer.Priority > match.Priority && outer.Start <= match.Start && outer.End >= match.End {
-				dropped[index] = true
-				break
-			}
-		}
+		active = activeMatchesEndingAfter(matches, active, match.Start)
+		dropped[index] = nestedInHigherPriorityMatch(matches, active, match)
 		if !dropped[index] {
 			active = append(active, index)
 		}
 	}
+}
 
-	result := make([]Match, 0, len(matches))
-	for index, match := range matches {
-		if !dropped[index] {
-			result = append(result, match)
+// activeMatchesEndingAfter filters active in place to the matches that end
+// after start.
+func activeMatchesEndingAfter(matches []Match, active []int, start int) []int {
+	kept := active[:0]
+	for _, candidate := range active {
+		if matches[candidate].End > start {
+			kept = append(kept, candidate)
 		}
 	}
-	return result
+	return kept
+}
+
+// nestedInHigherPriorityMatch reports whether match lies inside one of the
+// active matches with a higher priority.
+func nestedInHigherPriorityMatch(matches []Match, active []int, match Match) bool {
+	for _, candidate := range active {
+		outer := matches[candidate]
+		if outer.Priority > match.Priority && outer.Start <= match.Start && outer.End >= match.End {
+			return true
+		}
+	}
+	return false
 }
 
 type regexDetector struct {

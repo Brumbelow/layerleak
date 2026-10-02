@@ -1,7 +1,6 @@
 package detectors
 
 import (
-	"math/rand"
 	"regexp"
 	"strings"
 	"testing"
@@ -11,7 +10,7 @@ import (
 // replace on every input, so both are driven over random concatenations of
 // the pieces that make or break a match.
 func TestShapeScannersMatchTheirExpressions(t *testing.T) {
-	rng := rand.New(rand.NewSource(0x5A5A)) //nolint:gosec // deterministic test data
+	rng := newTestRand(0x5A5A)
 	alnum := func(length int) string {
 		const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		buffer := make([]byte, length)

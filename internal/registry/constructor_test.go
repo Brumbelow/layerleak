@@ -23,7 +23,9 @@ func TestNewClientReportsConfigurationErrorsEagerly(t *testing.T) {
 		{name: "invalid allowlist entry", options: Options{AllowedPrivateRegistryHosts: []string{"https://registry.internal"}}, wantErr: "invalid allowed private host"},
 		{name: "unbracketed ipv6 allowlist entry", options: Options{AllowedPrivateAuthHosts: []string{"2001:db8::1"}}, wantErr: "invalid allowed private host"},
 		{name: "custom round tripper without override", options: Options{HTTPClient: &http.Client{Transport: roundTripFunc(nil)}}, wantErr: "AllowPrivateHosts"},
-		{name: "insecure tls", options: Options{HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}}, wantErr: "verify TLS"},
+		// Deliberately insecure: the case proves NewClient refuses a transport
+		// that skips certificate verification.
+		{name: "insecure tls", options: Options{HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}}}, wantErr: "verify TLS"}, // nosemgrep
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

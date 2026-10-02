@@ -1,9 +1,4 @@
-package detectors
-
-// testAWSSecret is a synthetic 40-character AWS-secret-shaped value assembled
-// at run time so that no secret-shaped literal sits in the source tree where
-// push protection would flag it. Tests splice it into their inputs.
-var testAWSSecret = "wJalrXUtnFEMI/K7MDENG" + "/bPxRfiCYDkPqLmNsTu"
+package layers
 
 // testRand is a small deterministic generator (SplitMix64) for reproducible
 // test data. Tests use it instead of math/rand so that no pseudo-random
@@ -20,8 +15,8 @@ func (r *testRand) next() uint64 {
 	return z ^ (z >> 31)
 }
 
-// Intn returns a value in [0, n) and panics when n <= 0, like math/rand.
-func (r *testRand) Intn(n int) int {
+// IntN returns a value in [0, n) and panics when n <= 0, like math/rand.
+func (r *testRand) IntN(n int) int {
 	if n <= 0 {
 		panic("testRand: n must be positive")
 	}

@@ -1,7 +1,6 @@
 package detectors
 
 import (
-	"math/rand"
 	"reflect"
 	"regexp"
 	"strings"
@@ -67,7 +66,7 @@ func TestCompileRuleMatchesWordBoundarySemantics(t *testing.T) {
 		"1234567890:" + strings.Repeat("A", 35),
 	}
 	glue := []string{" ", "\"", "x", "_", "-", "=", "\n", "", "9", ":", "/"}
-	rng := rand.New(rand.NewSource(3)) //nolint:gosec // deterministic test data
+	rng := newTestRand(3)
 	for _, pattern := range patterns {
 		reference := regexp.MustCompile(pattern)
 		rule := compileRule(reference)
@@ -156,7 +155,7 @@ func TestAsciiLowerPreservesOffsets(t *testing.T) {
 }
 
 func TestContainsSecretKeywordMatchesTheKeywordExpression(t *testing.T) {
-	rng := rand.New(rand.NewSource(11)) //nolint:gosec // deterministic test data
+	rng := newTestRand(11)
 	fragments := []string{"secret", "token", "password", "passwd", "pwd", "api_key", "api-key", "apikey", "auth", "authorization",
 		"credential", "private_key", "private-key", "privatekey", "access_key", "access-key", "accesskey", "client_secret",
 		"image", "version", "name", "value", "sec", "tok", "key", "_", "-", " ", "=", "x9"}

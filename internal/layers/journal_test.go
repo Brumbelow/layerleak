@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"reflect"
 	"sort"
 	"strings"
@@ -95,7 +94,7 @@ func assertSnapshotEqual(t *testing.T, label string, state *State, want stateSna
 // randomLayerEntries draws a layer from a small path alphabet so overwrites,
 // file/directory transitions, hardlinks, whiteouts and opaque whiteouts hit
 // existing state often.
-func randomLayerEntries(random *rand.Rand, count int) []tarEntry {
+func randomLayerEntries(random *testRand, count int) []tarEntry {
 	names := []string{"a", "b", "c", "a/x", "a/y", "b/x", "a/x/deep", "c/d/e", "a/x/deep/f"}
 	entries := make([]tarEntry, 0, count)
 	for range count {
@@ -133,7 +132,7 @@ func TestReplayRollbackRestoresExactPreLayerState(t *testing.T) {
 	descriptor := manifest.Descriptor{Digest: "sha256:failing", MediaType: manifest.MediaTypeOCIImageLayer}
 	mutated := 0
 	for seed := range 300 {
-		random := rand.New(rand.NewPCG(uint64(seed), 7))
+		random := newTestRand(uint64(seed)<<8 | 7)
 		state := NewState()
 		for layer := range 1 + random.IntN(3) {
 			body := tarArchive(t, randomLayerEntries(random, 1+random.IntN(12)))

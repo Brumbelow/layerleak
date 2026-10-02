@@ -3,7 +3,6 @@ package detectors
 import (
 	"encoding/base64"
 	"encoding/json"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,7 +60,7 @@ func loadCorpusDocuments(tb testing.TB) []corpusDocument {
 // credential in it. Throughput on secret-free text is what dominates a scan
 // of a real image.
 func secretFreeText(size int) string {
-	rng := rand.New(rand.NewSource(0xBE11C4)) //nolint:gosec // deterministic benchmark input
+	rng := newTestRand(0xBE11C4)
 	words := strings.Fields("the quick brown fox jumps over the lazy dog while reading configuration " +
 		"files from the container image and writing structured logs to stdout for the collector " +
 		"service to forward downstream with retries backoff timeouts and metrics attached")

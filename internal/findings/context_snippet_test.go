@@ -1,7 +1,6 @@
 package findings
 
 import (
-	"math/rand"
 	"strings"
 	"testing"
 
@@ -88,7 +87,7 @@ func TestContextSnippetDoesNotOverRedactShortValues(t *testing.T) {
 }
 
 func TestContextSnippetRedactsRepeatsProperty(t *testing.T) {
-	rng := rand.New(rand.NewSource(0xC0FFEE)) //nolint:gosec // deterministic test data, not security material
+	rng := newTestRand(0xC0FFEE)
 	alphabet := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 	randomText := func(length int) string {
 		buffer := make([]byte, length)

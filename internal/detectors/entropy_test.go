@@ -2,18 +2,17 @@ package detectors
 
 import (
 	"fmt"
-	"math/rand"
 	"strings"
 	"testing"
 )
 
 const hexDigits = "0123456789abcdef"
 
-func newSeededRand(seed int64) *rand.Rand {
-	return rand.New(rand.NewSource(seed)) //nolint:gosec // deterministic fixtures, not security material
+func newSeededRand(seed int64) *testRand {
+	return newTestRand(uint64(seed)) //nolint:gosec // seeds are small positive literals
 }
 
-func randomHex(rng *rand.Rand, length int) string {
+func randomHex(rng *testRand, length int) string {
 	buffer := make([]byte, length)
 	for index := range buffer {
 		buffer[index] = hexDigits[rng.Intn(len(hexDigits))]
@@ -21,12 +20,12 @@ func randomHex(rng *rand.Rand, length int) string {
 	return string(buffer)
 }
 
-func randomUUID(rng *rand.Rand) string {
+func randomUUID(rng *testRand) string {
 	hex := randomHex(rng, 32)
 	return hex[:8] + "-" + hex[8:12] + "-" + hex[12:16] + "-" + hex[16:20] + "-" + hex[20:]
 }
 
-func detectionRate(t *testing.T, trials int, build func(rng *rand.Rand) (ScanInput, string)) float64 {
+func detectionRate(t *testing.T, trials int, build func(rng *testRand) (ScanInput, string)) float64 {
 	t.Helper()
 	set := Default()
 	rng := newSeededRand(0x0DE7EC7)
@@ -102,25 +101,25 @@ func TestPassesEntropyStillRejectsLowEntropyAndDigitOnlyValues(t *testing.T) {
 func TestKeywordEntropyFindsHexSecretsEndToEnd(t *testing.T) {
 	tests := []struct {
 		name  string
-		build func(rng *rand.Rand) (ScanInput, string)
+		build func(rng *testRand) (ScanInput, string)
 	}{
-		{name: "quoted hex32 client secret in .env", build: func(rng *rand.Rand) (ScanInput, string) {
+		{name: "quoted hex32 client secret in .env", build: func(rng *testRand) (ScanInput, string) {
 			secret := randomHex(rng, 32)
 			return ScanInput{Path: "/app/.env", Content: "CLIENT_SECRET=\"" + secret + "\"\n"}, secret
 		}},
-		{name: "unquoted hex32 datadog key in .env", build: func(rng *rand.Rand) (ScanInput, string) {
+		{name: "unquoted hex32 datadog key in .env", build: func(rng *testRand) (ScanInput, string) {
 			secret := randomHex(rng, 32)
 			return ScanInput{Path: "/app/.env", Content: "DD_API_KEY=" + secret + "\n"}, secret
 		}},
-		{name: "hex40 in yaml", build: func(rng *rand.Rand) (ScanInput, string) {
+		{name: "hex40 in yaml", build: func(rng *testRand) (ScanInput, string) {
 			secret := randomHex(rng, 40)
 			return ScanInput{Path: "/app/config.yaml", Content: "api_key: " + secret + "\n"}, secret
 		}},
-		{name: "uuid token", build: func(rng *rand.Rand) (ScanInput, string) {
+		{name: "uuid token", build: func(rng *testRand) (ScanInput, string) {
 			secret := randomUUID(rng)
 			return ScanInput{Path: "/app/config.yaml", Content: "postmark_token: " + secret + "\n"}, secret
 		}},
-		{name: "hex32 env source", build: func(rng *rand.Rand) (ScanInput, string) {
+		{name: "hex32 env source", build: func(rng *testRand) (ScanInput, string) {
 			secret := randomHex(rng, 32)
 			return ScanInput{Key: "MAILGUN_API_KEY", Content: "MAILGUN_API_KEY=" + secret}, secret
 		}},

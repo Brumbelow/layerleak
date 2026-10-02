@@ -1,7 +1,6 @@
 package findings
 
 import (
-	"math/rand"
 	"strings"
 	"testing"
 )
@@ -37,7 +36,7 @@ func TestRedactRevealsOnlyAShortPrefixOfLongValues(t *testing.T) {
 }
 
 func TestRedactNeverDisclosesLengthOrSuffix(t *testing.T) {
-	rng := rand.New(rand.NewSource(0x5eed)) //nolint:gosec // deterministic test data, not security material
+	rng := newTestRand(0x5eed)
 	alphabet := []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=_-.:@éü語")
 	for trial := 0; trial < 2000; trial++ {
 		length := 1 + rng.Intn(120)

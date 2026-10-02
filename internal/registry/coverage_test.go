@@ -55,7 +55,11 @@ func TestRedirectToNonPublicAddressIsRejectedBeforeDial(t *testing.T) {
 
 func TestRedirectDowngradeToHTTPIsRejected(t *testing.T) {
 	_, port, transport := newTLSRegistry(t, func(writer http.ResponseWriter, request *http.Request) {
-		http.Redirect(writer, request, "http://"+request.Host+"/v2/library/app/manifests/latest", http.StatusFound)
+		// The target is built from the listener's own port, never from request
+		// input: example.com resolves to this server in the test.
+		local, _ := request.Context().Value(http.LocalAddrContextKey).(net.Addr)
+		_, localPort, _ := net.SplitHostPort(local.String())
+		http.Redirect(writer, request, "http://example.com:"+localPort+"/v2/library/app/manifests/latest", http.StatusFound)
 	})
 	client := MustNewClient(Options{
 		BaseURL:                     "https://example.com:" + port,

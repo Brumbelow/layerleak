@@ -82,6 +82,7 @@ python3 -m venv .venv-docs
 .venv-docs/bin/python scripts/validate_schemas.py
 python3 -m unittest discover -s scripts/tests -v
 npm ci --prefix scripts/tests && npm test --prefix scripts/tests
+npm run lint:css --prefix scripts/tests
 LAYERLEAK_DB_PASSWORD=test docker compose config --quiet
 LAYERLEAK_DB_PASSWORD=test docker compose --profile tools config --quiet
 ```
@@ -93,7 +94,8 @@ fixtures against the OASIS 2.1.0 schema; `validate_schemas.py` checks the CLI
 golden fixtures and the documented API responses against the published JSON
 Schemas. `scripts/tests` holds the Python unit tests for the release
 preflight, container-platform and schema validators and the Playwright demo
-test.
+test; `npm run lint:css --prefix scripts/tests` lints `web/` stylesheets with
+stylelint-config-standard.
 
 Install smoke:
 

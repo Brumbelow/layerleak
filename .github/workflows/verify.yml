@@ -193,6 +193,9 @@ jobs:
       - name: Install browser test dependencies
         run: npm ci --prefix scripts/tests
 
+      - name: Lint the site stylesheet
+        run: npm run lint:css --prefix scripts/tests
+
       - name: Install test browser
         run: |
           # Playwright downloads Chromium itself; the runner's Chrome APT source is unrelated.

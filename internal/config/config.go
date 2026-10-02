@@ -423,21 +423,31 @@ func endpointURLFromEnv(key string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parse %s: endpoint url is invalid", key)
 	}
+	if err := validateEndpointURL(key, parsed); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// validateEndpointURL checks, in order, the scheme, the absolute form without
+// credentials or fragment, the hostname and the port of a parsed endpoint
+// override named by key.
+func validateEndpointURL(key string, parsed *url.URL) error {
 	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return "", fmt.Errorf("parse %s: endpoint url must use https or http", key)
+		return fmt.Errorf("parse %s: endpoint url must use https or http", key)
 	}
 	if parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-		return "", fmt.Errorf("parse %s: endpoint url must be absolute and must not include credentials or a fragment", key)
+		return fmt.Errorf("parse %s: endpoint url must be absolute and must not include credentials or a fragment", key)
 	}
 	if err := validateHostname(strings.ToLower(parsed.Hostname())); err != nil {
-		return "", fmt.Errorf("parse %s: %w", key, err)
+		return fmt.Errorf("parse %s: %w", key, err)
 	}
 	if port := parsed.Port(); port != "" {
 		if err := validatePort(port); err != nil {
-			return "", fmt.Errorf("parse %s: %w", key, err)
+			return fmt.Errorf("parse %s: %w", key, err)
 		}
 	}
-	return value, nil
+	return nil
 }
 
 // registryCredentialsFromEnv reads the optional RegistryUsername and

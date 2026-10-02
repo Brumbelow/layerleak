@@ -817,6 +817,32 @@ func TestLoadValidatesRegistryEndpointOverrides(t *testing.T) {
 	}
 }
 
+func TestEndpointURLFromEnvReportsEachCheckInOrder(t *testing.T) {
+	const key = "LAYERLEAK_REGISTRY_BASE_URL"
+	for value, want := range map[string]string{
+		"   ":                                    "",
+		"https://bad host/":                      "parse " + key + ": endpoint url is invalid",
+		"ftp://user@registry.internal":           "parse " + key + ": endpoint url must use https or http",
+		"https://user@registry_internal":         "parse " + key + ": endpoint url must be absolute and must not include credentials or a fragment",
+		"https://registry_internal:0":            "parse " + key + ": hostname contains an invalid character",
+		"https://-registry.internal:5000":        "parse " + key + ": hostname labels must not start or end with a hyphen",
+		"https://registry.internal:0":            "parse " + key + ": port must be between 1 and 65535",
+		"  https://REGISTRY.internal:5000/v2/  ": "",
+	} {
+		t.Setenv(key, value)
+		got, err := endpointURLFromEnv(key)
+		if want == "" {
+			if err != nil || got != strings.TrimSpace(value) {
+				t.Fatalf("endpointURLFromEnv(%q) = %q, %v", value, got, err)
+			}
+			continue
+		}
+		if err == nil || err.Error() != want || got != "" {
+			t.Fatalf("endpointURLFromEnv(%q) = %q, %v; want error %q", value, got, err, want)
+		}
+	}
+}
+
 func TestLoadRegistryCredentials(t *testing.T) {
 	const password = "synthetic-password-not-real-0001"
 	t.Run("pair", func(t *testing.T) {

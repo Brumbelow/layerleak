@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -60,6 +61,38 @@ func TestZipDirectoryEntriesSearchesLikeArchiveZip(t *testing.T) {
 	}
 	if _, ok := zipDirectoryEntries(content); ok {
 		t.Fatal("zipDirectoryEntries located an end record archive/zip does not use")
+	}
+}
+
+// TestZipDirectoryEntriesZip64Declarations covers the zip64 end records that
+// settle the result on their own: an entry count beyond the content (capped
+// to an int64) is taken as declared, and a directory larger than the content
+// or an offset that does not fit an int64 is refused as archive/zip refuses it.
+func TestZipDirectoryEntriesZip64Declarations(t *testing.T) {
+	archive := storedZipArchive(t, 3)
+	end := zipDirectoryEnd(t, archive)
+	tests := []struct {
+		name        string
+		field       int
+		value       uint64
+		wantEntries int64
+		wantOK      bool
+	}{
+		{name: "declared entries beyond the content", field: zipDirectory64Records, value: 1 << 20, wantEntries: 1 << 20, wantOK: true},
+		{name: "declared entries beyond int64", field: zipDirectory64Records, value: 1<<63 + 1, wantEntries: math.MaxInt64, wantOK: true},
+		{name: "directory larger than the content", field: zipDirectory64Size, value: 1 << 20, wantEntries: 0, wantOK: false},
+		{name: "offset beyond int64", field: zipDirectory64Offset, value: 1<<63 + 1, wantEntries: 0, wantOK: false},
+		{name: "consistent record counts the directory", field: zipDirectory64Records, value: 3, wantEntries: 3, wantOK: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			content := zip64Archive(t, archive, 3)
+			binary.LittleEndian.PutUint64(content[end+test.field:], test.value)
+			entries, ok := zipDirectoryEntries(content)
+			if entries != test.wantEntries || ok != test.wantOK {
+				t.Fatalf("zipDirectoryEntries() = %d, %t, want %d, %t", entries, ok, test.wantEntries, test.wantOK)
+			}
+		})
 	}
 }
 

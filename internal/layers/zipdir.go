@@ -42,45 +42,80 @@ const (
 // search window, a comment running past the end, a zip64 directory larger
 // than the content); callers refuse such content rather than parse it.
 func zipDirectoryEntries(content []byte) (entries int64, ok bool) {
-	size := int64(len(content))
 	end := zipFindDirectoryEnd(content)
 	if end < 0 {
 		return 0, false
 	}
-	records := int64(binary.LittleEndian.Uint16(content[end+zipDirectoryEndRecords:]))
-	directorySize := int64(binary.LittleEndian.Uint32(content[end+zipDirectoryEndSize:]))
-	directoryOffset := int64(binary.LittleEndian.Uint32(content[end+zipDirectoryEndOffset:]))
-	directoryEnd := int64(end)
-	if records == 0xffff || directorySize == 0xffffffff || directoryOffset == 0xffffffff {
-		end64, found := zipFindDirectory64End(content, end)
-		if found {
-			directoryEnd = int64(end64)
-			records64 := binary.LittleEndian.Uint64(content[end64+zipDirectory64Records:])
-			size64 := binary.LittleEndian.Uint64(content[end64+zipDirectory64Size:])
-			offset64 := binary.LittleEndian.Uint64(content[end64+zipDirectory64Offset:])
-			if records64 > uint64(size) {
-				// More entries than bytes: the directory cannot hold them, so
-				// the declaration alone decides (capped to stay an int64).
-				if records64 > math.MaxInt64 {
-					return math.MaxInt64, true
-				}
-				return int64(records64), true
-			}
-			if size64 > uint64(size) || offset64 > math.MaxInt64 {
-				// archive/zip rejects both: the directory would start before
-				// the content, or its offset does not fit an int64. An offset
-				// past the end is not rejected (the reader then reads the
-				// directory from end64-size64), so it is not refused here.
-				return 0, false
-			}
-			records, directorySize, directoryOffset = int64(records64), int64(size64), int64(offset64) //nolint:gosec // records64 and size64 are at most len(content) and offset64 at most MaxInt64, checked above
+	directory := zipReadDirectoryEnd(content, end)
+	if directory.records == 0xffff || directory.size == 0xffffffff || directory.offset == 0xffffffff {
+		declared, valid, decided := directory.applyZip64(content, end)
+		if decided {
+			return declared, valid
 		}
 	}
-	// archive/zip reads the directory from directoryEnd-directorySize, or from
-	// directoryOffset when a header is found there; count from both so the
-	// result bounds either choice.
-	entries = records
-	for _, start := range []int64{directoryEnd - directorySize, directoryOffset} {
+	return directory.countEntries(content), true
+}
+
+// zipDirectory is the central directory geometry an end record declares:
+// the entry count, the directory's size and offset, and where the record
+// that declares them starts.
+type zipDirectory struct {
+	records int64
+	size    int64
+	offset  int64
+	end     int64
+}
+
+// zipReadDirectoryEnd reads the geometry the end record at end declares.
+func zipReadDirectoryEnd(content []byte, end int) zipDirectory {
+	return zipDirectory{
+		records: int64(binary.LittleEndian.Uint16(content[end+zipDirectoryEndRecords:])),
+		size:    int64(binary.LittleEndian.Uint32(content[end+zipDirectoryEndSize:])),
+		offset:  int64(binary.LittleEndian.Uint32(content[end+zipDirectoryEndOffset:])),
+		end:     int64(end),
+	}
+}
+
+// applyZip64 replaces the geometry with the zip64 end record's, when the
+// locator before the end record at end leads to one. decided is true when
+// the zip64 record alone settles zipDirectoryEntries' result (entries, ok).
+func (d *zipDirectory) applyZip64(content []byte, end int) (entries int64, ok, decided bool) {
+	end64, found := zipFindDirectory64End(content, end)
+	if !found {
+		return 0, false, false
+	}
+	size := int64(len(content))
+	d.end = int64(end64)
+	records64 := binary.LittleEndian.Uint64(content[end64+zipDirectory64Records:])
+	size64 := binary.LittleEndian.Uint64(content[end64+zipDirectory64Size:])
+	offset64 := binary.LittleEndian.Uint64(content[end64+zipDirectory64Offset:])
+	if records64 > uint64(size) {
+		// More entries than bytes: the directory cannot hold them, so
+		// the declaration alone decides (capped to stay an int64).
+		if records64 > math.MaxInt64 {
+			return math.MaxInt64, true, true
+		}
+		return int64(records64), true, true
+	}
+	if size64 > uint64(size) || offset64 > math.MaxInt64 {
+		// archive/zip rejects both: the directory would start before
+		// the content, or its offset does not fit an int64. An offset
+		// past the end is not rejected (the reader then reads the
+		// directory from end64-size64), so it is not refused here.
+		return 0, false, true
+	}
+	d.records, d.size, d.offset = int64(records64), int64(size64), int64(offset64) //nolint:gosec // records64 and size64 are at most len(content) and offset64 at most MaxInt64, checked above
+	return 0, false, false
+}
+
+// countEntries is the larger of the declared entry count and the headers
+// the directory region holds. archive/zip reads the directory from
+// end-size, or from offset when a header is found there; count from both so
+// the result bounds either choice.
+func (d zipDirectory) countEntries(content []byte) int64 {
+	size := int64(len(content))
+	entries := d.records
+	for _, start := range []int64{d.end - d.size, d.offset} {
 		if start < 0 || start >= size {
 			continue
 		}
@@ -88,7 +123,7 @@ func zipDirectoryEntries(content []byte) (entries int64, ok bool) {
 			entries = counted
 		}
 	}
-	return entries, true
+	return entries
 }
 
 // zipFindDirectoryEnd returns the offset of the end-of-central-directory

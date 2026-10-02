@@ -22,16 +22,11 @@ jobs:
 
     strategy:
       fail-fast: false
+      # Keep language as the only matrix key: CodeQL derives each analysis
+      # category from the workflow, job and matrix values, and main's Go alerts
+      # are tracked under ".github/workflows/codeql-analysis.yml:analyze/language:go".
       matrix:
-        include:
-          - language: actions
-            build-mode: none
-          - language: go
-            build-mode: autobuild
-          - language: javascript-typescript
-            build-mode: none
-          - language: python
-            build-mode: none
+        language: [ 'actions', 'go', 'javascript-typescript', 'python' ]
 
     steps:
     - name: Checkout repository
@@ -50,10 +45,8 @@ jobs:
       uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
       with:
         languages: ${{ matrix.language }}
-        build-mode: ${{ matrix.build-mode }}
+        build-mode: ${{ matrix.language == 'go' && 'autobuild' || 'none' }}
         queries: security-extended
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
-      with:
-        category: "/language:${{ matrix.language }}"

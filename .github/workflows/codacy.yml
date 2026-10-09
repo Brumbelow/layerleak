@@ -112,7 +112,7 @@ jobs:
           echo "chunks=${chunks}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload SARIF results (chunk 1)
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         if: steps.sarif.outputs.chunks >= 1
         with:
           sarif_file: sarif-chunks/codacy-1.sarif
@@ -120,7 +120,7 @@ jobs:
           wait-for-processing: true
 
       - name: Upload SARIF results (chunk 2)
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         if: steps.sarif.outputs.chunks >= 2
         with:
           sarif_file: sarif-chunks/codacy-2.sarif
@@ -128,7 +128,7 @@ jobs:
           wait-for-processing: true
 
       - name: Upload SARIF results (chunk 3)
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         if: steps.sarif.outputs.chunks >= 3
         with:
           sarif_file: sarif-chunks/codacy-3.sarif

@@ -2,7 +2,7 @@
 # updates remain reviewable. No `# syntax=` directive: the digest-pinned BuildKit
 # used by the release workflow supplies the Dockerfile frontend, so no floating
 # frontend image is fetched at build time.
-FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS build
 
 WORKDIR /src
 
